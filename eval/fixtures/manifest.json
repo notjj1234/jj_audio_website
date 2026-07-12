@@ -1,0 +1,23 @@
+[
+  {
+    "id": "solo_melody",
+    "category": "monophonic",
+    "midi": "fixtures/solo_melody.mid",
+    "wav": "fixtures/solo_melody.wav",
+    "note_count": 14
+  },
+  {
+    "id": "arpeggio",
+    "category": "fingerpicked",
+    "midi": "fixtures/arpeggio.mid",
+    "wav": "fixtures/arpeggio.wav",
+    "note_count": 12
+  },
+  {
+    "id": "chords",
+    "category": "polyphonic",
+    "midi": "fixtures/chords.mid",
+    "wav": "fixtures/chords.wav",
+    "note_count": 12
+  }
+]

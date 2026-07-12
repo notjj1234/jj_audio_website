@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "audio-to-tab-pdf"
+version = "0.1.0"
+description = "Convert audio to guitar tab PDF using free/open-source tools"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "basic-pitch[onnx]>=0.3.0",
+    "setuptools>=68,<81",
+    "pretty_midi>=0.2.10",
+    "numpy>=1.24",
+    "librosa>=0.10",
+    "soundfile>=0.12",
+    "reportlab>=4.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "yt-dlp>=2024.1",
+    "streamlit>=1.32",
+]
+
+[project.optional-dependencies]
+demucs = ["demucs>=4.0", "torch>=2.0", "torchaudio>=2.0", "torchcodec>=0.14,<0.15"]
+eval = ["mir_eval>=0.7", "scipy>=1.10"]
+dev = ["pytest>=7.0", "ruff>=0.3", "httpx>=0.27"]
+
+[project.scripts]
+audio-transcribe = "audio_to_tab.cli.transcribe:main"
+audio-mid2tab = "audio_to_tab.cli.mid2tab:main"
+audio-tab2pdf = "audio_to_tab.cli.tab2pdf:main"
+audio-pipeline = "audio_to_tab.cli.pipeline:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

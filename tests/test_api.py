@@ -1,0 +1,63 @@
+"""API smoke tests."""
+
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+pytest.importorskip("fastapi")
+
+from backend.main import app  # noqa: E402
+
+
+@pytest.fixture
+def client():
+    return TestClient(app)
+
+
+def test_health(client):
+    res = client.get("/v1/health")
+    assert res.status_code == 200
+    assert res.json()["status"] == "ok"
+
+
+def test_upload_and_job(client, tmp_path, monkeypatch):
+    midi = Path("eval/fixtures/solo_melody.mid")
+    if not midi.exists():
+        pytest.skip("fixtures missing")
+
+    # Patch data dir for test isolation
+    from backend import main as main_mod
+
+    monkeypatch.setattr(main_mod, "data_dir", tmp_path)
+    monkeypatch.setattr(main_mod.job_manager, "data_dir", tmp_path)
+    monkeypatch.setattr(main_mod.job_manager, "uploads_dir", tmp_path / "uploads")
+    monkeypatch.setattr(main_mod.job_manager, "jobs_dir", tmp_path / "jobs")
+    main_mod.job_manager.uploads_dir.mkdir(parents=True, exist_ok=True)
+    main_mod.job_manager.jobs_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(midi.parent / "solo_melody.wav", "rb") as f:
+        upload = client.post(
+            "/v1/uploads/audio",
+            files={"file": ("solo_melody.wav", f, "audio/wav")},
+        )
+    assert upload.status_code == 200
+    upload_id = upload.json()["upload_id"]
+
+    job = client.post(
+        "/v1/jobs",
+        json={"upload_id": upload_id, "separate_stems": False, "max_duration_sec": 15},
+    )
+    assert job.status_code == 200
+    job_id = job.json()["id"]
+
+    import time
+
+    for _ in range(120):
+        status = client.get(f"/v1/jobs/{job_id}").json()
+        if status["status"] in ("succeeded", "failed"):
+            break
+        time.sleep(0.5)
+
+    assert status["status"] == "succeeded", status.get("error")
+    assert "pdf" in status["artifacts"]
