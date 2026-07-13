@@ -16,22 +16,46 @@ Audio / YouTube → [Demucs guitar stem] → Basic Pitch → MIDI cleanup → Fr
 - ffmpeg (`brew install ffmpeg` / `apt install ffmpeg`)
 - Optional: fluidsynth (for eval fixture WAV synthesis)
 
-## Quick start
+## Quick start (Windows)
+
+```powershell
+# One-time: Python 3.11 from https://www.python.org/downloads/ (not 3.13)
+# One-time: FFmpeg full/shared build on PATH, e.g.  winget install Gyan.FFmpeg
+
+# Install app deps (includes Demucs + PyTorch; first run ~2GB download)
+.\scripts\dev.ps1 install
+
+# Launch web UI
+.\scripts\dev.ps1 ui
+# Opens http://localhost:8501
+```
+
+In **Cursor**: `Ctrl+Shift+P` → **Tasks: Run Task** → **ui**.
+
+If PowerShell blocks the script: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
+
+## Quick start (macOS / Linux)
 
 ```bash
-# Install (includes Demucs + PyTorch for stem separation; first run ~2GB download)
+# One-time OS deps (macOS)
+xcode-select --install          # provides `make` (skip if already installed)
+brew install python@3.11 ffmpeg
+
+# Install app deps (includes Demucs + PyTorch; first run ~2GB download)
 make install
+# If `make` is unavailable:  chmod +x scripts/dev.sh && ./scripts/dev.sh install
 
 # Launch web UI
 make ui
+# Or: ./scripts/dev.sh ui
 # Opens http://localhost:8501
 ```
 
 For solo guitar uploads, turn off **Separate guitar stem (Demucs)** in the UI for faster processing. For full songs, leave it on (default when Demucs is installed).
 
-If you installed before Demucs was bundled, run `make install-demucs` once to add it to an existing venv.
+If you installed before Demucs was bundled, run `make install-demucs` / `.\scripts\dev.ps1 install-demucs` / `./scripts/dev.sh install-demucs` once to add it to an existing venv.
 
-Demucs stem separation also requires **FFmpeg with shared libraries** (the default Homebrew/conda builds work; Windows users need a "shared" FFmpeg build, not essentials-only).
+Demucs stem separation also requires **FFmpeg with shared libraries** (Homebrew/conda defaults work; on Windows use a "full/shared" build such as Gyan.FFmpeg, not essentials-only).
 
 ```bash
 # Generate test fixtures
@@ -57,6 +81,7 @@ For programmatic access or CI, start the FastAPI server separately:
 
 ```bash
 make backend
+# Windows: .\scripts\dev.ps1 backend
 # OpenAPI: http://localhost:8000/docs
 ```
 

@@ -1,0 +1,63 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "install",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File scripts/dev.ps1 install",
+      "windows": {
+        "command": "powershell -ExecutionPolicy Bypass -File scripts/dev.ps1 install"
+      },
+      "linux": {
+        "command": "make install || ./scripts/dev.sh install"
+      },
+      "osx": {
+        "command": "make install || ./scripts/dev.sh install"
+      },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "ui",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File scripts/dev.ps1 ui",
+      "windows": {
+        "command": "powershell -ExecutionPolicy Bypass -File scripts/dev.ps1 ui"
+      },
+      "linux": {
+        "command": "make ui || ./scripts/dev.sh ui"
+      },
+      "osx": {
+        "command": "make ui || ./scripts/dev.sh ui"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "backend",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File scripts/dev.ps1 backend",
+      "windows": {
+        "command": "powershell -ExecutionPolicy Bypass -File scripts/dev.ps1 backend"
+      },
+      "linux": {
+        "command": "make backend || ./scripts/dev.sh backend"
+      },
+      "osx": {
+        "command": "make backend || ./scripts/dev.sh backend"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    }
+  ]
+}

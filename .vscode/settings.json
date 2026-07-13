@@ -1,4 +1,10 @@
 {
   "python.analysis.extraPaths": ["src"],
-  "python.defaultInterpreterPath": "${workspaceFolder}/.venv311/bin/python"
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv311/Scripts/python.exe",
+  "[linux]": {
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv311/bin/python"
+  },
+  "[osx]": {
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv311/bin/python"
+  }
 }
