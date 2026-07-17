@@ -1,14 +1,39 @@
-# Audio to Tab PDF
+# Audio Tools (Tab PDF + Isolation)
 
-Convert MP3/WAV files or YouTube links into **draft** guitar tablature PDFs using free/open-source tools.
+Two Streamlit features (sidebar navigation):
 
-> **Quality expectation:** Best on solo acoustic guitar. Output is a starting sketch, not a finished transcription.
+1. **Audio → Guitar Tab PDF** — convert MP3/WAV or YouTube links into **draft** guitar tablature PDFs using free/open-source tools.
+2. **Audio Isolation** — Moises-style multi-stem split (Demucs): download vocals, drums, bass, guitar, piano, other as WAVs.
 
-## Pipeline
+> **Tab quality expectation:** Best on solo acoustic guitar. Output is a starting sketch, not a finished transcription.
+
+## Pipeline (Tab PDF)
 
 ```
 Audio / YouTube → [Demucs guitar stem] → Basic Pitch → MIDI cleanup → Fret assignment → PDF
 ```
+
+## Audio Isolation
+
+Standalone stem separation (does not run transcription). Uses the same Demucs install as the tab pipeline.
+
+| Model | Stems |
+|-------|--------|
+| `htdemucs_6s` (default) | drums, bass, other, vocals, guitar, piano |
+| `htdemucs` / `htdemucs_ft` | drums, bass, other, vocals |
+
+**Caveats:** CPU separation is slow (~track length or longer; higher quality presets multiply time). On `htdemucs_6s`, piano often has bleeding/artifacts. First run downloads model weights (large).
+
+```bash
+# CLI
+export PYTHONPATH=src
+audio-isolate --audio song.wav --output ./output/stems --model htdemucs_6s --quality fast --dual-guitar
+
+# Or via module if console script not installed
+python -m audio_to_tab.cli.isolate --audio song.wav --output ./output/stems
+```
+
+In the web UI (`make ui`), open **Audio Isolation** from the sidebar. After separation, use the **stem board** to preview waveforms, mute/solo stems, and play a heard mix. Optional **dual-guitar split** (experimental, `htdemucs_6s` only) attempts Guitar 1 / Guitar 2 when the guitar stem has distinct stereo content.
 
 ## Requirements
 
@@ -88,10 +113,12 @@ make backend
 | Endpoint | Description |
 |----------|-------------|
 | `POST /v1/uploads/audio` | Upload MP3/WAV |
-| `POST /v1/jobs` | Start pipeline job |
-| `GET /v1/jobs/{id}` | Poll status |
+| `POST /v1/jobs` | Start tab pipeline job |
+| `POST /v1/isolate/jobs` | Start multi-stem isolation job |
+| `GET /v1/jobs/{id}` | Poll status (tab or isolate) |
 | `WS /v1/jobs/{id}/ws` | Live progress |
-| `GET /v1/artifacts/{id}/pdf` | Download PDF |
+| `GET /v1/artifacts/{id}/pdf` | Download tab PDF |
+| `GET /v1/artifacts/{id}/{stem}` | Download isolate stem (e.g. `vocals`) or `zip` |
 
 ## Demucs (full mixes)
 

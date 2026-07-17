@@ -9,11 +9,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from backend.config import settings
-from backend.contracts import JobCreateRequest, JobResponse, JobStatus, UploadResponse
+from backend.contracts import (
+    IsolateJobCreateRequest,
+    JobCreateRequest,
+    JobResponse,
+    JobStatus,
+    UploadResponse,
+)
 from backend.jobs.manager import JobManager
-from backend.jobs.runner import run_job_async
+from backend.jobs.runner import run_isolate_job_async, run_job_async
+from audio_to_tab.isolate import SUPPORTED_MODELS
 
-app = FastAPI(title="Audio to Tab PDF", version="0.1.0")
+app = FastAPI(title="Audio Tools API", version="0.2.0")
 
 origins = ["*"] if settings.cors_origins == "*" else settings.cors_origins.split(",")
 app.add_middleware(
@@ -26,6 +33,18 @@ app.add_middleware(
 
 data_dir = Path(settings.data_dir)
 job_manager = JobManager(data_dir)
+
+
+def _job_response(job) -> JobResponse:
+    return JobResponse(
+        id=job.id,
+        status=job.status,
+        kind=job.kind,
+        stage=job.stage,
+        message=job.message,
+        error=job.error,
+        artifacts=job.artifacts,
+    )
 
 
 @app.get("/v1/health")
@@ -57,7 +76,33 @@ async def create_job(body: JobCreateRequest, background_tasks: BackgroundTasks) 
         frame_threshold=body.frame_threshold,
     )
     background_tasks.add_task(run_job_async, job_manager, job.id)
-    return JobResponse(id=job.id, status=JobStatus.pending)
+    return _job_response(job)
+
+
+@app.post("/v1/isolate/jobs", response_model=JobResponse)
+async def create_isolate_job(
+    body: IsolateJobCreateRequest, background_tasks: BackgroundTasks
+) -> JobResponse:
+    if body.model not in SUPPORTED_MODELS:
+        raise HTTPException(400, f"Unsupported model. Choose from: {', '.join(SUPPORTED_MODELS)}")
+    if body.quality not in ("fast", "balanced", "high", "extreme"):
+        raise HTTPException(400, "quality must be fast|balanced|high|extreme")
+
+    try:
+        job = job_manager.create_isolate_job(
+            upload_id=body.upload_id,
+            model=body.model,
+            quality=body.quality,
+            device=body.device,
+            max_duration_sec=body.max_duration_sec,
+            two_stems=body.two_stems,
+            dual_guitar=body.dual_guitar,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from None
+
+    background_tasks.add_task(run_isolate_job_async, job_manager, job.id)
+    return _job_response(job)
 
 
 @app.get("/v1/jobs/{job_id}", response_model=JobResponse)
@@ -65,14 +110,7 @@ def get_job(job_id: str) -> JobResponse:
     job = job_manager.get(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
-    return JobResponse(
-        id=job.id,
-        status=job.status,
-        stage=job.stage,
-        message=job.message,
-        error=job.error,
-        artifacts=job.artifacts,
-    )
+    return _job_response(job)
 
 
 @app.get("/v1/artifacts/{job_id}/{kind}")
@@ -86,7 +124,27 @@ def get_artifact(job_id: str, kind: str):
     path = Path(path_str)
     if not path.exists():
         raise HTTPException(404, "Artifact file missing")
-    media = {"pdf": "application/pdf", "midi": "audio/midi", "tab": "text/plain", "guitar_stem": "audio/wav"}
+    media = {
+        "pdf": "application/pdf",
+        "midi": "audio/midi",
+        "tab": "text/plain",
+        "guitar_stem": "audio/wav",
+        "zip": "application/zip",
+        "vocals": "audio/wav",
+        "drums": "audio/wav",
+        "bass": "audio/wav",
+        "other": "audio/wav",
+        "guitar": "audio/wav",
+        "guitar1": "audio/wav",
+        "guitar2": "audio/wav",
+        "piano": "audio/wav",
+        "no_vocals": "audio/wav",
+        "no_drums": "audio/wav",
+        "no_bass": "audio/wav",
+        "no_other": "audio/wav",
+        "no_guitar": "audio/wav",
+        "no_piano": "audio/wav",
+    }
     return FileResponse(path, media_type=media.get(kind, "application/octet-stream"), filename=path.name)
 
 
@@ -105,6 +163,7 @@ async def job_ws(websocket: WebSocket, job_id: str) -> None:
                 "stage": job.stage,
                 "message": job.message,
                 "status": job.status.value,
+                "kind": job.kind.value,
                 "artifacts": job.artifacts,
             }
         )

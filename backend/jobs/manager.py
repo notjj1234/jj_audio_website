@@ -6,14 +6,14 @@ import asyncio
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
-from backend.contracts import JobEvent, JobStatus
+from backend.contracts import JobEvent, JobKind, JobStatus
 
 
 @dataclass
 class JobRecord:
     id: str
+    kind: JobKind = JobKind.tab
     status: JobStatus = JobStatus.pending
     stage: str = "pending"
     message: str = ""
@@ -28,6 +28,12 @@ class JobRecord:
     tempo_bpm_override: float | None = None
     onset_threshold: float = 0.5
     frame_threshold: float = 0.3
+    # Isolation-specific
+    isolate_model: str = "htdemucs_6s"
+    isolate_quality: str = "balanced"
+    isolate_device: str = "cpu"
+    isolate_two_stems: str | None = None
+    isolate_dual_guitar: bool = False
     subscribers: list[asyncio.Queue] = field(default_factory=list)
 
 
@@ -47,6 +53,12 @@ class JobManager:
         dest.write_bytes(content)
         return upload_id, dest
 
+    def _resolve_upload_path(self, upload_id: str | None, upload_path: Path | None) -> Path | None:
+        if upload_id and not upload_path:
+            candidates = list((self.uploads_dir / upload_id).iterdir())
+            return candidates[0] if candidates else None
+        return upload_path
+
     def create_job(
         self,
         *,
@@ -62,13 +74,12 @@ class JobManager:
         frame_threshold: float = 0.3,
     ) -> JobRecord:
         job_id = str(uuid.uuid4())
-        if upload_id and not upload_path:
-            candidates = list((self.uploads_dir / upload_id).iterdir())
-            upload_path = candidates[0] if candidates else None
+        resolved = self._resolve_upload_path(upload_id, upload_path)
 
         job = JobRecord(
             id=job_id,
-            upload_path=str(upload_path) if upload_path else None,
+            kind=JobKind.tab,
+            upload_path=str(resolved) if resolved else None,
             youtube_url=youtube_url,
             title=title,
             separate_stems=separate_stems,
@@ -77,6 +88,37 @@ class JobManager:
             tempo_bpm_override=tempo_bpm_override,
             onset_threshold=onset_threshold,
             frame_threshold=frame_threshold,
+        )
+        self._jobs[job_id] = job
+        (self.jobs_dir / job_id).mkdir(parents=True, exist_ok=True)
+        return job
+
+    def create_isolate_job(
+        self,
+        *,
+        upload_id: str,
+        model: str = "htdemucs_6s",
+        quality: str = "balanced",
+        device: str = "cpu",
+        max_duration_sec: float = 90.0,
+        two_stems: str | None = None,
+        dual_guitar: bool = False,
+    ) -> JobRecord:
+        job_id = str(uuid.uuid4())
+        resolved = self._resolve_upload_path(upload_id, None)
+        if not resolved:
+            raise FileNotFoundError(f"Upload not found: {upload_id}")
+
+        job = JobRecord(
+            id=job_id,
+            kind=JobKind.isolate,
+            upload_path=str(resolved),
+            max_duration_sec=max_duration_sec,
+            isolate_model=model,
+            isolate_quality=quality,
+            isolate_device=device,
+            isolate_two_stems=two_stems,
+            isolate_dual_guitar=dual_guitar,
         )
         self._jobs[job_id] = job
         (self.jobs_dir / job_id).mkdir(parents=True, exist_ok=True)

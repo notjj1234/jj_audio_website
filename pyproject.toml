@@ -35,6 +35,7 @@ audio-transcribe = "audio_to_tab.cli.transcribe:main"
 audio-mid2tab = "audio_to_tab.cli.mid2tab:main"
 audio-tab2pdf = "audio_to_tab.cli.tab2pdf:main"
 audio-pipeline = "audio_to_tab.cli.pipeline:main"
+audio-isolate = "audio_to_tab.cli.isolate:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

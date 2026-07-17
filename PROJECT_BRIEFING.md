@@ -2,7 +2,7 @@
 
 ## 1. One-paragraph summary
 
-**audio-to-tab-pdf** (v0.1.0, MIT) converts local audio (MP3/WAV/FLAC/M4A) or YouTube URLs into draft guitar tablature PDFs using free/open-source tools. Pipeline: ingest → optional Demucs guitar stem → Basic Pitch transcription → MIDI cleanup → fret assignment → structured PDF. Best on solo acoustic guitar; full mixes need Demucs. Output is a starting sketch — no bends/slides/hammer-ons, standard tuning only, ghost notes possible. Primary UX is Streamlit (`make ui`); optional FastAPI job API (`make backend`); CLI entry points via setuptools scripts.
+**audio-to-tab-pdf** (v0.1.0, MIT) converts local audio (MP3/WAV/FLAC/M4A) or YouTube URLs into draft guitar tablature PDFs using free/open-source tools. Pipeline: ingest → optional Demucs guitar stem → Basic Pitch transcription → MIDI cleanup → fret assignment → structured PDF. Best on solo acoustic guitar; full mixes need Demucs. Output is a starting sketch — no bends/slides/hammer-ons, standard tuning only, ghost notes possible. Also ships a standalone **Audio Isolation** feature (Demucs multi-stem: vocals/drums/bass/guitar/piano/other) via Streamlit sidebar page, `audio-isolate` CLI, and `POST /v1/isolate/jobs`. Primary UX is Streamlit multipage (`make ui`); optional FastAPI job API (`make backend`); CLI entry points via setuptools scripts.
 
 ## 2. Full project tree
 
@@ -25,7 +25,9 @@ audio_to_tab_pdf/
 │   ├── __init__.py                    — version 0.1.0
 │   ├── pipeline.py                    — PipelineConfig + run_pipeline orchestration
 │   ├── ingest.py                      — ffmpeg normalize + yt-dlp YouTube download
-│   ├── separate.py                    — Demucs CLI wrapper (sys.executable -m demucs)
+│   ├── separate.py                    — Demucs CLI wrapper (guitar-only for tab pipeline)
+│   ├── isolate.py                     — IsolateConfig + multi-stem separate_stems + dual-guitar heuristic
+│   ├── mixer.py                       — waveform peaks, mute/solo mix helpers
 │   ├── transcribe.py                  — Basic Pitch → MIDI (+ cleanup hook)
 │   ├── midi_cleanup.py                — velocity/duration/density filters
 │   ├── tempo.py                       — audio/MIDI tempo estimate + override
@@ -35,20 +37,28 @@ audio_to_tab_pdf/
 │   ├── pdf_render.py                  — ReportLab structured tab PDF
 │   └── cli/
 │       ├── pipeline.py                — audio-pipeline CLI
+│       ├── isolate.py                 — audio-isolate CLI
 │       ├── transcribe.py              — audio-transcribe CLI
 │       ├── mid2tab.py                 — audio-mid2tab CLI
 │       └── tab2pdf.py                 — audio-tab2pdf CLI
-├── ui/app.py                          — Streamlit web UI (calls run_pipeline)
+├── ui/
+│   ├── app.py                         — Streamlit st.navigation router
+│   ├── common.py                      — shared upload/output helpers
+│   └── pages/
+│       ├── tab_pdf.py                 — Audio → Tab PDF page
+│       └── isolate.py                 — Audio Isolation page + stem board mixer
 ├── backend/
 │   ├── main.py                        — FastAPI routes + WebSocket progress
 │   ├── config.py                      — ATT_* Settings (host/port/data_dir/cors)
-│   ├── contracts.py                   — Pydantic job/upload DTOs
+│   ├── contracts.py                   — Pydantic job/upload DTOs (tab + isolate)
 │   └── jobs/
 │       ├── manager.py                 — in-memory JobManager + disk artifacts
-│       └── runner.py                  — background job → run_pipeline
+│       └── runner.py                  — background job → run_pipeline / separate_stems
 ├── tests/
 │   ├── conftest.py                    — pytest fixtures
 │   ├── test_tab.py                    — tab/demucs-availability tests
+│   ├── test_isolate.py                — multi-stem isolation tests (mocked Demucs)
+│   ├── test_mixer.py                  — mixer + dual-guitar heuristic tests
 │   └── test_api.py                    — FastAPI tests (httpx)
 ├── eval/
 │   ├── generate_fixtures.py           — synthetic MIDI/WAV fixtures
@@ -105,19 +115,21 @@ flowchart LR
 
 | Surface | Launch | Calls |
 |---------|--------|--------|
-| Streamlit UI | `make ui` → `streamlit run ui/app.py :8501` | `run_pipeline` in-process; adds `src/` to `sys.path` |
-| FastAPI | `make backend` → `uvicorn backend.main:app :8000` | `JobManager` + `run_job_async` → `run_pipeline` |
+| Streamlit UI | `make ui` → `streamlit run ui/app.py :8501` | `st.navigation` → tab page (`run_pipeline`) or isolate page (`separate_stems`) |
+| FastAPI | `make backend` → `uvicorn backend.main:app :8000` | `JobManager` + `run_job_async` / `run_isolate_job_async` |
 | CLI full | `audio-pipeline` | `audio_to_tab.cli.pipeline:main` |
+| CLI isolate | `audio-isolate` | `audio_to_tab.cli.isolate:main` |
 | CLI steps | `audio-transcribe`, `audio-mid2tab`, `audio-tab2pdf` | respective cli modules |
 | Docker | `docker-compose up` backend | same FastAPI app; `ATT_DATA_DIR=/app/data` |
 
 **Config**
 
 - Pipeline behavior: `PipelineConfig` dataclass in `src/audio_to_tab/pipeline.py` (separation, Demucs quality/device, thresholds, tempo override, title, max duration, mix-aware filtering).
+- Isolation behavior: `IsolateConfig` in `src/audio_to_tab/isolate.py` (model, quality, device, max duration, optional two_stems).
 - Backend host/port/data/cors: `backend/config.py` `Settings` with env prefix **`ATT_`** (e.g. `ATT_DATA_DIR`).
 - Cleanup presets: `mix_aware_cleanup_config()` / `solo_guitar_cleanup_config()` in `midi_cleanup.py`; mix-aware also raises Basic Pitch thresholds inside `run_pipeline`.
 
-**Default Demucs model:** `htdemucs_6s` (expects a `guitar.wav` stem). Quality presets: fast / balanced / high / extreme → Demucs `--shifts` / `--overlap`.
+**Default Demucs model:** `htdemucs_6s` (tab pipeline expects `guitar.wav`; isolation collects all stems). Quality presets: fast / balanced / high / extreme → Demucs `--shifts` / `--overlap`. Isolation also exposes `htdemucs` / `htdemucs_ft` (4-stem).
 
 ## 5. Module map
 
@@ -126,6 +138,7 @@ flowchart LR
 | `pipeline.py` | Orchestrate end-to-end | `PipelineConfig`, `run_pipeline` | UI, backend runner, `cli/pipeline` |
 | `ingest.py` | Normalize WAV via ffmpeg; YouTube → audio | `normalize_audio`, `download_youtube_audio` | `pipeline` |
 | `separate.py` | Optional guitar stem | `is_demucs_available`, `separate_guitar_stem` | `pipeline`, UI availability check |
+| `isolate.py` | Multi-stem isolation | `IsolateConfig`, `separate_stems` | isolate UI/CLI/API |
 | `transcribe.py` | Basic Pitch → MIDI | `transcribe_audio` | `pipeline`, `cli/transcribe` |
 | `midi_cleanup.py` | Filter noisy notes | `CleanupConfig`, `cleanup_midi`, mix/solo presets | `transcribe` / pipeline thresholds |
 | `tempo.py` | BPM estimate | `resolve_tempo`, `TempoEstimate` | `pipeline` |
@@ -133,11 +146,12 @@ flowchart LR
 | `tab_generate.py` | Fretting + ASCII tab | `TabDocument`, `midi_to_tab`, `tab_to_ascii` | `pipeline`, mid2tab CLI |
 | `rhythm.py` | Quantize tab times | `quantize_tab_document` | `pipeline` |
 | `pdf_render.py` | Draw PDF | `render_structured_tab_pdf` | `pipeline`, tab2pdf CLI |
-| `ui/app.py` | Web form + progress | `main`, toggles separate | User via Streamlit |
-| `backend/main.py` | REST + WS API | upload/jobs/artifacts/ws | External clients |
-| `backend/jobs/*` | Persist runs, async execute | `JobManager`, `run_job_async` | FastAPI |
+| `ui/app.py` | Multipage router | `st.navigation` | User via Streamlit |
+| `ui/pages/*` | Tab + Isolation pages | page `main()` scripts | `ui/app.py` |
+| `backend/main.py` | REST + WS API | upload/jobs/isolate/artifacts/ws | External clients |
+| `backend/jobs/*` | Persist runs, async execute | `JobManager`, `run_job_async`, `run_isolate_job_async` | FastAPI |
 | `eval/*` | Synthetic fixtures + F1 | `generate_fixtures`, `score_transcription` | `make eval` |
-| `tests/*` | Unit/API tests | demucs available, tab, API | `make test` |
+| `tests/*` | Unit/API tests | demucs, isolate mocks, tab, API | `make test` |
 
 ## 6. Critical invariants / known gotchas
 
@@ -178,6 +192,7 @@ make eval
 audio-pipeline --audio song.wav --output ./output --no-separate
 audio-pipeline --audio full_mix.mp3 --output ./output --quality fast
 audio-pipeline --url "https://www.youtube.com/watch?v=..." --output ./output
+audio-isolate --audio song.wav --output ./output/stems --model htdemucs_6s --quality fast
 
 audio-transcribe song.wav song.mid
 audio-mid2tab song.mid song.tab
@@ -189,4 +204,4 @@ docker compose up --build
 
 ## 8. External-AI handoff blurb
 
-You are helping with **audio-to-tab-pdf**, a Python 3.10–3.12 app that turns audio/YouTube into draft guitar tab PDFs: ingest → optional Demucs (`htdemucs_6s`) → Basic Pitch → MIDI cleanup → fret tab → ReportLab PDF. Core code lives in `src/audio_to_tab/`; UI is `ui/app.py`; API is `backend/`. Orchestration is `PipelineConfig` + `run_pipeline`. Full mixes need Demucs + torchcodec + ffmpeg (shared libs); solo guitar can `--no-separate`. Always run Demucs via `sys.executable`, not system `python3`. Prefer Makefile targets and small, verified edits — do not invent frontend/Flutter or APIs not in the tree. Output is draft quality only.
+You are helping with **audio-to-tab-pdf**, a Python 3.10–3.12 app that turns audio/YouTube into draft guitar tab PDFs: ingest → optional Demucs (`htdemucs_6s`) → Basic Pitch → MIDI cleanup → fret tab → ReportLab PDF. It also has a standalone **Audio Isolation** feature (`isolate.py` / `audio-isolate` / Streamlit page / `POST /v1/isolate/jobs`) that returns all Demucs stems. Core code lives in `src/audio_to_tab/`; UI is multipage `ui/app.py` + `ui/pages/`; API is `backend/`. Orchestration is `PipelineConfig` + `run_pipeline` for tabs, `IsolateConfig` + `separate_stems` for isolation. Full mixes need Demucs + torchcodec + ffmpeg (shared libs); solo guitar can `--no-separate`. Always run Demucs via `sys.executable`, not system `python3`. Prefer Makefile targets and small, verified edits — do not invent frontend/Flutter or APIs not in the tree. Tab output is draft quality only.

@@ -14,6 +14,11 @@ class JobStatus(str, Enum):
     failed = "failed"
 
 
+class JobKind(str, Enum):
+    tab = "tab"
+    isolate = "isolate"
+
+
 class JobCreateRequest(BaseModel):
     upload_id: str | None = None
     youtube_url: str | None = None
@@ -26,9 +31,20 @@ class JobCreateRequest(BaseModel):
     frame_threshold: float = 0.3
 
 
+class IsolateJobCreateRequest(BaseModel):
+    upload_id: str
+    model: str = "htdemucs_6s"
+    quality: str = "balanced"
+    device: str = "cpu"
+    max_duration_sec: float = 90.0
+    two_stems: str | None = None
+    dual_guitar: bool = False
+
+
 class JobResponse(BaseModel):
     id: str
     status: JobStatus
+    kind: JobKind = JobKind.tab
     stage: str = ""
     message: str = ""
     error: str | None = None
