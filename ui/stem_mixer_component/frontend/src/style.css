@@ -1,0 +1,104 @@
+:root {
+  font-family: "Source Sans Pro", system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.mixer {
+  color: var(--text);
+  background: var(--bg);
+  padding: 0.5rem 0.25rem 1rem;
+  box-sizing: border-box;
+}
+
+.status {
+  font-size: 0.85rem;
+  opacity: 0.85;
+  margin-bottom: 0.5rem;
+}
+
+.transport {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.transport button {
+  background: var(--primary);
+  color: #fff;
+  border: none;
+  border-radius: 0.35rem;
+  padding: 0.35rem 0.75rem;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.transport button:hover {
+  filter: brightness(0.95);
+}
+
+.time {
+  font-variant-numeric: tabular-nums;
+  margin-left: 0.25rem;
+}
+
+#seek {
+  width: 100%;
+  margin-bottom: 0.75rem;
+}
+
+.stems {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+
+.stem-row {
+  background: var(--secondary);
+  border-radius: 0.5rem;
+  padding: 0.65rem 0.75rem;
+}
+
+.stem-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+
+.badges {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  opacity: 0.8;
+}
+
+.vol {
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.8rem;
+  margin-bottom: 0.35rem;
+}
+
+.vol-slider {
+  width: 100%;
+}
+
+.toggles {
+  display: flex;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+}
+
+.toggles label {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  cursor: pointer;
+}

@@ -86,7 +86,7 @@ async def run_isolate_job_async(job_manager: JobManager, job_id: str) -> None:
             device=job.isolate_device,
             max_duration_sec=job.max_duration_sec,
             two_stems=job.isolate_two_stems,
-            dual_guitar=job.isolate_dual_guitar,
+            lead_rhythm=job.isolate_lead_rhythm or job.isolate_dual_guitar,
         )
 
         artifacts = await loop.run_in_executor(
@@ -104,7 +104,9 @@ async def run_isolate_job_async(job_manager: JobManager, job_id: str) -> None:
         zip_path = output_dir / "stems.zip"
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for name, path in artifacts.items():
-                zf.write(path, arcname=f"{name}.wav")
+                p = Path(path)
+                arc = p.name if p.suffix else f"{name}.wav"
+                zf.write(p, arcname=arc)
         artifact_map["zip"] = str(zip_path)
 
         job_manager.set_artifacts(job_id, artifact_map)

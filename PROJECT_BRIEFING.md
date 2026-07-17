@@ -26,8 +26,9 @@ audio_to_tab_pdf/
 │   ├── pipeline.py                    — PipelineConfig + run_pipeline orchestration
 │   ├── ingest.py                      — ffmpeg normalize + yt-dlp YouTube download
 │   ├── separate.py                    — Demucs CLI wrapper (guitar-only for tab pipeline)
-│   ├── isolate.py                     — IsolateConfig + multi-stem separate_stems + dual-guitar heuristic
-│   ├── mixer.py                       — waveform peaks, mute/solo mix helpers
+│   ├── isolate.py                     — IsolateConfig + multi-stem separate_stems + lead/rhythm hook
+│   ├── lead_rhythm.py                 — Lead/Rhythm candidates, role confidence, diagnostics JSON
+│   ├── mixer.py                       — dB gains, mute/solo, waveform peaks, export mix
 │   ├── transcribe.py                  — Basic Pitch → MIDI (+ cleanup hook)
 │   ├── midi_cleanup.py                — velocity/duration/density filters
 │   ├── tempo.py                       — audio/MIDI tempo estimate + override
@@ -44,9 +45,11 @@ audio_to_tab_pdf/
 ├── ui/
 │   ├── app.py                         — Streamlit st.navigation router
 │   ├── common.py                      — shared upload/output helpers
+│   ├── media.py                       — media URLs, preview encode, mix-file cleanup
+│   ├── stem_mixer_component/          — Web Audio live stem mixer (custom component)
 │   └── pages/
 │       ├── tab_pdf.py                 — Audio → Tab PDF page
-│       └── isolate.py                 — Audio Isolation page + stem board mixer
+│       └── isolate.py                 — Audio Isolation page + live mixer + downloads
 ├── backend/
 │   ├── main.py                        — FastAPI routes + WebSocket progress
 │   ├── config.py                      — ATT_* Settings (host/port/data_dir/cors)
@@ -58,11 +61,17 @@ audio_to_tab_pdf/
 │   ├── conftest.py                    — pytest fixtures
 │   ├── test_tab.py                    — tab/demucs-availability tests
 │   ├── test_isolate.py                — multi-stem isolation tests (mocked Demucs)
-│   ├── test_mixer.py                  — mixer + dual-guitar heuristic tests
+│   ├── test_mixer.py                  — mixer + legacy dual-guitar heuristic tests
+│   ├── test_lead_rhythm.py            — lead/rhythm candidates, roles, diagnostics
 │   └── test_api.py                    — FastAPI tests (httpx)
 ├── eval/
 │   ├── generate_fixtures.py           — synthetic MIDI/WAV fixtures
 │   ├── score_transcription.py         — mir_eval F1 scoring
+│   ├── lead_rhythm/                   — Lead/Rhythm scorer, manifest example, RESULTS gate
+│   │   ├── score_lead_rhythm.py
+│   │   ├── manifest.example.json
+│   │   ├── README.md
+│   │   └── RESULTS.md
 │   └── fixtures/                      — solo_melody / arpeggio / chords mid+wav + manifest
 ├── data/                              — runtime uploads / ui_runs / jobs [gitignored]
 └── output/                            — example CLI outputs [gitignored]
@@ -125,7 +134,7 @@ flowchart LR
 **Config**
 
 - Pipeline behavior: `PipelineConfig` dataclass in `src/audio_to_tab/pipeline.py` (separation, Demucs quality/device, thresholds, tempo override, title, max duration, mix-aware filtering).
-- Isolation behavior: `IsolateConfig` in `src/audio_to_tab/isolate.py` (model, quality, device, max duration, optional two_stems).
+- Isolation behavior: `IsolateConfig` in `src/audio_to_tab/isolate.py` (model, quality, device, max duration, optional two_stems, `lead_rhythm`; deprecated `dual_guitar` alias). Quality presets change Demucs `--shifts`/`--overlap` only; Lead/Rhythm post-process is independent.
 - Backend host/port/data/cors: `backend/config.py` `Settings` with env prefix **`ATT_`** (e.g. `ATT_DATA_DIR`).
 - Cleanup presets: `mix_aware_cleanup_config()` / `solo_guitar_cleanup_config()` in `midi_cleanup.py`; mix-aware also raises Basic Pitch thresholds inside `run_pipeline`.
 
@@ -139,6 +148,7 @@ flowchart LR
 | `ingest.py` | Normalize WAV via ffmpeg; YouTube → audio | `normalize_audio`, `download_youtube_audio` | `pipeline` |
 | `separate.py` | Optional guitar stem | `is_demucs_available`, `separate_guitar_stem` | `pipeline`, UI availability check |
 | `isolate.py` | Multi-stem isolation | `IsolateConfig`, `separate_stems` | isolate UI/CLI/API |
+| `lead_rhythm.py` | Lead/Rhythm post-split of Demucs `guitar` | `split_lead_rhythm_guitar`, `LeadRhythmThresholds`, `LeadRhythmDiagnostics` | `separate_stems` when `lead_rhythm` |
 | `transcribe.py` | Basic Pitch → MIDI | `transcribe_audio` | `pipeline`, `cli/transcribe` |
 | `midi_cleanup.py` | Filter noisy notes | `CleanupConfig`, `cleanup_midi`, mix/solo presets | `transcribe` / pipeline thresholds |
 | `tempo.py` | BPM estimate | `resolve_tempo`, `TempoEstimate` | `pipeline` |
@@ -150,7 +160,7 @@ flowchart LR
 | `ui/pages/*` | Tab + Isolation pages | page `main()` scripts | `ui/app.py` |
 | `backend/main.py` | REST + WS API | upload/jobs/isolate/artifacts/ws | External clients |
 | `backend/jobs/*` | Persist runs, async execute | `JobManager`, `run_job_async`, `run_isolate_job_async` | FastAPI |
-| `eval/*` | Synthetic fixtures + F1 | `generate_fixtures`, `score_transcription` | `make eval` |
+| `eval/*` | Synthetic fixtures + F1 + Lead/Rhythm scorer | `generate_fixtures`, `score_transcription`, `score_lead_rhythm` | `make eval` / `make eval-lead-rhythm` |
 | `tests/*` | Unit/API tests | demucs, isolate mocks, tab, API | `make test` |
 
 ## 6. Critical invariants / known gotchas
@@ -193,6 +203,7 @@ audio-pipeline --audio song.wav --output ./output --no-separate
 audio-pipeline --audio full_mix.mp3 --output ./output --quality fast
 audio-pipeline --url "https://www.youtube.com/watch?v=..." --output ./output
 audio-isolate --audio song.wav --output ./output/stems --model htdemucs_6s --quality fast
+audio-isolate --audio song.wav --output ./output/stems --model htdemucs_6s --quality fast --lead-rhythm
 
 audio-transcribe song.wav song.mid
 audio-mid2tab song.mid song.tab

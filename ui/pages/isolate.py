@@ -1,9 +1,10 @@
-"""Streamlit page: multi-stem Audio Isolation with mixer board."""
+"""Streamlit page: multi-stem Audio Isolation with live stem mixer."""
 
 from __future__ import annotations
 
 import hashlib
 import io
+import json
 import zipfile
 from pathlib import Path
 
@@ -11,6 +12,8 @@ import pandas as pd
 import streamlit as st
 
 from ui.common import ensure_src_path, run_output_dir, save_upload
+from ui.media import cleanup_mix_artifacts, ensure_mixer_audio_paths, stem_media_urls
+from ui.stem_mixer_component import component_build_available, stem_mixer
 
 ensure_src_path()
 
@@ -21,7 +24,8 @@ from audio_to_tab.isolate import (  # noqa: E402
     separate_stems,
 )
 from audio_to_tab.mixer import (  # noqa: E402
-    audible_stems,
+    DB_DEFAULT,
+    effective_linear_gains,
     mix_stems_to_wav,
     sort_stem_names,
     stem_display_name,
@@ -37,50 +41,113 @@ _MODEL_HELP = {
 
 STEM_HINTS = {
     "piano": "May contain artifacts (Demucs limitation)",
-    "guitar1": "Experimental stereo split",
-    "guitar2": "Experimental stereo split",
+    "lead_guitar": "Always produced from the guitar stem (best-effort when confidence is low)",
+    "rhythm_guitar": "Always produced from the guitar stem (best-effort when confidence is low)",
+    "guitar1": "Legacy spatial label",
+    "guitar2": "Legacy spatial label",
 }
 
 
-def _init_mixer_state(stem_names: list[str]) -> None:
-    muted = st.session_state.setdefault("isolate_muted", {})
-    soloed = st.session_state.setdefault("isolate_soloed", {})
-    for name in stem_names:
-        muted.setdefault(name, False)
-        soloed.setdefault(name, False)
-
-
-def _audible_rule_text(stem_names: list[str], muted: dict[str, bool], soloed: dict[str, bool]) -> str:
-    active_solo = [n for n in stem_names if soloed.get(n, False)]
-    if active_solo:
-        labels = ", ".join(stem_display_name(n) for n in active_solo)
-        return f"Solo active — only these stems are heard: {labels} (Mute ignored)."
-    audible = audible_stems(stem_names, muted=muted, soloed=soloed)
-    if not audible:
-        return "All stems muted — nothing will play."
-    labels = ", ".join(stem_display_name(n) for n in audible)
-    return f"Audible mix: {labels}"
-
-
-def _render_waveform(path: Path, key: str) -> None:
+def _render_waveform(path: Path) -> None:
     peaks = waveform_peaks(path)
     chart_df = pd.DataFrame({"amp": peaks})
     st.line_chart(chart_df, height=120, use_container_width=True)
 
 
-def _render_stem_board(
+def _artifact_fingerprint(stem_paths: dict[str, Path]) -> str:
+    payload = "|".join(f"{k}:{v}" for k, v in sorted((n, str(p)) for n, p in stem_paths.items()))
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def _load_stem_presence(artifacts: dict) -> dict:
+    path = artifacts.get("stem_presence_diagnostics")
+    if not path or not Path(path).exists():
+        return {}
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _load_bass_bleed_diagnostics(artifacts: dict) -> dict:
+    path = artifacts.get("bass_bleed_diagnostics")
+    if not path or not Path(path).exists():
+        return {}
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _load_guitar_split_diagnostics(artifacts: dict) -> dict:
+    path = artifacts.get("guitar_split_diagnostics")
+    if not path or not Path(path).exists():
+        return {}
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def default_isolate_selected_stems(
+    produced_stem_names: list[str],
+    presence: dict,
+) -> dict[str, bool]:
+    """
+    Initial Detected Instruments checkbox state.
+
+    Lead Guitar and Rhythm Guitar are always checked when present.
+    Combined Guitar is unchecked when both derived stems exist.
+    """
+    selected = {
+        name: bool(presence.get(name, {}).get("present", True))
+        for name in produced_stem_names
+    }
+    for name in ("lead_guitar", "rhythm_guitar"):
+        if name in selected:
+            selected[name] = True
+    if "lead_guitar" in selected and "rhythm_guitar" in selected:
+        if "guitar" in selected:
+            selected["guitar"] = False
+    return selected
+
+
+def _render_stem_presence_selector(
     stem_paths: dict[str, Path],
-    base_name: str,
-    *,
-    cols_per_row: int = 3,
+    presence: dict,
+    fingerprint: str,
 ) -> None:
+    selected = st.session_state.setdefault("isolate_selected_stems", {})
     stem_names = sort_stem_names(stem_paths.keys())
-    _init_mixer_state(stem_names)
-    muted = st.session_state["isolate_muted"]
-    soloed = st.session_state["isolate_soloed"]
+    cols_per_row = 3
+    for row_start in range(0, len(stem_names), cols_per_row):
+        row_names = stem_names[row_start : row_start + cols_per_row]
+        cols = st.columns(len(row_names))
+        for col, name in zip(cols, row_names):
+            with col:
+                label = stem_display_name(name)
+                info = presence.get(name)
+                if not info:
+                    help_text = "No detection data available for this stem."
+                elif info.get("present", True):
+                    help_text = f"Detected — mean level {info.get('mean_dbfs', 0.0):.1f} dBFS"
+                else:
+                    help_text = (
+                        f"Not detected — mean level {info.get('mean_dbfs', 0.0):.1f} dBFS, "
+                        "but you can still include it"
+                    )
+                checked = st.checkbox(
+                    label,
+                    value=selected.get(name, True),
+                    key=f"select_stem_{fingerprint}_{name}",
+                    help=help_text,
+                )
+                selected[name] = checked
 
-    st.caption(_audible_rule_text(stem_names, muted, soloed))
 
+def _render_stem_downloads(stem_paths: dict[str, Path], base_name: str) -> None:
+    stem_names = sort_stem_names(stem_paths.keys())
+    cols_per_row = 3
     for row_start in range(0, len(stem_names), cols_per_row):
         row_names = stem_names[row_start : row_start + cols_per_row]
         cols = st.columns(len(row_names))
@@ -88,21 +155,10 @@ def _render_stem_board(
             path = stem_paths[name]
             with col:
                 label = stem_display_name(name)
-                badges = []
-                if soloed.get(name):
-                    badges.append("SOLO")
-                elif muted.get(name):
-                    badges.append("MUTED")
-                badge_txt = f" · **{' · '.join(badges)}**" if badges else ""
-                st.markdown(f"**{label}**{badge_txt}")
+                st.markdown(f"**{label}**")
                 if hint := STEM_HINTS.get(name):
                     st.caption(hint)
-                _render_waveform(path, key=f"wf_{name}")
-                c1, c2 = st.columns(2)
-                with c1:
-                    muted[name] = st.checkbox("Mute", value=muted.get(name, False), key=f"mute_{name}")
-                with c2:
-                    soloed[name] = st.checkbox("Solo", value=soloed.get(name, False), key=f"solo_{name}")
+                _render_waveform(path)
                 st.download_button(
                     label=f"Download {label}",
                     data=path.read_bytes(),
@@ -111,19 +167,46 @@ def _render_stem_board(
                     key=f"dl_{name}",
                 )
 
-    st.session_state["isolate_muted"] = muted
-    st.session_state["isolate_soloed"] = soloed
 
-    audible = audible_stems(stem_names, muted=muted, soloed=soloed)
-    if st.button("Play heard mix", type="primary", disabled=not audible):
-        mix_key = hashlib.sha256(",".join(sorted(audible)).encode()).hexdigest()[:16]
-        out_dir = path.parent if (path := next(iter(stem_paths.values()), None)) else Path(".")
-        mix_path = out_dir / f"_heard_mix_{mix_key}.wav"
-        try:
-            mix_stems_to_wav(stem_paths, audible, mix_path)
-            st.audio(mix_path.read_bytes(), format="audio/wav")
-        except Exception as exc:
-            st.error(f"Could not build mix: {exc}")
+def _render_live_mixer(stem_paths: dict[str, Path]) -> dict | None:
+    if not component_build_available():
+        st.error(
+            "Live stem mixer frontend is not built. "
+            "Run: npm install && npm run build in ui/stem_mixer_component/frontend "
+            "(or .\\scripts\\dev.ps1 mixer-build)."
+        )
+        return None
+
+    mixer_paths = ensure_mixer_audio_paths(stem_paths)
+    if mixer_paths != stem_paths:
+        st.caption(
+            "Using downsampled preview audio for browser playback (original WAVs used for downloads)."
+        )
+
+    try:
+        urls = stem_media_urls(mixer_paths)
+    except Exception as exc:
+        st.error(f"Could not register stem media URLs: {exc}")
+        return None
+
+    stem_names = sort_stem_names(stem_paths.keys())
+    volumes = st.session_state.setdefault("isolate_volumes_db", {})
+    for name in stem_names:
+        volumes.setdefault(name, DB_DEFAULT)
+
+    stems_arg = [
+        {"id": name, "label": stem_display_name(name), "url": urls[name]}
+        for name in stem_names
+        if name in urls
+    ]
+    fingerprint = _artifact_fingerprint(stem_paths)
+    return stem_mixer(
+        stems_arg,
+        initial_volumes_db={n: float(volumes.get(n, DB_DEFAULT)) for n in stem_names},
+        initial_muted={n: False for n in stem_names},
+        initial_soloed={n: False for n in stem_names},
+        key=f"stem_mixer_{fingerprint}",
+    )
 
 
 def main() -> None:
@@ -152,17 +235,6 @@ def main() -> None:
             "Note: On the 6-stem model, guitar quality is okay; "
             "piano often has bleeding/artifacts (Demucs limitation)."
         )
-        dual_guitar = st.checkbox(
-            "Enable dual-guitar split (experimental)",
-            value=False,
-            help=(
-                "After separation, try to split the guitar stem into Guitar 1 and Guitar 2 "
-                "using a stereo heuristic. Only works when the guitar stem has distinct L/R content."
-            ),
-        )
-    else:
-        dual_guitar = False
-        st.caption("Dual-guitar split requires the 6-stem model (htdemucs_6s) with a guitar stem.")
 
     quality = st.selectbox(
         "Quality",
@@ -170,7 +242,18 @@ def main() -> None:
         index=1,
         help="Higher quality uses more Demucs shifts/overlap and is much slower on CPU.",
     )
-    max_duration = st.slider("Max duration (seconds)", min_value=15, max_value=300, value=90, step=15)
+    limit_duration = st.checkbox(
+        "Limit duration",
+        value=False,
+        help="Off = process the full song. On = trim to a max length for faster previews.",
+    )
+    max_duration_sec: float | None = None
+    if limit_duration:
+        max_duration_sec = float(
+            st.slider("Max duration (seconds)", min_value=15, max_value=300, value=90, step=15)
+        )
+    else:
+        st.caption("Full song will be processed. Demucs on CPU can take a long time for long tracks.")
     device = st.selectbox("Device", options=["cpu", "cuda"], index=0)
 
     uploaded = st.file_uploader(
@@ -189,8 +272,7 @@ def main() -> None:
             model=model,
             quality=quality,
             device=device,
-            max_duration_sec=float(max_duration),
-            dual_guitar=dual_guitar,
+            max_duration_sec=max_duration_sec,
         )
 
         try:
@@ -207,18 +289,27 @@ def main() -> None:
                     on_progress=on_progress,
                 )
 
+            cleanup_mix_artifacts(output_dir)
             st.success(f"Separated {len(artifacts)} stem(s).")
             st.session_state["isolate_artifacts"] = {k: str(v) for k, v in artifacts.items()}
             st.session_state["isolate_base_name"] = Path(uploaded.name).stem
-            st.session_state["isolate_dual_guitar_requested"] = dual_guitar
-            st.session_state.pop("isolate_muted", None)
-            st.session_state.pop("isolate_soloed", None)
+            st.session_state["isolate_run_dir"] = str(output_dir)
+            st.session_state.pop("isolate_volumes_db", None)
+            st.session_state.pop("isolate_mixer_state", None)
+            st.session_state.pop("isolate_mix_ready", None)
 
-            if dual_guitar and "guitar" in artifacts and "guitar1" not in artifacts:
-                st.info(
-                    "Dual-guitar split was not applied — the separated guitar stem did not pass "
-                    "the stereo heuristic (likely one guitar or mono content)."
-                )
+            presence = _load_stem_presence(artifacts)
+            produced_stem_names = [
+                name
+                for name, path in artifacts.items()
+                if name != "guitar_split_diagnostics"
+                and name != "stem_presence_diagnostics"
+                and name != "bass_bleed_diagnostics"
+                and Path(path).suffix.lower() == ".wav"
+            ]
+            st.session_state["isolate_selected_stems"] = default_isolate_selected_stems(
+                produced_stem_names, presence
+            )
 
         except Exception as exc:
             st.error(f"Isolation failed: {exc}")
@@ -229,17 +320,79 @@ def main() -> None:
         return
 
     base_name = st.session_state.get("isolate_base_name", "stems")
-    stem_paths = {name: Path(path) for name, path in artifacts_map.items() if Path(path).exists()}
+    stem_paths = {
+        name: Path(path)
+        for name, path in artifacts_map.items()
+        if Path(path).exists()
+        and name
+        not in (
+            "guitar_split_diagnostics",
+            "stem_presence_diagnostics",
+            "bass_bleed_diagnostics",
+        )
+        and Path(path).suffix.lower() == ".wav"
+    }
     if not stem_paths:
         return
 
+    presence = _load_stem_presence(artifacts_map)
+
+    bass_bleed = _load_bass_bleed_diagnostics(artifacts_map)
+    if bass_bleed.get("flagged"):
+        st.warning(
+            "Guitar stem check: "
+            f"{bass_bleed.get('reason', 'anomalously bass-heavy content detected')}"
+        )
+
+    guitar_split = _load_guitar_split_diagnostics(artifacts_map)
+    if guitar_split.get("outcome") == "lead_rhythm":
+        if guitar_split.get("low_confidence") or guitar_split.get("forced_emit"):
+            st.warning(
+                "Lead/Rhythm guitar split (best-effort, low confidence): "
+                f"{guitar_split.get('reason', '')}"
+            )
+        else:
+            st.info(
+                "Lead/Rhythm guitar split: "
+                f"{guitar_split.get('reason', 'split applied')}"
+            )
+
+    st.subheader("Detected instruments")
+    st.caption(
+        "Demucs always separates every stem for the chosen model — these checkboxes only "
+        "choose which already-separated stems are used below (mixer, stem board, zip, mix export). "
+        "When a guitar stem exists, Lead Guitar and Rhythm Guitar are always produced and "
+        "checked by default (best-effort if confidence is low)."
+    )
+    _render_stem_presence_selector(stem_paths, presence, _artifact_fingerprint(stem_paths))
+
+    selected_stems = st.session_state.get("isolate_selected_stems", {})
+    selected_stem_paths = {
+        name: path for name, path in stem_paths.items() if selected_stems.get(name, True)
+    }
+
+    run_dir = Path(st.session_state.get("isolate_run_dir", next(iter(stem_paths.values())).parent))
+
+    st.subheader("Live mixer")
+    st.caption(
+        "Play all stems in sync. Volume, mute, and solo update instantly without re-running Demucs "
+        "or resetting the playhead. Volume range: −60 dB (silence) to +24 dB (0 dB = unity)."
+    )
+    mixer_state = _render_live_mixer(selected_stem_paths)
+    if mixer_state:
+        st.session_state["isolate_mixer_state"] = mixer_state
+        if "volumesDb" in mixer_state:
+            st.session_state["isolate_volumes_db"] = {
+                k: float(v) for k, v in mixer_state["volumesDb"].items()
+            }
+
     st.subheader("Stem board")
-    _render_stem_board(stem_paths, base_name)
+    _render_stem_downloads(selected_stem_paths, base_name)
 
     st.subheader("Downloads")
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for name, path in sorted(stem_paths.items()):
+        for name, path in sorted(selected_stem_paths.items()):
             zf.writestr(f"{name}.wav", path.read_bytes())
     st.download_button(
         label="Download all stems (.zip)",
@@ -248,6 +401,41 @@ def main() -> None:
         mime="application/zip",
         key="dl_zip",
     )
+
+    stem_names = sort_stem_names(selected_stem_paths.keys())
+    state = st.session_state.get("isolate_mixer_state") or {}
+    volumes_db = state.get("volumesDb") or st.session_state.get("isolate_volumes_db") or {}
+    muted = state.get("muted") or {n: False for n in stem_names}
+    soloed = state.get("soloed") or {n: False for n in stem_names}
+    mix_path = run_dir / "current_mix.wav"
+
+    if st.button(
+        "Prepare current mix download",
+        help="Builds a WAV from the current live mixer volume / mute / solo settings.",
+    ):
+        gains = effective_linear_gains(
+            stem_names,
+            muted={n: bool(muted.get(n, False)) for n in stem_names},
+            soloed={n: bool(soloed.get(n, False)) for n in stem_names},
+            volume_db={n: float(volumes_db.get(n, DB_DEFAULT)) for n in stem_names},
+        )
+        try:
+            mix_stems_to_wav(selected_stem_paths, output_path=mix_path, gains=gains)
+            st.session_state["isolate_mix_ready"] = str(mix_path)
+            st.success("Current mix ready.")
+        except Exception as exc:
+            st.session_state.pop("isolate_mix_ready", None)
+            st.warning(f"Could not build current mix export: {exc}")
+
+    ready = st.session_state.get("isolate_mix_ready")
+    if ready and Path(ready).exists():
+        st.download_button(
+            label="Download current mix",
+            data=Path(ready).read_bytes(),
+            file_name=f"{base_name}_current_mix.wav",
+            mime="audio/wav",
+            key="dl_current_mix",
+        )
 
 
 main()

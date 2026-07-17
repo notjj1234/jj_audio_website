@@ -96,6 +96,7 @@ async def create_isolate_job(
             device=body.device,
             max_duration_sec=body.max_duration_sec,
             two_stems=body.two_stems,
+            lead_rhythm=body.lead_rhythm,
             dual_guitar=body.dual_guitar,
         )
     except FileNotFoundError as exc:
@@ -135,6 +136,8 @@ def get_artifact(job_id: str, kind: str):
         "bass": "audio/wav",
         "other": "audio/wav",
         "guitar": "audio/wav",
+        "lead_guitar": "audio/wav",
+        "rhythm_guitar": "audio/wav",
         "guitar1": "audio/wav",
         "guitar2": "audio/wav",
         "piano": "audio/wav",
@@ -144,6 +147,7 @@ def get_artifact(job_id: str, kind: str):
         "no_other": "audio/wav",
         "no_guitar": "audio/wav",
         "no_piano": "audio/wav",
+        "guitar_split_diagnostics": "application/json",
     }
     return FileResponse(path, media_type=media.get(kind, "application/octet-stream"), filename=path.name)
 

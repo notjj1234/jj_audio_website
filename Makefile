@@ -1,4 +1,4 @@
-.PHONY: install install-demucs fixtures test eval backend ui pipeline help _check_python
+.PHONY: install install-demucs fixtures test eval eval-lead-rhythm backend ui pipeline mixer-build help _check_python
 
 VENV := .venv311
 VENV_PYTHON := $(VENV)/bin/python
@@ -29,9 +29,11 @@ help:
 	@echo "  make fixtures         - Generate eval MIDI fixtures"
 	@echo "  make test             - Run pytest"
 	@echo "  make eval             - Run transcription eval harness"
+	@echo "  make eval-lead-rhythm - Score Lead/Rhythm vs local manifest (clips gitignored)"
 	@echo "  make ui               - Start Streamlit web UI"
 	@echo "  make backend          - Start FastAPI server (API only)"
 	@echo "  make pipeline         - Example CLI (needs audio file)"
+	@echo "  make mixer-build      - Build live stem mixer frontend (Node 18+)"
 	@echo ""
 	@echo "Without make: ./scripts/dev.sh <target>  |  Windows: .\\scripts\\dev.ps1 <target>"
 
@@ -61,12 +63,18 @@ test:
 eval: fixtures
 	$(PYTHON) eval/score_transcription.py -o eval/results.json
 
+eval-lead-rhythm:
+	$(PYTHON) eval/lead_rhythm/score_lead_rhythm.py
+
 backend:
 	$(PYTHON) -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 
 ui:
 	@test -x $(VENV_PYTHON) || (echo "Run make install first"; exit 1)
 	$(VENV_PYTHON) -m streamlit run ui/app.py --server.port 8501
+
+mixer-build:
+	cd ui/stem_mixer_component/frontend && npm install && npm run build
 
 pipeline:
 	@echo "Usage: audio-pipeline --audio song.wav --output ./output --no-separate"

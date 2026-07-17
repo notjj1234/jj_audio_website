@@ -23,7 +23,7 @@ class JobRecord:
     youtube_url: str | None = None
     title: str = "Guitar Tab"
     separate_stems: bool = True
-    max_duration_sec: float = 90.0
+    max_duration_sec: float | None = 90.0
     mix_aware_filtering: bool = True
     tempo_bpm_override: float | None = None
     onset_threshold: float = 0.5
@@ -33,7 +33,8 @@ class JobRecord:
     isolate_quality: str = "balanced"
     isolate_device: str = "cpu"
     isolate_two_stems: str | None = None
-    isolate_dual_guitar: bool = False
+    isolate_lead_rhythm: bool = False
+    isolate_dual_guitar: bool = False  # deprecated; mirrored into isolate_lead_rhythm
     subscribers: list[asyncio.Queue] = field(default_factory=list)
 
 
@@ -100,8 +101,9 @@ class JobManager:
         model: str = "htdemucs_6s",
         quality: str = "balanced",
         device: str = "cpu",
-        max_duration_sec: float = 90.0,
+        max_duration_sec: float | None = None,
         two_stems: str | None = None,
+        lead_rhythm: bool = False,
         dual_guitar: bool = False,
     ) -> JobRecord:
         job_id = str(uuid.uuid4())
@@ -109,6 +111,7 @@ class JobManager:
         if not resolved:
             raise FileNotFoundError(f"Upload not found: {upload_id}")
 
+        effective_lr = bool(lead_rhythm or dual_guitar)
         job = JobRecord(
             id=job_id,
             kind=JobKind.isolate,
@@ -118,6 +121,7 @@ class JobManager:
             isolate_quality=quality,
             isolate_device=device,
             isolate_two_stems=two_stems,
+            isolate_lead_rhythm=effective_lr,
             isolate_dual_guitar=dual_guitar,
         )
         self._jobs[job_id] = job

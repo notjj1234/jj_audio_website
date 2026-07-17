@@ -27,13 +27,25 @@ Standalone stem separation (does not run transcription). Uses the same Demucs in
 ```bash
 # CLI
 export PYTHONPATH=src
-audio-isolate --audio song.wav --output ./output/stems --model htdemucs_6s --quality fast --dual-guitar
+audio-isolate --audio song.wav --output ./output/stems --model htdemucs_6s --quality fast --lead-rhythm
 
 # Or via module if console script not installed
 python -m audio_to_tab.cli.isolate --audio song.wav --output ./output/stems
 ```
 
-In the web UI (`make ui`), open **Audio Isolation** from the sidebar. After separation, use the **stem board** to preview waveforms, mute/solo stems, and play a heard mix. Optional **dual-guitar split** (experimental, `htdemucs_6s` only) attempts Guitar 1 / Guitar 2 when the guitar stem has distinct stereo content.
+In the web UI (`make ui`), open **Audio Isolation** from the sidebar. After separation:
+
+- Use the **live mixer** to play all stems in sync, with per-stem volume (−60…+24 dB), mute, and solo — changes apply instantly without re-running Demucs or resetting the playhead.
+- Download individual stems or a ZIP of originals.
+- **Prepare current mix download** exports a server-side mix using the current mixer levels.
+
+Optional **Lead / Rhythm split** (`htdemucs_6s` only, `--lead-rhythm` / UI checkbox): after Demucs, try to emit `lead_guitar` / `rhythm_guitar` when a spatial (preferred) or register (STFT band) candidate looks separable **and** role confidence is high. HPSS spectral pairs are diagnostics-only (no emit) unless explicitly enabled for eval. Otherwise the combined `guitar` stem is kept and `guitar_split_diagnostics.json` explains why. Quality presets affect Demucs only; the Lead/Rhythm post-process does not. This is not a guarantee for centered overlapping guitars. (`--dual-guitar` remains a deprecated alias.)
+
+Eval: local multitrack scoring via `make eval-lead-rhythm` (see [`eval/lead_rhythm/README.md`](eval/lead_rhythm/README.md)).
+
+Long tracks may use downsampled preview audio in the browser mixer (originals still used for downloads).
+
+Contributor note: the live mixer is a Streamlit custom component. Built assets live under `ui/stem_mixer_component/frontend/build/`. To rebuild after editing the frontend: `.\scripts\dev.ps1 mixer-build` or `./scripts/dev.sh mixer-build` (requires Node 18+).
 
 ## Requirements
 
@@ -114,11 +126,13 @@ make backend
 |----------|-------------|
 | `POST /v1/uploads/audio` | Upload MP3/WAV |
 | `POST /v1/jobs` | Start tab pipeline job |
-| `POST /v1/isolate/jobs` | Start multi-stem isolation job |
+| `POST /v1/isolate/jobs` | Start multi-stem isolation job (body: `upload_id`, optional `model`, `quality`, `device`, `max_duration_sec`, `two_stems`, `lead_rhythm`; `dual_guitar` is a deprecated alias for `lead_rhythm`) |
 | `GET /v1/jobs/{id}` | Poll status (tab or isolate) |
 | `WS /v1/jobs/{id}/ws` | Live progress |
 | `GET /v1/artifacts/{id}/pdf` | Download tab PDF |
-| `GET /v1/artifacts/{id}/{stem}` | Download isolate stem (e.g. `vocals`) or `zip` |
+| `GET /v1/artifacts/{id}/{stem}` | Download isolate stem (e.g. `vocals`, `lead_guitar`, `rhythm_guitar`) or `zip` |
+
+When `lead_rhythm` is true and the model produces a `guitar` stem, successful jobs may also expose `guitar_split_diagnostics` (JSON). Lead/Rhythm WAVs are emitted only when confidence is high; otherwise the combined `guitar` stem is kept.
 
 ## Demucs (full mixes)
 

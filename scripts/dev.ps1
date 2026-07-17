@@ -6,7 +6,7 @@
 #   .\scripts\dev.ps1 test
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("install", "install-demucs", "fixtures", "test", "eval", "ui", "backend", "help")]
+    [ValidateSet("install", "install-demucs", "fixtures", "test", "eval", "eval-lead-rhythm", "ui", "backend", "mixer-build", "help")]
     [string]$Command = "help"
 )
 
@@ -57,9 +57,21 @@ Targets:
   .\scripts\dev.ps1 fixtures         Generate eval MIDI fixtures
   .\scripts\dev.ps1 test             Run pytest
   .\scripts\dev.ps1 eval             Run transcription eval harness
+  .\scripts\dev.ps1 eval-lead-rhythm Score Lead/Rhythm vs local manifest
   .\scripts\dev.ps1 ui               Start Streamlit web UI (http://localhost:8501)
   .\scripts\dev.ps1 backend          Start FastAPI server (http://localhost:8000)
+  .\scripts\dev.ps1 mixer-build      Build live stem mixer frontend (Node 18+)
 "@
+    }
+    "mixer-build" {
+        Push-Location (Join-Path $Root "ui\stem_mixer_component\frontend")
+        try {
+            npm install
+            npm run build
+        } finally {
+            Pop-Location
+        }
+        Write-Host "Stem mixer frontend built."
     }
     "install" {
         $py = Get-HostPython
@@ -81,6 +93,9 @@ Targets:
     "eval" {
         & (Get-ProjectPython) eval/generate_fixtures.py
         & (Get-ProjectPython) eval/score_transcription.py -o eval/results.json
+    }
+    "eval-lead-rhythm" {
+        & (Get-ProjectPython) eval/lead_rhythm/score_lead_rhythm.py
     }
     "ui" {
         if (-not (Test-Path $VenvPython)) {

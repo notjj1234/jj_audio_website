@@ -1,0 +1,32 @@
+{
+  "clips": [
+    {
+      "id": "hard_pan_example",
+      "path": "hard_pan_example/guitar.wav",
+      "gt_parts": 2,
+      "gt_lead": "left",
+      "mix_type": "hard_pan"
+    },
+    {
+      "id": "mono_single",
+      "path": "mono_single/guitar.wav",
+      "gt_parts": 1,
+      "gt_lead": null,
+      "mix_type": "mono_single"
+    },
+    {
+      "id": "centered_overlap",
+      "path": "centered_overlap/guitar.wav",
+      "gt_parts": 2,
+      "gt_lead": null,
+      "mix_type": "centered_overlap"
+    },
+    {
+      "id": "double_track_wide",
+      "path": "double_track_wide/guitar.wav",
+      "gt_parts": 1,
+      "gt_lead": null,
+      "mix_type": "double_track"
+    }
+  ]
+}

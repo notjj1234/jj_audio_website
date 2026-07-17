@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Cross-platform-friendly runner for macOS/Linux (no `make` required).
-# Usage: ./scripts/dev.sh install | ui | backend | test | eval | fixtures | install-demucs | help
+# Usage: ./scripts/dev.sh install | ui | backend | test | eval | eval-lead-rhythm | fixtures | install-demucs | help
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -50,9 +50,15 @@ Targets:
   ./scripts/dev.sh fixtures         Generate eval MIDI fixtures
   ./scripts/dev.sh test             Run pytest
   ./scripts/dev.sh eval             Run transcription eval harness
+  ./scripts/dev.sh eval-lead-rhythm Score Lead/Rhythm vs local manifest
   ./scripts/dev.sh ui               Start Streamlit web UI (http://localhost:8501)
   ./scripts/dev.sh backend          Start FastAPI server (http://localhost:8000)
+  ./scripts/dev.sh mixer-build      Build live stem mixer frontend (Node 18+)
 EOF
+    ;;
+  mixer-build)
+    (cd ui/stem_mixer_component/frontend && npm install && npm run build)
+    echo "Stem mixer frontend built."
     ;;
   install)
     PY="$(host_python)"
@@ -74,6 +80,9 @@ EOF
   eval)
     "$(venv_python)" eval/generate_fixtures.py
     "$(venv_python)" eval/score_transcription.py -o eval/results.json
+    ;;
+  eval-lead-rhythm)
+    "$(venv_python)" eval/lead_rhythm/score_lead_rhythm.py
     ;;
   backend)
     "$(venv_python)" -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload

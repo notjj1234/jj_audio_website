@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class JobStatus(str, Enum):
@@ -36,9 +36,18 @@ class IsolateJobCreateRequest(BaseModel):
     model: str = "htdemucs_6s"
     quality: str = "balanced"
     device: str = "cpu"
-    max_duration_sec: float = 90.0
+    max_duration_sec: float | None = None
     two_stems: str | None = None
-    dual_guitar: bool = False
+    # Ignored: the Lead/Rhythm split is now always attempted automatically.
+    # Kept only for API backward compatibility with existing callers.
+    lead_rhythm: bool = False
+    dual_guitar: bool = False  # deprecated alias for lead_rhythm; also ignored
+
+    @model_validator(mode="after")
+    def _alias_dual_guitar(self) -> IsolateJobCreateRequest:
+        if self.dual_guitar and not self.lead_rhythm:
+            self.lead_rhythm = True
+        return self
 
 
 class JobResponse(BaseModel):
