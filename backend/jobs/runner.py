@@ -6,6 +6,7 @@ import asyncio
 import zipfile
 from pathlib import Path
 
+from backend.config import settings
 from backend.contracts import JobKind, JobStatus
 from backend.jobs.manager import JobManager
 from audio_to_tab.isolate import IsolateConfig, separate_stems
@@ -21,16 +22,26 @@ async def run_job_async(job_manager: JobManager, job_id: str) -> None:
         await run_isolate_job_async(job_manager, job_id)
         return
 
+    if job_manager.is_cancel_requested(job_id):
+        job_manager.set_cancelled(job_id)
+        await job_manager.emit(job_id, "cancelled", "Cancelled", JobStatus.cancelled)
+        return
+
     await job_manager.emit(job_id, "pending", "Job queued", JobStatus.running)
     output_dir = job_manager.job_output_dir(job_id)
     loop = asyncio.get_running_loop()
 
     async def emit_progress(stage: str, message: str) -> None:
+        if job_manager.is_cancel_requested(job_id):
+            raise asyncio.CancelledError("cancel requested")
         await job_manager.emit(job_id, stage, message, JobStatus.running)
 
     def sync_progress(stage: str, message: str) -> None:
         future = asyncio.run_coroutine_threadsafe(emit_progress(stage, message), loop)
         future.result(timeout=60)
+
+    upload_path = job_manager.materialize_upload(job)
+    timeout = settings.job_timeout_balanced_sec
 
     try:
         config = PipelineConfig(
@@ -43,21 +54,35 @@ async def run_job_async(job_manager: JobManager, job_id: str) -> None:
             frame_threshold=job.frame_threshold,
         )
 
-        artifacts = await loop.run_in_executor(
-            None,
-            lambda: run_pipeline(
-                audio_path=Path(job.upload_path) if job.upload_path else None,
-                youtube_url=job.youtube_url,
-                output_dir=output_dir,
-                config=config,
-                on_progress=sync_progress,
+        artifacts = await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: run_pipeline(
+                    audio_path=upload_path,
+                    youtube_url=job.youtube_url,
+                    output_dir=output_dir,
+                    config=config,
+                    on_progress=sync_progress,
+                ),
             ),
+            timeout=timeout,
         )
+
+        if job_manager.is_cancel_requested(job_id):
+            job_manager.set_cancelled(job_id)
+            await job_manager.emit(job_id, "cancelled", "Cancelled", JobStatus.cancelled)
+            return
 
         artifact_map = {k: str(v) for k, v in artifacts.items()}
         job_manager.set_artifacts(job_id, artifact_map)
         job_manager.set_succeeded(job_id)
         await job_manager.emit(job_id, "done", "Complete", JobStatus.succeeded)
+    except asyncio.CancelledError:
+        job_manager.set_cancelled(job_id)
+        await job_manager.emit(job_id, "cancelled", "Cancelled", JobStatus.cancelled)
+    except asyncio.TimeoutError:
+        job_manager.set_failed(job_id, "Job timed out")
+        await job_manager.emit(job_id, "error", "Job timed out", JobStatus.failed)
     except Exception as exc:
         job_manager.set_failed(job_id, str(exc))
         await job_manager.emit(job_id, "error", str(exc), JobStatus.failed)
@@ -65,19 +90,33 @@ async def run_job_async(job_manager: JobManager, job_id: str) -> None:
 
 async def run_isolate_job_async(job_manager: JobManager, job_id: str) -> None:
     job = job_manager.get(job_id)
-    if not job or not job.upload_path:
+    if not job:
+        return
+
+    if job_manager.is_cancel_requested(job_id):
+        job_manager.set_cancelled(job_id)
+        await job_manager.emit(job_id, "cancelled", "Cancelled", JobStatus.cancelled)
         return
 
     await job_manager.emit(job_id, "pending", "Isolation job queued", JobStatus.running)
     output_dir = job_manager.job_output_dir(job_id)
     loop = asyncio.get_running_loop()
+    upload_path = job_manager.materialize_upload(job)
+    if not upload_path:
+        job_manager.set_failed(job_id, "Upload missing")
+        await job_manager.emit(job_id, "error", "Upload missing", JobStatus.failed)
+        return
 
     async def emit_progress(stage: str, message: str) -> None:
+        if job_manager.is_cancel_requested(job_id):
+            raise asyncio.CancelledError("cancel requested")
         await job_manager.emit(job_id, stage, message, JobStatus.running)
 
     def sync_progress(stage: str, message: str) -> None:
         future = asyncio.run_coroutine_threadsafe(emit_progress(stage, message), loop)
         future.result(timeout=60)
+
+    timeout = settings.job_timeout_for_quality(job.isolate_quality)
 
     try:
         config = IsolateConfig(
@@ -89,15 +128,23 @@ async def run_isolate_job_async(job_manager: JobManager, job_id: str) -> None:
             lead_rhythm=job.isolate_lead_rhythm or job.isolate_dual_guitar,
         )
 
-        artifacts = await loop.run_in_executor(
-            None,
-            lambda: separate_stems(
-                audio_path=Path(job.upload_path),
-                output_dir=output_dir,
-                config=config,
-                on_progress=sync_progress,
+        artifacts = await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: separate_stems(
+                    audio_path=upload_path,
+                    output_dir=output_dir,
+                    config=config,
+                    on_progress=sync_progress,
+                ),
             ),
+            timeout=timeout,
         )
+
+        if job_manager.is_cancel_requested(job_id):
+            job_manager.set_cancelled(job_id)
+            await job_manager.emit(job_id, "cancelled", "Cancelled", JobStatus.cancelled)
+            return
 
         artifact_map = {k: str(v) for k, v in artifacts.items()}
 
@@ -112,6 +159,12 @@ async def run_isolate_job_async(job_manager: JobManager, job_id: str) -> None:
         job_manager.set_artifacts(job_id, artifact_map)
         job_manager.set_succeeded(job_id)
         await job_manager.emit(job_id, "done", "Complete", JobStatus.succeeded)
+    except asyncio.CancelledError:
+        job_manager.set_cancelled(job_id)
+        await job_manager.emit(job_id, "cancelled", "Cancelled", JobStatus.cancelled)
+    except asyncio.TimeoutError:
+        job_manager.set_failed(job_id, "Job timed out")
+        await job_manager.emit(job_id, "error", "Job timed out", JobStatus.failed)
     except Exception as exc:
         job_manager.set_failed(job_id, str(exc))
         await job_manager.emit(job_id, "error", str(exc), JobStatus.failed)

@@ -23,6 +23,18 @@ dependencies = [
     "pydantic-settings>=2.0",
     "yt-dlp>=2024.1",
     "streamlit>=1.32",
+    "streamlit-local-storage>=0.0.25",
+    "python-jose[cryptography]>=3.3",
+    "passlib[bcrypt]>=1.7",
+    "bcrypt>=4.0,<4.1",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.1",
+    "alembic>=1.13",
+    "redis>=5.0",
+    "arq>=0.26",
+    "boto3>=1.34",
+    "slowapi>=0.1.9",
+    "email-validator>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -38,7 +50,9 @@ audio-pipeline = "audio_to_tab.cli.pipeline:main"
 audio-isolate = "audio_to_tab.cli.isolate:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["audio_to_tab*", "backend*"]
+exclude = ["tests*", "ui*", "web*", "eval*", "scripts*"]
 
 [tool.ruff]
 line-length = 100

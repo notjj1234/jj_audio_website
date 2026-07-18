@@ -21,8 +21,8 @@ st.set_page_config(page_title="Audio Tools", page_icon="🎸", layout="wide")
 _pages = Path(__file__).parent / "pages"
 pg = st.navigation(
     [
-        st.Page(str(_pages / "tab_pdf.py"), title="Audio → Tab PDF", default=True),
-        st.Page(str(_pages / "isolate.py"), title="Audio Isolation"),
+        st.Page(str(_pages / "isolate.py"), title="Audio Isolation", default=True),
+        st.Page(str(_pages / "tab_pdf.py"), title="Audio → Tab PDF"),
     ]
 )
 pg.run()

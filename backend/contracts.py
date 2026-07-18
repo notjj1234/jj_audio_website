@@ -12,11 +12,23 @@ class JobStatus(str, Enum):
     running = "running"
     succeeded = "succeeded"
     failed = "failed"
+    cancelled = "cancelled"
 
 
 class JobKind(str, Enum):
     tab = "tab"
     isolate = "isolate"
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    email: str
 
 
 class JobCreateRequest(BaseModel):
@@ -34,7 +46,7 @@ class JobCreateRequest(BaseModel):
 class IsolateJobCreateRequest(BaseModel):
     upload_id: str
     model: str = "htdemucs_6s"
-    quality: str = "balanced"
+    quality: str = "fast"
     device: str = "cpu"
     max_duration_sec: float | None = None
     two_stems: str | None = None
@@ -71,3 +83,4 @@ class JobEvent(BaseModel):
     message: str
     status: JobStatus
     artifacts: dict[str, str] = Field(default_factory=dict)
+    kind: JobKind | None = None

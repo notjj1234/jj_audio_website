@@ -30,17 +30,28 @@ body {
 }
 
 .transport button {
-  background: var(--primary);
-  color: #fff;
   border: none;
   border-radius: 0.35rem;
-  padding: 0.35rem 0.75rem;
+  min-height: 44px;
+  padding: 0.55rem 1rem;
   cursor: pointer;
   font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.transport button.primary {
+  background: var(--primary);
+  color: #fff;
+}
+
+.transport button.secondary {
+  background: var(--secondary);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
 }
 
 .transport button:hover {
-  filter: brightness(0.95);
+  filter: brightness(0.97);
 }
 
 .time {
@@ -51,12 +62,13 @@ body {
 #seek {
   width: 100%;
   margin-bottom: 0.75rem;
+  min-height: 28px;
 }
 
 .stems {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 0.65rem;
 }
 
 .stem-row {
@@ -88,17 +100,39 @@ body {
 
 .vol-slider {
   width: 100%;
+  min-height: 28px;
 }
 
 .toggles {
   display: flex;
-  gap: 0.75rem;
+  flex-wrap: wrap;
+  gap: 0.5rem;
   font-size: 0.85rem;
 }
 
 .toggles label {
   display: flex;
   align-items: center;
-  gap: 0.25rem;
+  gap: 0.4rem;
   cursor: pointer;
+  min-height: 44px;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.35rem;
+  background: var(--bg);
+  user-select: none;
+}
+
+.toggles input {
+  width: 1.1rem;
+  height: 1.1rem;
+}
+
+@media (max-width: 420px) {
+  .stem-row .vol {
+    margin-bottom: 0.2rem;
+  }
+
+  .toggles {
+    gap: 0.35rem;
+  }
 }

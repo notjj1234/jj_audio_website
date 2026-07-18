@@ -5,13 +5,23 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import time
+import uuid
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+from streamlit_local_storage import LocalStorage
 
-from ui.common import ensure_src_path, run_output_dir, save_upload
+from ui.common import (
+    ensure_src_path,
+    list_recent_runs,
+    run_output_dir,
+    save_upload,
+    write_run_metadata,
+)
 from ui.media import cleanup_mix_artifacts, ensure_mixer_audio_paths, stem_media_urls
 from ui.stem_mixer_component import component_build_available, stem_mixer
 
@@ -39,6 +49,12 @@ _MODEL_HELP = {
     "htdemucs_ft": "4 stems, fine-tuned — slower, slightly better quality",
 }
 
+_MODEL_SHORT = {
+    "htdemucs_6s": "htdemucs_6s (6 stems)",
+    "htdemucs": "htdemucs (4 stems)",
+    "htdemucs_ft": "htdemucs_ft (4 stems, fine-tuned)",
+}
+
 STEM_HINTS = {
     "piano": "May contain artifacts (Demucs limitation)",
     "lead_guitar": "Always produced from the guitar stem (best-effort when confidence is low)",
@@ -47,16 +63,88 @@ STEM_HINTS = {
     "guitar2": "Legacy spatial label",
 }
 
+_LS_USER_ID_KEY = "isolate_user_id"
+_LS_COMPONENT_KEY = "isolate_local_storage"
+
+
+def _get_browser_user_id() -> str:
+    """
+    Persistent anonymous id for this browser (localStorage), cached in session_state.
+
+    The LocalStorage component often returns an empty dict on the first script run
+    before browser data arrives, so we hydrate once before minting a new id.
+    """
+    cached = st.session_state.get("isolate_user_id")
+    if isinstance(cached, str) and cached:
+        return cached
+
+    local_s = LocalStorage(key=_LS_COMPONENT_KEY)
+    stored_items = st.session_state.get(_LS_COMPONENT_KEY)
+    if isinstance(stored_items, dict):
+        local_s.storedItems = stored_items
+    else:
+        stored_items = local_s.getAll() or {}
+
+    stored = None
+    if isinstance(stored_items, dict):
+        stored = stored_items.get(_LS_USER_ID_KEY)
+    if not stored:
+        stored = local_s.getItem(_LS_USER_ID_KEY)
+
+    if isinstance(stored, str) and stored.strip():
+        user_id = stored.strip()
+        st.session_state["isolate_user_id"] = user_id
+        return user_id
+
+    # First empty observation: wait briefly for the component to report browser state,
+    # then rerun once before minting so we don't overwrite an existing id.
+    if not st.session_state.get("_isolate_user_id_hydrated"):
+        st.session_state["_isolate_user_id_hydrated"] = True
+        time.sleep(0.5)
+        stored_items = st.session_state.get(_LS_COMPONENT_KEY) or {}
+        if isinstance(stored_items, dict):
+            local_s.storedItems = stored_items
+            stored = stored_items.get(_LS_USER_ID_KEY) or local_s.getItem(_LS_USER_ID_KEY)
+            if isinstance(stored, str) and stored.strip():
+                user_id = stored.strip()
+                st.session_state["isolate_user_id"] = user_id
+                return user_id
+        st.rerun()
+
+    user_id = uuid.uuid4().hex
+    local_s.setItem(_LS_USER_ID_KEY, user_id, key="isolate_set_user_id")
+    st.session_state["isolate_user_id"] = user_id
+    return user_id
+
 
 def _render_waveform(path: Path) -> None:
     peaks = waveform_peaks(path)
     chart_df = pd.DataFrame({"amp": peaks})
-    st.line_chart(chart_df, height=120, use_container_width=True)
+    st.line_chart(chart_df, height=80, use_container_width=True)
 
 
 def _artifact_fingerprint(stem_paths: dict[str, Path]) -> str:
     payload = "|".join(f"{k}:{v}" for k, v in sorted((n, str(p)) for n, p in stem_paths.items()))
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def _selection_fingerprint(stem_paths: dict[str, Path]) -> str:
+    return _artifact_fingerprint(stem_paths)
+
+
+def _mixer_export_fingerprint(
+    stem_names: list[str],
+    volumes_db: dict,
+    muted: dict,
+    soloed: dict,
+) -> str:
+    parts = []
+    for name in stem_names:
+        parts.append(
+            f"{name}:{float(volumes_db.get(name, DB_DEFAULT)):.2f}"
+            f":{int(bool(muted.get(name, False)))}:{int(bool(soloed.get(name, False)))}"
+        )
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
 
 def _load_stem_presence(artifacts: dict) -> dict:
@@ -168,6 +256,52 @@ def _render_stem_downloads(stem_paths: dict[str, Path], base_name: str) -> None:
                 )
 
 
+def _cached_zip_bytes(
+    stem_paths: dict[str, Path],
+    base_name: str,
+    run_dir: Path,
+) -> bytes:
+    """Build zip only when the selected-stem set changes (cached on disk)."""
+    fingerprint = _selection_fingerprint(stem_paths)
+    zip_name = f"{base_name}_stems.zip"
+    zip_path = run_dir / zip_name
+    cache_key = st.session_state.get("isolate_zip_fp")
+    if cache_key == fingerprint and zip_path.is_file():
+        return zip_path.read_bytes()
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for name, path in sorted(stem_paths.items()):
+            zf.writestr(f"{name}.wav", path.read_bytes())
+    data = buf.getvalue()
+    zip_path.write_bytes(data)
+    st.session_state["isolate_zip_fp"] = fingerprint
+    st.session_state["isolate_zip_name"] = zip_name
+    return data
+
+
+def _build_current_mix(
+    selected_stem_paths: dict[str, Path],
+    run_dir: Path,
+    stem_names: list[str],
+    volumes_db: dict,
+    muted: dict,
+    soloed: dict,
+) -> Path:
+    mix_path = run_dir / "current_mix.wav"
+    gains = effective_linear_gains(
+        stem_names,
+        muted={n: bool(muted.get(n, False)) for n in stem_names},
+        soloed={n: bool(soloed.get(n, False)) for n in stem_names},
+        volume_db={n: float(volumes_db.get(n, DB_DEFAULT)) for n in stem_names},
+    )
+    mix_stems_to_wav(selected_stem_paths, output_path=mix_path, gains=gains)
+    fp = _mixer_export_fingerprint(stem_names, volumes_db, muted, soloed)
+    st.session_state["isolate_mix_ready"] = str(mix_path)
+    st.session_state["isolate_mix_fp"] = fp
+    return mix_path
+
+
 def _render_live_mixer(stem_paths: dict[str, Path]) -> dict | None:
     if not component_build_available():
         st.error(
@@ -209,26 +343,16 @@ def _render_live_mixer(stem_paths: dict[str, Path]) -> dict | None:
     )
 
 
-def main() -> None:
-    st.title("Audio Isolation")
-    st.caption(
-        "Separate a mix into individual instrument stems with Demucs (free/open-source). "
-        "CPU separation is slow — expect roughly the track length or longer."
-    )
-
-    demucs_ok = is_demucs_available()
-    if not demucs_ok:
-        st.error(
-            "Demucs is required for Audio Isolation and is not installed. "
-            f"{DEMUCS_INSTALL_HINT}"
-        )
-        return
-
+def _render_separation_controls() -> tuple[str, str, str, float | None, object, str]:
+    """Model + upload; Quality/duration are common first-run decisions and stay at the top
+    level. Device is the one setting almost nobody without a configured GPU touches, so it
+    stays under Advanced."""
     model = st.selectbox(
         "Separation model",
         options=list(SUPPORTED_MODELS),
         index=0,
-        format_func=lambda m: f"{m} — {_MODEL_HELP.get(m, '')}",
+        format_func=lambda m: _MODEL_SHORT.get(m, m),
+        help=" | ".join(f"{k}: {v}" for k, v in _MODEL_HELP.items()),
     )
     if model == "htdemucs_6s":
         st.info(
@@ -250,20 +374,152 @@ def main() -> None:
     max_duration_sec: float | None = None
     if limit_duration:
         max_duration_sec = float(
-            st.slider("Max duration (seconds)", min_value=15, max_value=300, value=90, step=15)
+            st.slider(
+                "Max duration (seconds)",
+                min_value=15,
+                max_value=300,
+                value=90,
+                step=15,
+            )
         )
     else:
-        st.caption("Full song will be processed. Demucs on CPU can take a long time for long tracks.")
-    device = st.selectbox("Device", options=["cpu", "cuda"], index=0)
+        st.caption(
+            "Full song will be processed. Demucs on CPU can take a long time for long tracks."
+        )
+
+    with st.expander("Advanced", expanded=False):
+        device = st.selectbox("Device", options=["cpu", "cuda"], index=0)
 
     uploaded = st.file_uploader(
         "Upload MP3 / WAV / FLAC / M4A",
         type=["mp3", "wav", "flac", "m4a"],
         key="isolate_upload",
     )
+    carry_over_path = st.session_state.get("carry_over_audio_path")
+    carry_over_name = st.session_state.get("carry_over_audio_name")
+    if not uploaded and carry_over_path and Path(carry_over_path).exists():
+        st.caption(
+            f"Using audio carried over from Tab PDF: **{carry_over_name}**. "
+            "Upload a file above to use something else instead."
+        )
+    default_name = Path(uploaded.name).stem if uploaded else Path(carry_over_name or "").stem
+    output_name = st.text_input(
+        "Output name",
+        value=default_name,
+        help="Used for downloaded file names. Defaults to the uploaded file's name.",
+        key="isolate_output_name",
+    )
+    return model, quality, device, max_duration_sec, uploaded, output_name
 
-    if st.button("Separate stems", type="primary", disabled=not demucs_ok):
-        if not uploaded:
+
+def main() -> None:
+    st.title("Audio Isolation")
+    st.caption(
+        "Separate a mix into individual instrument stems with Demucs (free/open-source). "
+        "CPU separation is slow — expect roughly the track length or longer."
+    )
+
+    with st.expander("How this works"):
+        st.markdown(
+            "1. **Demucs** (an open-source separation model) splits your uploaded mix into "
+            "individual instrument tracks — called **stems** (e.g. drums, bass, vocals, "
+            "guitar) — by learning what each instrument typically sounds like.\n"
+            "2. Once separated, use the **Live mixer** to listen to any combination of stems "
+            "at custom volumes (mute/solo included) without re-running Demucs.\n"
+            "3. Download individual stems, everything as a zip, or a custom mixdown of the "
+            "levels you dialed in.\n\n"
+            "Separation quality varies by instrument and model choice — see the model "
+            "picker's tooltip below for tradeoffs."
+        )
+
+    demucs_ok = is_demucs_available()
+    if not demucs_ok:
+        st.error(
+            "Demucs is required for Audio Isolation and is not installed. "
+            f"{DEMUCS_INSTALL_HINT}"
+        )
+        return
+
+    has_results = bool(st.session_state.get("isolate_artifacts"))
+    browser_id = _get_browser_user_id()
+
+    recent_runs = list_recent_runs("isolate", owner=browser_id)
+    if recent_runs:
+        with st.expander(f"Recent isolations ({len(recent_runs)})", expanded=False):
+            st.caption(
+                "Reopen a past isolation's mixer and downloads without re-uploading or "
+                "re-running Demucs."
+            )
+            for run in recent_runs:
+                run_artifacts = run.get("artifacts", {})
+                available = bool(run_artifacts) and all(
+                    Path(p).exists()
+                    for name, p in run_artifacts.items()
+                    if Path(p).suffix.lower() == ".wav"
+                )
+                cols = st.columns([3, 1])
+                with cols[0]:
+                    created_at = run.get("created_at")
+                    when = (
+                        datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
+                        if created_at
+                        else ""
+                    )
+                    st.write(run.get("title") or "stems")
+                    st.caption(when if available else f"{when} — files no longer available")
+                with cols[1]:
+                    if available and st.button("Reopen", key=f"reopen_isolate_{run['run_dir']}"):
+                        presence = _load_stem_presence(run_artifacts)
+                        produced_stem_names = [
+                            name
+                            for name, path in run_artifacts.items()
+                            if name
+                            not in (
+                                "guitar_split_diagnostics",
+                                "stem_presence_diagnostics",
+                                "bass_bleed_diagnostics",
+                            )
+                            and Path(path).suffix.lower() == ".wav"
+                        ]
+                        st.session_state["isolate_artifacts"] = run_artifacts
+                        st.session_state["isolate_base_name"] = run.get("title") or "stems"
+                        st.session_state["isolate_run_dir"] = run["run_dir"]
+                        st.session_state.pop("isolate_volumes_db", None)
+                        st.session_state.pop("isolate_mixer_state", None)
+                        st.session_state.pop("isolate_mix_ready", None)
+                        st.session_state.pop("isolate_mix_fp", None)
+                        st.session_state.pop("isolate_zip_fp", None)
+                        st.session_state["isolate_selected_stems"] = (
+                            default_isolate_selected_stems(produced_stem_names, presence)
+                        )
+                        st.session_state.pop("isolate_flash", None)
+                        st.rerun()
+
+    with st.expander("Separation settings", expanded=not has_results):
+        model, quality, device, max_duration_sec, uploaded, output_name = (
+            _render_separation_controls()
+        )
+
+    # Kept outside the collapsible settings so it stays reachable (e.g. to run again on a
+    # new file) without needing to re-open "Separation settings" after a result appears.
+    run_separate = st.button(
+        "Separate stems",
+        type="primary",
+        disabled=not demucs_ok,
+        key="isolate_separate",
+    )
+    st.caption(
+        "Separation can take roughly the track length or longer on CPU. There's currently "
+        "no way to cancel once started, and closing this tab may not stop server-side "
+        "processing."
+    )
+
+    if run_separate:
+        carry_over_path = st.session_state.get("carry_over_audio_path")
+        using_carry_over = bool(
+            not uploaded and carry_over_path and Path(carry_over_path).exists()
+        )
+        if not uploaded and not using_carry_over:
             st.error("Upload an audio file.")
             return
 
@@ -275,13 +531,31 @@ def main() -> None:
             max_duration_sec=max_duration_sec,
         )
 
+        # Known, fixed stage order the pipeline reports via on_progress — used only to
+        # render an approximate step-based progress bar (no percentage is available).
+        stage_order = [
+            "ingest",
+            "separate",
+            "collect",
+            "bass_bleed",
+            "guitar_split",
+            "presence",
+            "done",
+        ]
+
         try:
             with st.status("Starting isolation…", expanded=True) as status:
+                progress_bar = st.progress(0.0)
 
                 def on_progress(stage: str, message: str) -> None:
                     status.update(label=f"[{stage}] {message}")
+                    if stage in stage_order:
+                        progress_bar.progress((stage_order.index(stage) + 1) / len(stage_order))
 
-                audio_path = save_upload(uploaded)
+                if uploaded:
+                    audio_path = save_upload(uploaded)
+                else:
+                    audio_path = Path(carry_over_path)
                 artifacts = separate_stems(
                     audio_path=audio_path,
                     output_dir=output_dir,
@@ -290,13 +564,18 @@ def main() -> None:
                 )
 
             cleanup_mix_artifacts(output_dir)
-            st.success(f"Separated {len(artifacts)} stem(s).")
             st.session_state["isolate_artifacts"] = {k: str(v) for k, v in artifacts.items()}
-            st.session_state["isolate_base_name"] = Path(uploaded.name).stem
+            st.session_state["isolate_base_name"] = output_name.strip() or audio_path.stem
+            st.session_state["isolate_source_audio_path"] = str(audio_path)
             st.session_state["isolate_run_dir"] = str(output_dir)
+            # Consumed — clear so it doesn't linger for unrelated future separations.
+            st.session_state.pop("carry_over_audio_path", None)
+            st.session_state.pop("carry_over_audio_name", None)
             st.session_state.pop("isolate_volumes_db", None)
             st.session_state.pop("isolate_mixer_state", None)
             st.session_state.pop("isolate_mix_ready", None)
+            st.session_state.pop("isolate_mix_fp", None)
+            st.session_state.pop("isolate_zip_fp", None)
 
             presence = _load_stem_presence(artifacts)
             produced_stem_names = [
@@ -310,14 +589,45 @@ def main() -> None:
             st.session_state["isolate_selected_stems"] = default_isolate_selected_stems(
                 produced_stem_names, presence
             )
+            # Rerun so Separation settings collapses and results sit near the top.
+            stem_count = sum(
+                1
+                for name, path in artifacts.items()
+                if Path(path).suffix.lower() == ".wav"
+                and name
+                not in (
+                    "guitar_split_diagnostics",
+                    "stem_presence_diagnostics",
+                    "bass_bleed_diagnostics",
+                )
+            )
+            st.session_state["isolate_flash"] = (
+                f"Separated {stem_count} stem(s). Live mixer and downloads are below."
+            )
+            write_run_metadata(
+                output_dir,
+                page="isolate",
+                title=st.session_state["isolate_base_name"],
+                artifacts=artifacts,
+                owner=browser_id,
+            )
+            st.rerun()
 
         except Exception as exc:
-            st.error(f"Isolation failed: {exc}")
+            st.error(
+                "Isolation failed — your file and settings are still here, "
+                "so you can just try again."
+            )
+            with st.expander("Technical details"):
+                st.code(str(exc))
             return
 
     artifacts_map = st.session_state.get("isolate_artifacts")
     if not artifacts_map:
         return
+
+    if flash := st.session_state.pop("isolate_flash", None):
+        st.success(flash)
 
     base_name = st.session_state.get("isolate_base_name", "stems")
     stem_paths = {
@@ -357,14 +667,15 @@ def main() -> None:
                 f"{guitar_split.get('reason', 'split applied')}"
             )
 
-    st.subheader("Detected instruments")
-    st.caption(
-        "Demucs always separates every stem for the chosen model — these checkboxes only "
-        "choose which already-separated stems are used below (mixer, stem board, zip, mix export). "
-        "When a guitar stem exists, Lead Guitar and Rhythm Guitar are always produced and "
-        "checked by default (best-effort if confidence is low)."
-    )
-    _render_stem_presence_selector(stem_paths, presence, _artifact_fingerprint(stem_paths))
+    with st.expander("Include stems (mixer & downloads)", expanded=False):
+        st.caption(
+            "Choose which already-separated stems feed the mixer and downloads below "
+            "(does not re-run Demucs — the Separation model above already produced these). "
+            "Lead/Rhythm Guitar are included by default when present."
+        )
+        _render_stem_presence_selector(
+            stem_paths, presence, _artifact_fingerprint(stem_paths)
+        )
 
     selected_stems = st.session_state.get("isolate_selected_stems", {})
     selected_stem_paths = {
@@ -375,8 +686,9 @@ def main() -> None:
 
     st.subheader("Live mixer")
     st.caption(
-        "Play all stems in sync. Volume, mute, and solo update instantly without re-running Demucs "
-        "or resetting the playhead. Volume range: −60 dB (silence) to +24 dB (0 dB = unity)."
+        "Play all stems in sync. Levels apply in the mixer without re-running Demucs or "
+        "resetting the playhead. Mixer state is sent to the page when you finish adjusting "
+        "(for mix export). Volume: −60 dB to +24 dB (0 dB = unity)."
     )
     mixer_state = _render_live_mixer(selected_stem_paths)
     if mixer_state:
@@ -386,20 +698,19 @@ def main() -> None:
                 k: float(v) for k, v in mixer_state["volumesDb"].items()
             }
 
-    st.subheader("Stem board")
-    _render_stem_downloads(selected_stem_paths, base_name)
-
     st.subheader("Downloads")
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for name, path in sorted(selected_stem_paths.items()):
-            zf.writestr(f"{name}.wav", path.read_bytes())
+    if not selected_stem_paths:
+        st.info("Select at least one stem under \"Include stems\" to enable downloads.")
+        return
+
+    zip_bytes = _cached_zip_bytes(selected_stem_paths, base_name, run_dir)
     st.download_button(
         label="Download all stems (.zip)",
-        data=buf.getvalue(),
-        file_name=f"{base_name}_stems.zip",
+        data=zip_bytes,
+        file_name=st.session_state.get("isolate_zip_name", f"{base_name}_stems.zip"),
         mime="application/zip",
         key="dl_zip",
+        type="primary",
     )
 
     stem_names = sort_stem_names(selected_stem_paths.keys())
@@ -407,35 +718,51 @@ def main() -> None:
     volumes_db = state.get("volumesDb") or st.session_state.get("isolate_volumes_db") or {}
     muted = state.get("muted") or {n: False for n in stem_names}
     soloed = state.get("soloed") or {n: False for n in stem_names}
-    mix_path = run_dir / "current_mix.wav"
+    export_fp = _mixer_export_fingerprint(stem_names, volumes_db, muted, soloed)
+    ready = st.session_state.get("isolate_mix_ready")
+    mix_fresh = (
+        ready
+        and Path(ready).exists()
+        and st.session_state.get("isolate_mix_fp") == export_fp
+    )
 
-    if st.button(
-        "Prepare current mix download",
-        help="Builds a WAV from the current live mixer volume / mute / solo settings.",
-    ):
-        gains = effective_linear_gains(
-            stem_names,
-            muted={n: bool(muted.get(n, False)) for n in stem_names},
-            soloed={n: bool(soloed.get(n, False)) for n in stem_names},
-            volume_db={n: float(volumes_db.get(n, DB_DEFAULT)) for n in stem_names},
-        )
+    if not mix_fresh:
         try:
-            mix_stems_to_wav(selected_stem_paths, output_path=mix_path, gains=gains)
-            st.session_state["isolate_mix_ready"] = str(mix_path)
-            st.success("Current mix ready.")
+            _build_current_mix(
+                selected_stem_paths,
+                run_dir,
+                stem_names,
+                volumes_db,
+                muted,
+                soloed,
+            )
+            ready = st.session_state.get("isolate_mix_ready")
         except Exception as exc:
             st.session_state.pop("isolate_mix_ready", None)
+            st.session_state.pop("isolate_mix_fp", None)
+            ready = None
             st.warning(f"Could not build current mix export: {exc}")
 
-    ready = st.session_state.get("isolate_mix_ready")
-    if ready and Path(ready).exists():
+    if ready:
         st.download_button(
             label="Download current mix",
             data=Path(ready).read_bytes(),
             file_name=f"{base_name}_current_mix.wav",
             mime="audio/wav",
             key="dl_current_mix",
+            help="Reflects the live mixer's current volume / mute / solo settings.",
         )
+
+    with st.expander("Individual stem downloads", expanded=False):
+        st.caption("Waveforms and per-stem WAV downloads (optional — zip above has everything).")
+        _render_stem_downloads(selected_stem_paths, base_name)
+
+    source_audio_path = st.session_state.get("isolate_source_audio_path")
+    if source_audio_path and Path(source_audio_path).exists():
+        if st.button("Also make a tab PDF from this →"):
+            st.session_state["carry_over_audio_path"] = source_audio_path
+            st.session_state["carry_over_audio_name"] = Path(source_audio_path).name
+            st.switch_page(str(Path(__file__).with_name("tab_pdf.py")))
 
 
 main()

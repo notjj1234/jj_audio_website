@@ -1,5 +1,7 @@
 """API smoke tests."""
 
+from __future__ import annotations
+
 from pathlib import Path
 
 import pytest
@@ -7,12 +9,14 @@ from fastapi.testclient import TestClient
 
 pytest.importorskip("fastapi")
 
-from backend.main import app  # noqa: E402
+from tests.backend_test_utils import configure_backend
 
 
 @pytest.fixture
-def client():
-    return TestClient(app)
+def client(tmp_path, monkeypatch):
+    main_mod = configure_backend(tmp_path, monkeypatch, ATT_REQUIRE_AUTH="false")
+    with TestClient(main_mod.app) as c:
+        yield c
 
 
 def test_health(client):
@@ -28,6 +32,7 @@ def test_isolate_job_request_defaults_to_full_song():
     assert req.max_duration_sec is None
     assert req.lead_rhythm is False
     assert req.dual_guitar is False
+    assert req.quality == "fast"
 
 
 def test_isolate_job_request_dual_guitar_aliases_lead_rhythm():
@@ -46,22 +51,16 @@ def test_isolate_job_request_lead_rhythm_explicit():
     assert req.dual_guitar is False
 
 
-def test_upload_and_job(client, tmp_path, monkeypatch):
+def test_upload_and_job(client):
     midi = Path("eval/fixtures/solo_melody.mid")
     if not midi.exists():
         pytest.skip("fixtures missing")
 
-    # Patch data dir for test isolation
-    from backend import main as main_mod
+    wav = midi.parent / "solo_melody.wav"
+    if not wav.exists():
+        pytest.skip("wav fixture missing")
 
-    monkeypatch.setattr(main_mod, "data_dir", tmp_path)
-    monkeypatch.setattr(main_mod.job_manager, "data_dir", tmp_path)
-    monkeypatch.setattr(main_mod.job_manager, "uploads_dir", tmp_path / "uploads")
-    monkeypatch.setattr(main_mod.job_manager, "jobs_dir", tmp_path / "jobs")
-    main_mod.job_manager.uploads_dir.mkdir(parents=True, exist_ok=True)
-    main_mod.job_manager.jobs_dir.mkdir(parents=True, exist_ok=True)
-
-    with open(midi.parent / "solo_melody.wav", "rb") as f:
+    with open(wav, "rb") as f:
         upload = client.post(
             "/v1/uploads/audio",
             files={"file": ("solo_melody.wav", f, "audio/wav")},
@@ -78,27 +77,21 @@ def test_upload_and_job(client, tmp_path, monkeypatch):
 
     import time
 
+    status = None
     for _ in range(120):
         status = client.get(f"/v1/jobs/{job_id}").json()
         if status["status"] in ("succeeded", "failed"):
             break
         time.sleep(0.5)
 
+    assert status is not None
     assert status["status"] == "succeeded", status.get("error")
     assert "pdf" in status["artifacts"]
     assert status.get("kind", "tab") == "tab"
 
 
-def test_isolate_job_mocked(client, tmp_path, monkeypatch):
-    from backend import main as main_mod
+def test_isolate_job_mocked(client, monkeypatch):
     from backend.contracts import JobKind
-
-    monkeypatch.setattr(main_mod, "data_dir", tmp_path)
-    monkeypatch.setattr(main_mod.job_manager, "data_dir", tmp_path)
-    monkeypatch.setattr(main_mod.job_manager, "uploads_dir", tmp_path / "uploads")
-    monkeypatch.setattr(main_mod.job_manager, "jobs_dir", tmp_path / "jobs")
-    main_mod.job_manager.uploads_dir.mkdir(parents=True, exist_ok=True)
-    main_mod.job_manager.jobs_dir.mkdir(parents=True, exist_ok=True)
 
     upload = client.post(
         "/v1/uploads/audio",
@@ -132,12 +125,14 @@ def test_isolate_job_mocked(client, tmp_path, monkeypatch):
 
     import time
 
+    status = None
     for _ in range(40):
         status = client.get(f"/v1/jobs/{job_id}").json()
         if status["status"] in ("succeeded", "failed"):
             break
         time.sleep(0.1)
 
+    assert status is not None
     assert status["status"] == "succeeded", status.get("error")
     assert status["kind"] == "isolate"
     assert "vocals" in status["artifacts"]
@@ -150,16 +145,8 @@ def test_isolate_job_mocked(client, tmp_path, monkeypatch):
     assert bad.status_code == 400
 
 
-def test_isolate_job_passes_lead_rhythm_flag(client, tmp_path, monkeypatch):
-    from backend import main as main_mod
+def test_isolate_job_passes_lead_rhythm_flag(client, monkeypatch):
     from backend.contracts import JobKind
-
-    monkeypatch.setattr(main_mod, "data_dir", tmp_path)
-    monkeypatch.setattr(main_mod.job_manager, "data_dir", tmp_path)
-    monkeypatch.setattr(main_mod.job_manager, "uploads_dir", tmp_path / "uploads")
-    monkeypatch.setattr(main_mod.job_manager, "jobs_dir", tmp_path / "jobs")
-    main_mod.job_manager.uploads_dir.mkdir(parents=True, exist_ok=True)
-    main_mod.job_manager.jobs_dir.mkdir(parents=True, exist_ok=True)
 
     upload = client.post(
         "/v1/uploads/audio",
@@ -201,16 +188,17 @@ def test_isolate_job_passes_lead_rhythm_flag(client, tmp_path, monkeypatch):
 
     import time
 
+    status = None
     for _ in range(40):
         status = client.get(f"/v1/jobs/{job_id}").json()
         if status["status"] in ("succeeded", "failed"):
             break
         time.sleep(0.1)
 
+    assert status is not None
     assert status["status"] == "succeeded", status.get("error")
     assert seen_configs and seen_configs[0].lead_rhythm is True
 
-    # dual_guitar alias also enables lead_rhythm on the runner config
     seen_configs.clear()
     job2 = client.post(
         "/v1/isolate/jobs",
@@ -224,10 +212,12 @@ def test_isolate_job_passes_lead_rhythm_flag(client, tmp_path, monkeypatch):
     )
     assert job2.status_code == 200
     job2_id = job2.json()["id"]
+    status2 = None
     for _ in range(40):
         status2 = client.get(f"/v1/jobs/{job2_id}").json()
         if status2["status"] in ("succeeded", "failed"):
             break
         time.sleep(0.1)
+    assert status2 is not None
     assert status2["status"] == "succeeded", status2.get("error")
     assert seen_configs and seen_configs[0].lead_rhythm is True

@@ -1,9 +1,13 @@
 # Audio Tools (Tab PDF + Isolation)
 
-Two Streamlit features (sidebar navigation):
+**Production website:** FastAPI + Vite SPA behind Caddy (Postgres, Redis/arq workers, MinIO). See [`DEPLOY.md`](DEPLOY.md) and `docker compose up`.
 
-1. **Audio → Guitar Tab PDF** — convert MP3/WAV or YouTube links into **draft** guitar tablature PDFs using free/open-source tools.
-2. **Audio Isolation** — Moises-style multi-stem split (Demucs): download vocals, drums, bass, guitar, piano, other as WAVs.
+**Local demo UI:** Streamlit (`make ui`) — Tab PDF + Isolation for development only; **not** included in production compose.
+
+Production flows:
+
+1. **Audio → Guitar Tab PDF** — convert MP3/WAV into **draft** guitar tablature PDFs (YouTube off by default on public hosts).
+2. **Audio Isolation** — Demucs multi-stem split with live Web Audio mixer in the SPA.
 
 > **Tab quality expectation:** Best on solo acoustic guitar. Output is a starting sketch, not a finished transcription.
 
@@ -62,12 +66,16 @@ Contributor note: the live mixer is a Streamlit custom component. Built assets l
 # Install app deps (includes Demucs + PyTorch; first run ~2GB download)
 .\scripts\dev.ps1 install
 
-# Launch web UI
+# Local Streamlit demo (not production)
 .\scripts\dev.ps1 ui
 # Opens http://localhost:8501
+
+# Production-shaped stack (requires Docker + ATT_SECRET_KEY)
+# copy .env.example → .env, then:
+# docker compose up -d --build
 ```
 
-In **Cursor**: `Ctrl+Shift+P` → **Tasks: Run Task** → **ui**.
+In **Cursor**: `Ctrl+Shift+P` → **Tasks: Run Task** → **ui** (Streamlit demo).
 
 If PowerShell blocks the script: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
 
@@ -112,9 +120,19 @@ audio-mid2tab song.mid song.tab
 audio-tab2pdf song.mid song.pdf
 ```
 
-## Backend API (optional)
+## Production website
 
-For programmatic access or CI, start the FastAPI server separately:
+```bash
+cp .env.example .env   # set ATT_SECRET_KEY and admin password
+docker compose up -d --build
+# https://localhost  → SPA login, Tab PDF, Isolate
+```
+
+Details, RAM guidance, and backup notes: [`DEPLOY.md`](DEPLOY.md). Readiness status: [`WEB_READINESS.md`](WEB_READINESS.md).
+
+SPA source: [`web/`](web/) (`npm install && npm run dev` proxies to `make backend`).
+
+## Backend API
 
 ```bash
 make backend
@@ -122,17 +140,20 @@ make backend
 # OpenAPI: http://localhost:8000/docs
 ```
 
+In development, `ATT_REQUIRE_AUTH` defaults to `false` (bootstrap admin used). Production compose sets auth on.
+
 | Endpoint | Description |
 |----------|-------------|
-| `POST /v1/uploads/audio` | Upload MP3/WAV |
+| `POST /v1/auth/login` | JWT access + HTTP-only refresh cookie |
+| `POST /v1/uploads/audio` | Upload audio (size/MIME limited; auth in prod) |
 | `POST /v1/jobs` | Start tab pipeline job |
-| `POST /v1/isolate/jobs` | Start multi-stem isolation job (body: `upload_id`, optional `model`, `quality`, `device`, `max_duration_sec`, `two_stems`, `lead_rhythm`; `dual_guitar` is a deprecated alias for `lead_rhythm`) |
-| `GET /v1/jobs/{id}` | Poll status (tab or isolate) |
-| `WS /v1/jobs/{id}/ws` | Live progress |
-| `GET /v1/artifacts/{id}/pdf` | Download tab PDF |
-| `GET /v1/artifacts/{id}/{stem}` | Download isolate stem (e.g. `vocals`, `lead_guitar`, `rhythm_guitar`) or `zip` |
+| `POST /v1/isolate/jobs` | Start isolation job (`quality` default `fast`) |
+| `GET /v1/jobs/{id}` | Poll status (mobile fallback) |
+| `POST /v1/jobs/{id}/cancel` | Request cancel |
+| `WS /v1/jobs/{id}/ws` | Live progress (`?access_token=` when auth on) |
+| `GET /v1/artifacts/{id}/{kind}/signed` | Short-lived signed download |
 
-When `lead_rhythm` is true and the model produces a `guitar` stem, successful jobs may also expose `guitar_split_diagnostics` (JSON). Lead/Rhythm WAVs are emitted only when confidence is high; otherwise the combined `guitar` stem is kept.
+Jobs persist in Postgres (SQLite locally); workers process via Redis/arq when `ATT_USE_WORKER=true`.
 
 ## Demucs (full mixes)
 

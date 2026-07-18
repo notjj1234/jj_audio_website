@@ -1,0 +1,18 @@
+{
+	# Local/dev: internal CA. For public hosts, set ATT_SITE_ADDRESS and remove auto_https off overrides.
+	email {$ATT_ACME_EMAIL:}
+}
+
+{$ATT_SITE_ADDRESS:localhost} {
+	encode gzip
+
+	handle /v1/* {
+		reverse_proxy api:8000
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

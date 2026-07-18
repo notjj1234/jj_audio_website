@@ -8,6 +8,7 @@ WORKDIR /app
 COPY pyproject.toml requirements.txt requirements-demucs.txt ./
 COPY src ./src
 COPY backend ./backend
+COPY scripts ./scripts
 
 RUN pip install --no-cache-dir -e ".[dev,eval]" && \
     pip install --no-cache-dir -r requirements-demucs.txt

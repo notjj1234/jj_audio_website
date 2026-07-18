@@ -237,9 +237,28 @@ let state: MixerState = { volumesDb: {}, muted: {}, soloed: {} };
 let stemInfos: StemInfo[] = [];
 
 let reportTimer: number | null = null;
+let lastPublished = "";
+
+function statePayload(): string {
+  return JSON.stringify({
+    volumesDb: state.volumesDb,
+    muted: state.muted,
+    soloed: state.soloed,
+  });
+}
+
+function scheduleFrameHeight(): void {
+  Streamlit.setFrameHeight();
+  window.requestAnimationFrame(() => {
+    Streamlit.setFrameHeight();
+  });
+}
 
 function reportState(immediate = false): void {
   const publish = () => {
+    const payload = statePayload();
+    if (payload === lastPublished) return;
+    lastPublished = payload;
     Streamlit.setComponentValue({
       volumesDb: { ...state.volumesDb },
       muted: { ...state.muted },
@@ -253,7 +272,8 @@ function reportState(immediate = false): void {
     return;
   }
   if (reportTimer !== null) window.clearTimeout(reportTimer);
-  reportTimer = window.setTimeout(publish, 250);
+  // Debounce parent Streamlit reruns while dragging / toggling.
+  reportTimer = window.setTimeout(publish, 400);
 }
 
 function applyStateGains(): void {
@@ -280,9 +300,9 @@ function renderUI(theme?: Theme): void {
     <div class="mixer" style="--text:${textColor};--bg:${bg};--secondary:${secondary};--primary:${primary}">
       <div class="status" id="status">Ready</div>
       <div class="transport">
-        <button type="button" id="btn-play">Play</button>
-        <button type="button" id="btn-pause">Pause</button>
-        <button type="button" id="btn-restart">Restart</button>
+        <button type="button" class="primary" id="btn-playpause">Play</button>
+        <button type="button" class="secondary" id="btn-restart">Restart</button>
+        <button type="button" class="secondary" id="btn-muteall">Mute All</button>
         <span class="time" id="time">0:00 / 0:00</span>
       </div>
       <input type="range" id="seek" min="0" max="1000" value="0" step="1" />
@@ -316,9 +336,23 @@ function renderUI(theme?: Theme): void {
     })
     .join("");
 
-  document.getElementById("btn-play")!.onclick = () => void engine.play();
-  document.getElementById("btn-pause")!.onclick = () => void engine.pause();
+  document.getElementById("btn-playpause")!.onclick = () =>
+    void (engine.isPlaying() ? engine.pause() : engine.play());
   document.getElementById("btn-restart")!.onclick = () => void engine.restart();
+
+  document.getElementById("btn-muteall")!.onclick = () => {
+    // If every stem is already muted, Unmute All; otherwise Mute All.
+    const target = !allMuted();
+    for (const stem of stemInfos) state.muted[stem.id] = target;
+    stemsEl.querySelectorAll<HTMLInputElement>(".mute").forEach((el) => {
+      el.checked = !!state.muted[el.dataset.id!];
+    });
+    applyStateGains();
+    reportState();
+    updateBadges();
+    updateMuteAllLabel();
+  };
+  updateMuteAllLabel();
 
   const seek = document.getElementById("seek") as HTMLInputElement;
   seek.oninput = () => {
@@ -335,7 +369,10 @@ function renderUI(theme?: Theme): void {
       const label = el.parentElement?.querySelector(".vol-val");
       if (label) label.textContent = `${db.toFixed(1)} dB`;
       applyStateGains();
-      reportState();
+      // Live audio only while dragging — report to Streamlit on release.
+    };
+    el.onchange = () => {
+      reportState(true);
     };
   });
 
@@ -343,8 +380,9 @@ function renderUI(theme?: Theme): void {
     el.onchange = () => {
       state.muted[el.dataset.id!] = el.checked;
       applyStateGains();
-      reportState(true);
+      reportState();
       updateBadges();
+      updateMuteAllLabel();
     };
   });
 
@@ -352,7 +390,7 @@ function renderUI(theme?: Theme): void {
     el.onchange = () => {
       state.soloed[el.dataset.id!] = el.checked;
       applyStateGains();
-      reportState(true);
+      reportState();
       updateBadges();
     };
   });
@@ -364,11 +402,20 @@ function renderUI(theme?: Theme): void {
     if (seekEl && document.activeElement !== seekEl) {
       seekEl.value = String(dur > 0 ? Math.round((t / dur) * 1000) : 0);
     }
-    const playBtn = document.getElementById("btn-play");
-    if (playBtn) playBtn.textContent = playing ? "Playing…" : "Play";
+    const playBtn = document.getElementById("btn-playpause");
+    if (playBtn) playBtn.textContent = playing ? "Pause" : "Play";
   });
 
-  Streamlit.setFrameHeight();
+  scheduleFrameHeight();
+}
+
+function allMuted(): boolean {
+  return stemInfos.length > 0 && stemInfos.every((s) => !!state.muted[s.id]);
+}
+
+function updateMuteAllLabel(): void {
+  const btn = document.getElementById("btn-muteall");
+  if (btn) btn.textContent = allMuted() ? "Unmute All" : "Mute All";
 }
 
 function updateBadges(): void {
@@ -426,10 +473,11 @@ async function onRender(event: Event): Promise<void> {
     const { errors } = await engine.loadStems(stems, (loaded, total, msg) => {
       const el = status();
       if (el) el.textContent = msg || `${loaded}/${total}`;
-      Streamlit.setFrameHeight();
+      scheduleFrameHeight();
     });
     applyStateGains();
-    reportState();
+    lastPublished = "";
+    reportState(true);
     const el = status();
     if (el) {
       el.textContent = errors.length
@@ -440,9 +488,9 @@ async function onRender(event: Event): Promise<void> {
     applyStateGains();
   }
 
-  Streamlit.setFrameHeight();
+  scheduleFrameHeight();
 }
 
 Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
 Streamlit.setComponentReady();
-Streamlit.setFrameHeight();
+scheduleFrameHeight();

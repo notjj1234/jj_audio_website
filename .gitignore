@@ -22,9 +22,22 @@ frontend/.flutter-plugins-dependencies
 # Stem mixer frontend (keep built assets; ignore deps)
 ui/stem_mixer_component/frontend/node_modules/
 
+# Production SPA
+web/node_modules/
+web/dist/
+
 # OS
 .DS_Store
 
 # Models / large artifacts
 *.wav
 !eval/fixtures/*.wav
+
+# Internal docs (not for public GitHub)
+WEB_READINESS.md
+ISOLATE_UI_UX_AUDIT.md
+PRE_PUBLIC_CHECKLIST.md
+PROJECT_BRIEFING.md
+
+# Cursor local tooling / config
+.cursor/

@@ -30,10 +30,12 @@ help:
 	@echo "  make test             - Run pytest"
 	@echo "  make eval             - Run transcription eval harness"
 	@echo "  make eval-lead-rhythm - Score Lead/Rhythm vs local manifest (clips gitignored)"
-	@echo "  make ui               - Start Streamlit web UI"
-	@echo "  make backend          - Start FastAPI server (API only)"
+	@echo "  make ui               - Start Streamlit demo UI (local only)"
+	@echo "  make backend          - Start FastAPI server"
+	@echo "  make web              - Start Vite SPA (dev, proxies API)"
+	@echo "  make web-build        - Production build of web/"
 	@echo "  make pipeline         - Example CLI (needs audio file)"
-	@echo "  make mixer-build      - Build live stem mixer frontend (Node 18+)"
+	@echo "  make mixer-build      - Build Streamlit stem mixer frontend (Node 18+)"
 	@echo ""
 	@echo "Without make: ./scripts/dev.sh <target>  |  Windows: .\\scripts\\dev.ps1 <target>"
 
@@ -72,6 +74,12 @@ backend:
 ui:
 	@test -x $(VENV_PYTHON) || (echo "Run make install first"; exit 1)
 	$(VENV_PYTHON) -m streamlit run ui/app.py --server.port 8501
+
+web:
+	cd web && npm install && npm run dev
+
+web-build:
+	cd web && npm install && npm run build && npm test
 
 mixer-build:
 	cd ui/stem_mixer_component/frontend && npm install && npm run build
