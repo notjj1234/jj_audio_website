@@ -40,4 +40,6 @@ PRE_PUBLIC_CHECKLIST.md
 PROJECT_BRIEFING.md
 
 # Cursor local tooling / config
-.cursor/
+.cursor/*
+# Keep project skills tracked
+!.cursor/skills/
