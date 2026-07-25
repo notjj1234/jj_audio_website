@@ -21,6 +21,14 @@ body {
   margin-bottom: 0.5rem;
 }
 
+.track-title {
+  font-size: 1rem;
+  font-weight: 700;
+  margin-bottom: 0.35rem;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
 .transport {
   display: flex;
   flex-wrap: wrap;
@@ -69,22 +77,46 @@ body {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 0.65rem;
+  align-items: stretch;
 }
 
 .stem-row {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
   background: var(--secondary);
   border-radius: 0.5rem;
   padding: 0.65rem 0.75rem;
+  box-sizing: border-box;
+}
+
+/* Raise the row above its grid siblings while its waveform dropdown floats open,
+   so the popover isn't painted behind cards that come later in the grid. */
+.stem-row--expanded {
+  z-index: 30;
 }
 
 .stem-head {
   display: flex;
   justify-content: space-between;
+  align-items: flex-start;
   gap: 0.5rem;
   margin-bottom: 0.35rem;
+  /* Keep 2-line titles from shoving volume / mute / solo out of alignment */
+  min-height: 2.5em;
+}
+
+.stem-head strong {
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 .badges {
+  flex-shrink: 0;
+  min-width: 3.6em;
+  min-height: 1em;
+  text-align: right;
   font-size: 0.7rem;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -108,6 +140,7 @@ body {
   flex-wrap: wrap;
   gap: 0.5rem;
   font-size: 0.85rem;
+  margin-top: auto;
 }
 
 .toggles label {
@@ -125,6 +158,79 @@ body {
 .toggles input {
   width: 1.1rem;
   height: 1.1rem;
+}
+
+.stem-details {
+  position: relative;
+  margin-top: 0.5rem;
+}
+
+.stem-details summary {
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.35rem 0.1rem;
+  list-style: none;
+  user-select: none;
+}
+
+.stem-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.stem-details summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 0.4rem;
+  transition: transform 0.15s ease;
+}
+
+.stem-details[open] summary::before {
+  transform: rotate(90deg);
+}
+
+/* Floats over whatever is below instead of stretching the row's own height —
+   otherwise every card in the same grid row grows to match the tallest one. */
+.stem-details[open] .stem-details-body {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  margin-top: 0.15rem;
+  padding: 0.5rem 0.6rem;
+  background: var(--secondary);
+  border-radius: 0.4rem;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+}
+
+.waveform-svg {
+  width: 100%;
+  height: 48px;
+  display: block;
+  fill: var(--primary);
+  opacity: 0.85;
+}
+
+.download-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  margin-top: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  border-radius: 0.35rem;
+  background: var(--bg);
+  color: var(--text);
+  text-decoration: none;
+  font-size: 0.8rem;
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+  box-sizing: border-box;
+}
+
+.download-link:hover {
+  filter: brightness(0.97);
 }
 
 @media (max-width: 420px) {

@@ -7,6 +7,7 @@ import {
   effectiveGains,
   ensureAudioContext,
   isAudible,
+  resetMuteSolo,
   setAllMuted,
   DB_MIN,
 } from "./engine";
@@ -66,6 +67,15 @@ describe("mixer helpers", () => {
     const cleared = clearSolo(base);
     expect(cleared.soloed).toEqual({});
     expect(base.soloed).toEqual({ a: true });
+
+    const reset = resetMuteSolo(ids, {
+      ...base,
+      muted: { a: true, b: true },
+      soloed: { a: true, b: false },
+    });
+    expect(reset.muted).toEqual({ a: false, b: false });
+    expect(reset.soloed).toEqual({ a: false, b: false });
+    expect(reset.volumesDb).toEqual({ a: 0, b: 0 });
   });
 
   it("ensureAudioContext resumes suspended contexts", async () => {

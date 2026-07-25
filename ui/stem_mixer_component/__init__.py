@@ -22,17 +22,20 @@ else:
 
 
 def stem_mixer(
-    stems: list[dict[str, str]],
+    stems: list[dict[str, Any]],
     *,
     initial_volumes_db: dict[str, float] | None = None,
     initial_muted: dict[str, bool] | None = None,
     initial_soloed: dict[str, bool] | None = None,
+    track_title: str = "",
     key: str | None = None,
 ) -> dict[str, Any] | None:
     """
     Render the live stem mixer.
 
-    ``stems`` items: ``{id, label, url}``.
+    ``stems`` items: ``{id, label, url}`` plus optional ``downloadUrl``,
+    ``downloadFilename``, ``peaks`` (waveform envelope), and ``hint`` used to
+    render the per-stem "Waveform & download" dropdown.
     Returns the latest control state from the browser, e.g.
     ``{volumesDb, muted, soloed}``, or None before the first report.
     """
@@ -41,6 +44,7 @@ def stem_mixer(
         initialVolumesDb=initial_volumes_db or {},
         initialMuted=initial_muted or {},
         initialSoloed=initial_soloed or {},
+        trackTitle=track_title,
         key=key,
         default=None,
     )

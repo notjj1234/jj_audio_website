@@ -64,6 +64,17 @@ export function clearSolo(state: MixerState): MixerState {
   return { ...state, soloed: {} };
 }
 
+/** Clear all mute and solo flags (volumes unchanged). */
+export function resetMuteSolo(stemIds: string[], state: MixerState): MixerState {
+  const muted: Record<string, boolean> = {};
+  const soloed: Record<string, boolean> = {};
+  for (const id of stemIds) {
+    muted[id] = false;
+    soloed[id] = false;
+  }
+  return { ...state, muted, soloed };
+}
+
 /** Create/resume AudioContext only on user gesture (mobile-safe). */
 export async function ensureAudioContext(
   existing: AudioContext | null

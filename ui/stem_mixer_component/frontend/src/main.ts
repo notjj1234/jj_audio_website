@@ -9,7 +9,15 @@ const DB_MIN = -60;
 const DB_MAX = 24;
 const DB_DEFAULT = 0;
 
-type StemInfo = { id: string; label: string; url: string };
+type StemInfo = {
+  id: string;
+  label: string;
+  url: string;
+  downloadUrl?: string;
+  downloadFilename?: string;
+  peaks?: number[];
+  hint?: string;
+};
 
 type MixerState = {
   volumesDb: Record<string, number>;
@@ -235,6 +243,7 @@ const engine = new StemMixerEngine();
 let lastStemKey = "";
 let state: MixerState = { volumesDb: {}, muted: {}, soloed: {} };
 let stemInfos: StemInfo[] = [];
+let trackTitle = "";
 
 let reportTimer: number | null = null;
 let lastPublished = "";
@@ -298,11 +307,13 @@ function renderUI(theme?: Theme): void {
 
   root.innerHTML = `
     <div class="mixer" style="--text:${textColor};--bg:${bg};--secondary:${secondary};--primary:${primary}">
+      <div class="track-title" id="track-title"></div>
       <div class="status" id="status">Ready</div>
       <div class="transport">
         <button type="button" class="primary" id="btn-playpause">Play</button>
         <button type="button" class="secondary" id="btn-restart">Restart</button>
         <button type="button" class="secondary" id="btn-muteall">Mute All</button>
+        <button type="button" class="secondary" id="btn-reset">Reset</button>
         <span class="time" id="time">0:00 / 0:00</span>
       </div>
       <input type="range" id="seek" min="0" max="1000" value="0" step="1" />
@@ -319,7 +330,9 @@ function renderUI(theme?: Theme): void {
       return `
         <div class="stem-row" data-id="${stem.id}">
           <div class="stem-head">
-            <strong>${escapeHtml(stem.label)}</strong>
+            <strong${stem.hint ? ` title="${escapeHtml(stem.hint)}"` : ""}>${escapeHtml(
+        stem.label
+      )}</strong>
             <span class="badges">${soloed ? "SOLO" : muted ? "MUTED" : ""}</span>
           </div>
           <label class="vol">
@@ -332,9 +345,30 @@ function renderUI(theme?: Theme): void {
             <label><input type="checkbox" class="mute" data-id="${stem.id}" ${muted ? "checked" : ""}/> Mute</label>
             <label><input type="checkbox" class="solo" data-id="${stem.id}" ${soloed ? "checked" : ""}/> Solo</label>
           </div>
+          <details class="stem-details">
+            <summary>Waveform</summary>
+            <div class="stem-details-body">
+              ${waveformSvg(stem.peaks)}
+            </div>
+          </details>
+          ${
+            stem.downloadUrl
+              ? `<a class="download-link" href="${stem.downloadUrl}" download="${escapeHtml(
+                  stem.downloadFilename || `${stem.label}.wav`
+                )}">Download ${escapeHtml(stem.label)}</a>`
+              : ""
+          }
         </div>`;
     })
     .join("");
+
+  stemsEl.querySelectorAll<HTMLDetailsElement>("details.stem-details").forEach((el) => {
+    el.addEventListener("toggle", () => {
+      const row = el.closest<HTMLElement>(".stem-row");
+      if (row) row.classList.toggle("stem-row--expanded", el.open);
+      scheduleFrameHeight();
+    });
+  });
 
   document.getElementById("btn-playpause")!.onclick = () =>
     void (engine.isPlaying() ? engine.pause() : engine.play());
@@ -343,9 +377,33 @@ function renderUI(theme?: Theme): void {
   document.getElementById("btn-muteall")!.onclick = () => {
     // If every stem is already muted, Unmute All; otherwise Mute All.
     const target = !allMuted();
-    for (const stem of stemInfos) state.muted[stem.id] = target;
+    for (const stem of stemInfos) {
+      state.muted[stem.id] = target;
+      // Mute and solo are mutually exclusive per stem.
+      if (target) state.soloed[stem.id] = false;
+    }
     stemsEl.querySelectorAll<HTMLInputElement>(".mute").forEach((el) => {
       el.checked = !!state.muted[el.dataset.id!];
+    });
+    stemsEl.querySelectorAll<HTMLInputElement>(".solo").forEach((el) => {
+      el.checked = !!state.soloed[el.dataset.id!];
+    });
+    applyStateGains();
+    reportState();
+    updateBadges();
+    updateMuteAllLabel();
+  };
+
+  document.getElementById("btn-reset")!.onclick = () => {
+    for (const stem of stemInfos) {
+      state.muted[stem.id] = false;
+      state.soloed[stem.id] = false;
+    }
+    stemsEl.querySelectorAll<HTMLInputElement>(".mute").forEach((el) => {
+      el.checked = false;
+    });
+    stemsEl.querySelectorAll<HTMLInputElement>(".solo").forEach((el) => {
+      el.checked = false;
     });
     applyStateGains();
     reportState();
@@ -378,7 +436,13 @@ function renderUI(theme?: Theme): void {
 
   stemsEl.querySelectorAll<HTMLInputElement>(".mute").forEach((el) => {
     el.onchange = () => {
-      state.muted[el.dataset.id!] = el.checked;
+      const id = el.dataset.id!;
+      state.muted[id] = el.checked;
+      if (el.checked) {
+        state.soloed[id] = false;
+        const soloEl = stemsEl.querySelector<HTMLInputElement>(`.solo[data-id="${CSS.escape(id)}"]`);
+        if (soloEl) soloEl.checked = false;
+      }
       applyStateGains();
       reportState();
       updateBadges();
@@ -388,10 +452,17 @@ function renderUI(theme?: Theme): void {
 
   stemsEl.querySelectorAll<HTMLInputElement>(".solo").forEach((el) => {
     el.onchange = () => {
-      state.soloed[el.dataset.id!] = el.checked;
+      const id = el.dataset.id!;
+      state.soloed[id] = el.checked;
+      if (el.checked) {
+        state.muted[id] = false;
+        const muteEl = stemsEl.querySelector<HTMLInputElement>(`.mute[data-id="${CSS.escape(id)}"]`);
+        if (muteEl) muteEl.checked = false;
+      }
       applyStateGains();
       reportState();
       updateBadges();
+      updateMuteAllLabel();
     };
   });
 
@@ -406,7 +477,20 @@ function renderUI(theme?: Theme): void {
     if (playBtn) playBtn.textContent = playing ? "Pause" : "Play";
   });
 
+  updateTrackTitleDisplay();
   scheduleFrameHeight();
+}
+
+function updateTrackTitleDisplay(): void {
+  const el = document.getElementById("track-title");
+  if (!el) return;
+  if (trackTitle.trim()) {
+    el.textContent = trackTitle.trim();
+    el.style.display = "block";
+  } else {
+    el.textContent = "";
+    el.style.display = "none";
+  }
 }
 
 function allMuted(): boolean {
@@ -429,6 +513,29 @@ function updateBadges(): void {
   });
 }
 
+function waveformSvg(peaks: number[] | undefined): string {
+  if (!peaks || peaks.length === 0) return "";
+  const width = 200;
+  const height = 48;
+  const mid = height / 2;
+  const n = peaks.length;
+  const step = n > 1 ? width / (n - 1) : width;
+  const max = Math.max(...peaks, 0.0001);
+  const top: string[] = [];
+  const bottom: string[] = [];
+  for (let i = 0; i < n; i++) {
+    const x = i * step;
+    const amp = Math.min(1, peaks[i] / max) * (mid - 2);
+    top.push(`${x.toFixed(1)},${(mid - amp).toFixed(1)}`);
+    bottom.push(`${x.toFixed(1)},${(mid + amp).toFixed(1)}`);
+  }
+  const points = [...top, ...bottom.reverse()].join(" ");
+  return (
+    `<svg class="waveform-svg" viewBox="0 0 ${width} ${height}" ` +
+    `preserveAspectRatio="none" aria-hidden="true"><polygon points="${points}" /></svg>`
+  );
+}
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -448,11 +555,17 @@ async function onRender(event: Event): Promise<void> {
     initialVolumesDb?: Record<string, number>;
     initialMuted?: Record<string, boolean>;
     initialSoloed?: Record<string, boolean>;
+    trackTitle?: string;
   };
 
   const stems = args.stems ?? [];
   const key = stemKey(stems);
   const status = () => document.getElementById("status");
+  const nextTitle = args.trackTitle ?? "";
+  if (nextTitle !== trackTitle) {
+    trackTitle = nextTitle;
+    updateTrackTitleDisplay();
+  }
 
   if (key !== lastStemKey) {
     lastStemKey = key;

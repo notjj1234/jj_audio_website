@@ -9,6 +9,7 @@ import {
   clearSolo,
   effectiveGains,
   isAudible,
+  resetMuteSolo,
   setAllMuted,
   type MixerState,
   type StemInfo,
@@ -83,13 +84,25 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
   const everyMuted = allMuted(stemIds, state);
   const soloActive = anySoloed(stemIds, state);
 
-  const toggleMute = (id: string) =>
-    apply({ ...state, muted: { ...state.muted, [id]: !state.muted[id] } });
+  const toggleMute = (id: string) => {
+    const muted = !state.muted[id];
+    apply({
+      ...state,
+      muted: { ...state.muted, [id]: muted },
+      soloed: muted ? { ...state.soloed, [id]: false } : state.soloed,
+    });
+  };
 
-  const toggleSolo = (id: string) =>
-    apply({ ...state, soloed: { ...state.soloed, [id]: !state.soloed[id] } });
+  const toggleSolo = (id: string) => {
+    const soloed = !state.soloed[id];
+    apply({
+      ...state,
+      soloed: { ...state.soloed, [id]: soloed },
+      muted: soloed ? { ...state.muted, [id]: false } : state.muted,
+    });
+  };
 
-  const muteAll = () => apply(setAllMuted(stemIds, state, true));
+  const muteAll = () => apply(setAllMuted(stemIds, clearSolo(state), true));
   const unmuteAll = () => apply(setAllMuted(stemIds, state, false));
 
   return (
@@ -136,6 +149,13 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
           onClick={everyMuted ? unmuteAll : muteAll}
         >
           {everyMuted ? "Unmute All" : "Mute All"}
+        </button>
+        <button
+          type="button"
+          className="secondary"
+          onClick={() => apply(resetMuteSolo(stemIds, state))}
+        >
+          Reset
         </button>
         <button
           type="button"

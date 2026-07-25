@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import time
 import uuid
@@ -89,3 +90,26 @@ def list_recent_runs(
         runs.append(meta)
     runs.sort(key=lambda m: m.get("created_at", 0), reverse=True)
     return runs[:limit]
+
+
+def delete_run(run_dir: str | Path) -> bool:
+    """
+    Delete a UI run directory and its artifacts.
+
+    Only paths that resolve to a direct child of ``DATA_DIR`` are removed.
+    Returns True if the directory was deleted (or already absent).
+    """
+    path = Path(run_dir).resolve()
+    data_root = DATA_DIR.resolve()
+    try:
+        path.relative_to(data_root)
+    except ValueError:
+        return False
+    if path == data_root or path.parent != data_root:
+        return False
+    if not path.exists():
+        return True
+    if not path.is_dir():
+        return False
+    shutil.rmtree(path)
+    return not path.exists()

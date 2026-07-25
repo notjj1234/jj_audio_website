@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 
@@ -22,3 +23,12 @@ def test_stem_mixer_import():
 
     assert component_build_available()
     assert callable(stem_mixer)
+
+
+def test_stem_mixer_accepts_track_title():
+    from ui.stem_mixer_component import stem_mixer
+
+    params = inspect.signature(stem_mixer).parameters
+    assert "track_title" in params
+    assert params["track_title"].default == ""
+
