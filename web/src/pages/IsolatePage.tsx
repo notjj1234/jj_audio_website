@@ -19,6 +19,13 @@ const STEM_LABELS: Record<string, string> = {
 
 const AUDIO_KINDS = new Set(Object.keys(STEM_LABELS));
 
+const QUALITY_OPTIONS: { value: string; label: string }[] = [
+  { value: "fast", label: "Fast" },
+  { value: "balanced", label: "Balanced" },
+  { value: "high", label: "High" },
+  { value: "extreme", label: "Extreme" },
+];
+
 export function IsolatePage() {
   const [file, setFile] = useState<File | null>(null);
   const [quality, setQuality] = useState("fast");
@@ -71,7 +78,10 @@ export function IsolatePage() {
       <p className="lede">
         Separate stems with Demucs. Default quality is fast for public servers.
       </p>
-      <form className="stack" onSubmit={onSubmit}>
+      <form
+        className={`stack${job ? " stack-secondary" : ""}`}
+        onSubmit={onSubmit}
+      >
         <label className="field">
           Audio file
           <input
@@ -80,15 +90,25 @@ export function IsolatePage() {
             onChange={(e) => setFile(e.target.files?.[0] ?? null)}
           />
         </label>
-        <label className="field">
-          Quality
-          <select value={quality} onChange={(e) => setQuality(e.target.value)}>
-            <option value="fast">Fast</option>
-            <option value="balanced">Balanced</option>
-            <option value="high">High</option>
-            <option value="extreme">Extreme</option>
-          </select>
-        </label>
+        <div className="field">
+          <span>Quality</span>
+          <div className="segmented" role="radiogroup" aria-label="Quality">
+            {QUALITY_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                role="radio"
+                aria-checked={quality === opt.value}
+                className={`segmented-option${
+                  quality === opt.value ? " active" : ""
+                }`}
+                onClick={() => setQuality(opt.value)}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
         {error && <p className="error">{error}</p>}
         <button type="submit" disabled={busy}>
           {busy ? "Starting…" : "Start isolation"}
@@ -107,23 +127,24 @@ export function IsolatePage() {
       </div>
 
       {job?.status === "succeeded" && (
-        <>
-          <div className="artifacts" style={{ marginTop: "1rem" }}>
+        <div className="results-card" style={{ marginTop: "1rem" }}>
+          <h2 className="section-heading">Your files</h2>
+          <div className="artifacts">
             {job.artifacts.zip && (
-              <a href={job.artifacts.zip} download>
+              <a className="btn" href={job.artifacts.zip} download>
                 Download all stems (ZIP)
               </a>
             )}
             {Object.entries(job.artifacts)
               .filter(([k]) => k !== "zip" && k !== "guitar_split_diagnostics")
               .map(([kind, url]) => (
-                <a key={kind} href={url} download>
-                  {STEM_LABELS[kind] ?? kind}
+                <a key={kind} className="btn secondary" href={url} download>
+                  Download {STEM_LABELS[kind] ?? kind}
                 </a>
               ))}
           </div>
           {stems.length > 0 && <StemMixer stems={stems} />}
-        </>
+        </div>
       )}
     </div>
   );

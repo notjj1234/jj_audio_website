@@ -33,7 +33,11 @@ function Shell() {
             >
               Isolate
             </NavLink>
-            <span style={{ opacity: 0.7, fontSize: "0.9rem" }}>{email}</span>
+            <span
+              style={{ opacity: 0.7, fontSize: "0.9rem", marginLeft: "auto" }}
+            >
+              {email}
+            </span>
             <button type="button" className="secondary" onClick={() => void logout()}>
               Log out
             </button>

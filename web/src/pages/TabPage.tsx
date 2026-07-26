@@ -43,7 +43,10 @@ export function TabPage() {
       <p className="lede">
         Upload a track, wait for the job to finish, then download the PDF.
       </p>
-      <form className="stack" onSubmit={onSubmit}>
+      <form
+        className={`stack${job ? " stack-secondary" : ""}`}
+        onSubmit={onSubmit}
+      >
         <label className="field">
           Audio file
           <input
@@ -78,15 +81,18 @@ export function TabPage() {
       </div>
 
       {job?.status === "succeeded" && job.artifacts.pdf && (
-        <div className="artifacts" style={{ marginTop: "1rem" }}>
-          <a href={job.artifacts.pdf} download>
-            Download PDF
-          </a>
-          {job.artifacts.midi && (
-            <a href={job.artifacts.midi} download>
-              Download MIDI
+        <div className="results-card" style={{ marginTop: "1rem" }}>
+          <h2 className="section-heading">Your files</h2>
+          <div className="artifacts">
+            <a className="btn" href={job.artifacts.pdf} download>
+              Download PDF
             </a>
-          )}
+            {job.artifacts.midi && (
+              <a className="btn secondary" href={job.artifacts.midi} download>
+                Download MIDI
+              </a>
+            )}
+          </div>
         </div>
       )}
     </div>

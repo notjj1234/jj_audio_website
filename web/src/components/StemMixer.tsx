@@ -107,40 +107,43 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
 
   return (
     <div className="mixer">
+      <h2 className="section-heading">Mix &amp; preview</h2>
       <div className="status">{status}</div>
 
-      <div className="transport">
-        <button type="button" onClick={() => void engineRef.current.play()}>
-          {playing ? "Playing…" : "Play"}
-        </button>
-        <button
-          type="button"
-          className="secondary"
-          onClick={() => void engineRef.current.pause()}
-        >
-          Pause
-        </button>
-        <button
-          type="button"
-          className="secondary"
-          onClick={() => void engineRef.current.restart()}
-        >
-          Restart
-        </button>
-        <span className="time">{timeLabel}</span>
-      </div>
+      <div className="transport-sticky">
+        <div className="transport">
+          <button type="button" onClick={() => void engineRef.current.play()}>
+            {playing ? "Playing…" : "Play"}
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => void engineRef.current.pause()}
+          >
+            Pause
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => void engineRef.current.restart()}
+          >
+            Restart
+          </button>
+          <span className="time">{timeLabel}</span>
+        </div>
 
-      <input
-        type="range"
-        min={0}
-        max={1000}
-        value={seek}
-        onChange={(e) => {
-          const dur = engineRef.current.getDuration() || 1;
-          const t = (Number(e.target.value) / 1000) * dur;
-          void engineRef.current.seek(t);
-        }}
-      />
+        <input
+          type="range"
+          min={0}
+          max={1000}
+          value={seek}
+          onChange={(e) => {
+            const dur = engineRef.current.getDuration() || 1;
+            const t = (Number(e.target.value) / 1000) * dur;
+            void engineRef.current.seek(t);
+          }}
+        />
+      </div>
 
       <div className="master">
         <button
@@ -155,7 +158,7 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
           className="secondary"
           onClick={() => apply(resetMuteSolo(stemIds, state))}
         >
-          Reset
+          Reset mix
         </button>
         <button
           type="button"
@@ -165,11 +168,12 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
         >
           Clear solo
         </button>
-        {soloActive && (
-          <span className="master-hint">
-            Solo active — only soloed stems play (mutes ignored)
-          </span>
-        )}
+        <span
+          className="master-hint"
+          style={{ visibility: soloActive ? "visible" : "hidden" }}
+        >
+          Solo active — only soloed stems play (mutes ignored)
+        </span>
       </div>
 
       <div className="stems">
