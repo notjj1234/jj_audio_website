@@ -1,5 +1,5 @@
 basic-pitch[onnx]>=0.3.0
-setuptools>=68,<81
+setuptools>=68,<85
 onnxruntime>=1.16
 pretty_midi>=0.2.10
 numpy>=1.24
