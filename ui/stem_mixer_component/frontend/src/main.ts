@@ -23,6 +23,7 @@ type MixerState = {
   volumesDb: Record<string, number>;
   muted: Record<string, boolean>;
   soloed: Record<string, boolean>;
+  masterVolumeDb: number;
 };
 
 function dbToLinear(db: number): number {
@@ -35,6 +36,9 @@ function effectiveGains(
   state: MixerState
 ): Record<string, number> {
   const anySolo = stemIds.some((id) => state.soloed[id]);
+  const masterLin = dbToLinear(
+    Math.max(DB_MIN, Math.min(DB_MAX, state.masterVolumeDb ?? DB_DEFAULT))
+  );
   const gains: Record<string, number> = {};
   for (const id of stemIds) {
     const db = Math.max(
@@ -42,7 +46,7 @@ function effectiveGains(
       Math.min(DB_MAX, state.volumesDb[id] ?? DB_DEFAULT)
     );
     const audible = anySolo ? !!state.soloed[id] : !state.muted[id];
-    gains[id] = audible ? dbToLinear(db) : 0;
+    gains[id] = audible ? dbToLinear(db) * masterLin : 0;
   }
   return gains;
 }
@@ -136,6 +140,7 @@ class StemMixerEngine {
         volumesDb: Object.fromEntries(this.stemIds.map((id) => [id, DB_DEFAULT])),
         muted: {},
         soloed: {},
+        masterVolumeDb: DB_DEFAULT,
       })
     );
     this.tick();
@@ -241,7 +246,12 @@ class StemMixerEngine {
 
 const engine = new StemMixerEngine();
 let lastStemKey = "";
-let state: MixerState = { volumesDb: {}, muted: {}, soloed: {} };
+let state: MixerState = {
+  volumesDb: {},
+  muted: {},
+  soloed: {},
+  masterVolumeDb: DB_DEFAULT,
+};
 let stemInfos: StemInfo[] = [];
 let trackTitle = "";
 
@@ -253,6 +263,7 @@ function statePayload(): string {
     volumesDb: state.volumesDb,
     muted: state.muted,
     soloed: state.soloed,
+    masterVolumeDb: state.masterVolumeDb,
   });
 }
 
@@ -272,6 +283,7 @@ function reportState(immediate = false): void {
       volumesDb: { ...state.volumesDb },
       muted: { ...state.muted },
       soloed: { ...state.soloed },
+      masterVolumeDb: state.masterVolumeDb,
     });
   };
   if (immediate) {
@@ -317,6 +329,12 @@ function renderUI(theme?: Theme): void {
         <span class="time" id="time">0:00 / 0:00</span>
       </div>
       <input type="range" id="seek" min="0" max="1000" value="0" step="1" />
+      <label class="master-vol">
+        Master volume (dB)
+        <input type="range" id="master-vol" class="vol-slider"
+          min="${DB_MIN}" max="${DB_MAX}" step="0.5" value="${state.masterVolumeDb}" />
+        <span id="master-vol-val">${state.masterVolumeDb.toFixed(1)} dB</span>
+      </label>
       <div class="stems" id="stems"></div>
     </div>
   `;
@@ -345,30 +363,19 @@ function renderUI(theme?: Theme): void {
             <label><input type="checkbox" class="mute" data-id="${stem.id}" ${muted ? "checked" : ""}/> Mute</label>
             <label><input type="checkbox" class="solo" data-id="${stem.id}" ${soloed ? "checked" : ""}/> Solo</label>
           </div>
-          <details class="stem-details">
-            <summary>Waveform</summary>
-            <div class="stem-details-body">
-              ${waveformSvg(stem.peaks)}
-            </div>
-          </details>
-          ${
-            stem.downloadUrl
-              ? `<a class="download-link" href="${stem.downloadUrl}" download="${escapeHtml(
-                  stem.downloadFilename || `${stem.label}.wav`
-                )}">Download ${escapeHtml(stem.label)}</a>`
-              : ""
-          }
+          <div class="stem-preview">
+            ${waveformSvg(stem.peaks)}
+            ${
+              stem.downloadUrl
+                ? `<a class="download-link" href="${stem.downloadUrl}" download="${escapeHtml(
+                    stem.downloadFilename || `${stem.label}.wav`
+                  )}">Download ${escapeHtml(stem.label)}</a>`
+                : ""
+            }
+          </div>
         </div>`;
     })
     .join("");
-
-  stemsEl.querySelectorAll<HTMLDetailsElement>("details.stem-details").forEach((el) => {
-    el.addEventListener("toggle", () => {
-      const row = el.closest<HTMLElement>(".stem-row");
-      if (row) row.classList.toggle("stem-row--expanded", el.open);
-      scheduleFrameHeight();
-    });
-  });
 
   document.getElementById("btn-playpause")!.onclick = () =>
     void (engine.isPlaying() ? engine.pause() : engine.play());
@@ -398,13 +405,24 @@ function renderUI(theme?: Theme): void {
     for (const stem of stemInfos) {
       state.muted[stem.id] = false;
       state.soloed[stem.id] = false;
+      state.volumesDb[stem.id] = DB_DEFAULT;
     }
+    state.masterVolumeDb = DB_DEFAULT;
     stemsEl.querySelectorAll<HTMLInputElement>(".mute").forEach((el) => {
       el.checked = false;
     });
     stemsEl.querySelectorAll<HTMLInputElement>(".solo").forEach((el) => {
       el.checked = false;
     });
+    stemsEl.querySelectorAll<HTMLInputElement>(".vol-slider").forEach((el) => {
+      el.value = String(DB_DEFAULT);
+      const label = el.parentElement?.querySelector(".vol-val");
+      if (label) label.textContent = `${DB_DEFAULT.toFixed(1)} dB`;
+    });
+    const masterEl = document.getElementById("master-vol") as HTMLInputElement | null;
+    const masterVal = document.getElementById("master-vol-val");
+    if (masterEl) masterEl.value = String(DB_DEFAULT);
+    if (masterVal) masterVal.textContent = `${DB_DEFAULT.toFixed(1)} dB`;
     applyStateGains();
     reportState();
     updateBadges();
@@ -417,6 +435,18 @@ function renderUI(theme?: Theme): void {
     const dur = engine.getDuration() || 1;
     const t = (Number(seek.value) / 1000) * dur;
     void engine.seek(t);
+  };
+
+  const masterVol = document.getElementById("master-vol") as HTMLInputElement;
+  masterVol.oninput = () => {
+    const db = Number(masterVol.value);
+    state.masterVolumeDb = db;
+    const label = document.getElementById("master-vol-val");
+    if (label) label.textContent = `${db.toFixed(1)} dB`;
+    applyStateGains();
+  };
+  masterVol.onchange = () => {
+    reportState(true);
   };
 
   stemsEl.querySelectorAll<HTMLInputElement>(".vol-slider").forEach((el) => {
@@ -555,6 +585,7 @@ async function onRender(event: Event): Promise<void> {
     initialVolumesDb?: Record<string, number>;
     initialMuted?: Record<string, boolean>;
     initialSoloed?: Record<string, boolean>;
+    initialMasterVolumeDb?: number;
     trackTitle?: string;
   };
 
@@ -570,10 +601,12 @@ async function onRender(event: Event): Promise<void> {
   if (key !== lastStemKey) {
     lastStemKey = key;
     stemInfos = stems;
+    const masterInit = Number(args.initialMasterVolumeDb);
     state = {
       volumesDb: { ...(args.initialVolumesDb ?? {}) },
       muted: { ...(args.initialMuted ?? {}) },
       soloed: { ...(args.initialSoloed ?? {}) },
+      masterVolumeDb: Number.isFinite(masterInit) ? masterInit : DB_DEFAULT,
     };
     for (const s of stems) {
       if (state.volumesDb[s.id] === undefined) state.volumesDb[s.id] = DB_DEFAULT;

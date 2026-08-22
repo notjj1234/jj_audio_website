@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import mimetypes
 from pathlib import Path
 
 ALLOWED_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".mpeg", ".mp4"}
@@ -17,7 +16,8 @@ ALLOWED_MIME_EXACT = {
     "audio/mp4",
     "audio/x-m4a",
     "audio/m4a",
-    "application/octet-stream",  # browsers sometimes send this; extension still checked
+    "video/mp4",  # m4a/mp4 containers
+    "application/octet-stream",  # allowed only when magic bytes match
 }
 
 
@@ -35,12 +35,33 @@ def is_allowed_upload(filename: str, content_type: str | None) -> tuple[bool, st
         return False, f"Unsupported file extension '{ext}'. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
 
     ctype = (content_type or "").split(";")[0].strip().lower()
-    if ctype and ctype not in ALLOWED_MIME_EXACT and not any(
-        ctype.startswith(p) for p in ALLOWED_MIME_PREFIXES
-    ):
-        # Guess from extension as a soft fallback
-        guessed, _ = mimetypes.guess_type(name)
-        if guessed and guessed.startswith("audio/"):
-            return True, ""
-        return False, f"Unsupported content type '{ctype}'"
-    return True, ""
+    if not ctype:
+        return True, ""
+    if ctype in ALLOWED_MIME_EXACT or any(ctype.startswith(p) for p in ALLOWED_MIME_PREFIXES):
+        return True, ""
+    return False, f"Unsupported content type '{ctype}'"
+
+
+def is_audio_magic(header: bytes) -> bool:
+    """Return True if the file header looks like WAV, FLAC, MP3, or MP4/M4A."""
+    if len(header) < 12:
+        return False
+    if header.startswith(b"RIFF") and header[8:12] == b"WAVE":
+        return True
+    if header.startswith(b"fLaC"):
+        return True
+    if header.startswith(b"ID3"):
+        return True
+    # MPEG audio frame sync (MP3 without ID3)
+    if header[0] == 0xFF and (header[1] & 0xE0) == 0xE0:
+        return True
+    # ISO BMFF (mp4 / m4a): size + 'ftyp'
+    if header[4:8] == b"ftyp":
+        return True
+    return False
+
+
+def is_allowed_audio_content(header: bytes) -> tuple[bool, str]:
+    if is_audio_magic(header):
+        return True, ""
+    return False, "File does not look like audio"

@@ -6,6 +6,29 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
+
+_YOUTUBE_HOSTS = frozenset(
+    {
+        "youtube.com",
+        "www.youtube.com",
+        "m.youtube.com",
+        "music.youtube.com",
+        "youtu.be",
+        "www.youtu.be",
+    }
+)
+
+
+def is_youtube_url(url: str) -> bool:
+    """Return True if ``url`` is an http(s) YouTube link."""
+    parsed = urlparse((url or "").strip())
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if host in _YOUTUBE_HOSTS:
+        return True
+    return host.endswith(".youtube.com")
 
 
 def _require_ffmpeg() -> str:
@@ -49,6 +72,8 @@ def normalize_audio(input_path: str | Path, output_path: str | Path | None = Non
 
 def download_youtube_audio(url: str, output_dir: str | Path) -> Path:
     """Download audio from YouTube via yt-dlp."""
+    if not is_youtube_url(url):
+        raise ValueError("Only YouTube URLs are allowed")
     import yt_dlp
 
     out_dir = Path(output_dir)

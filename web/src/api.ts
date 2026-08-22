@@ -11,15 +11,16 @@ export type JobResponse = {
   artifacts: Record<string, string>;
 };
 
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 const TOKEN_KEY = "att_access_token";
 
 export function getAccessToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY);
+  return sessionStorage.getItem(TOKEN_KEY);
 }
 
 export function setAccessToken(token: string | null): void {
-  if (token) localStorage.setItem(TOKEN_KEY, token);
-  else localStorage.removeItem(TOKEN_KEY);
+  if (token) sessionStorage.setItem(TOKEN_KEY, token);
+  else sessionStorage.removeItem(TOKEN_KEY);
 }
 
 async function api<T>(
@@ -35,7 +36,7 @@ async function api<T>(
   if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const res = await fetch(path, { ...init, headers, credentials: "include" });
+  const res = await fetch(`${API_BASE}${path}`, { ...init, headers, credentials: "include" });
   if (!res.ok) {
     let detail = res.statusText;
     try {
@@ -54,6 +55,16 @@ export async function login(email: string, password: string): Promise<{ email: s
   const data = await api<{ access_token: string; email: string }>(
     "/v1/auth/login",
     { method: "POST", body: JSON.stringify({ email, password }) },
+    false
+  );
+  setAccessToken(data.access_token);
+  return { email: data.email };
+}
+
+export async function startAnonymousSession(): Promise<{ email: string }> {
+  const data = await api<{ access_token: string; email: string }>(
+    "/v1/auth/session",
+    { method: "POST" },
     false
   );
   setAccessToken(data.access_token);
@@ -90,6 +101,29 @@ export async function getJob(jobId: string): Promise<JobResponse> {
   return api(`/v1/jobs/${jobId}`);
 }
 
+export type ProcessingModeInfo = {
+  id: string;
+  label: string;
+  enabled: boolean;
+  reason: string | null;
+  device: string;
+  max_duration_sec: number;
+};
+
+export type SystemCapabilities = {
+  device_options: string[];
+  recommended_mode: string;
+  detected_device: string;
+  ram_gb: number | null;
+  notes: string;
+  low_ram: boolean;
+  modes: ProcessingModeInfo[];
+};
+
+export async function getSystemCapabilities(): Promise<SystemCapabilities> {
+  return api("/v1/system/capabilities", {}, false);
+}
+
 export async function cancelJob(jobId: string): Promise<JobResponse> {
   return api(`/v1/jobs/${jobId}/cancel`, { method: "POST" });
 }
@@ -118,10 +152,12 @@ export function watchJob(jobId: string, onUpdate: ProgressHandler): () => void {
   };
 
   const token = getAccessToken();
-  const proto = location.protocol === "https:" ? "wss" : "ws";
   const qs = token ? `?access_token=${encodeURIComponent(token)}` : "";
+  const wsUrl = API_BASE
+    ? `${API_BASE.replace(/^http/, "ws")}/v1/jobs/${jobId}/ws${qs}`
+    : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/v1/jobs/${jobId}/ws${qs}`;
   try {
-    ws = new WebSocket(`${proto}://${location.host}/v1/jobs/${jobId}/ws${qs}`);
+    ws = new WebSocket(wsUrl);
     ws.onmessage = (ev) => {
       try {
         const data = JSON.parse(ev.data);

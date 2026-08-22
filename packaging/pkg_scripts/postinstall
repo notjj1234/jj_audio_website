@@ -1,0 +1,10 @@
+#!/bin/bash
+# Runs as root after pkg installs AudioTools.app into /Applications.
+set -euo pipefail
+
+APP="/Applications/AudioTools.app"
+if [[ -d "$APP" ]]; then
+  xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
+fi
+
+exit 0

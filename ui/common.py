@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import time
@@ -14,8 +15,36 @@ _SRC = _REPO_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-DATA_DIR = _REPO_ROOT / "data" / "ui_runs"
+
+def _resolve_data_dir() -> Path:
+    override = os.environ.get("AUDIO_TOOLS_DATA_DIR", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return _REPO_ROOT / "data" / "ui_runs"
+
+
+DATA_DIR = _resolve_data_dir()
 _META_FILENAME = "meta.json"
+
+# Streamlit ``type=`` for uploaders. Include the ``audio`` shortcut (→ ``audio/*``)
+# so OS/native pickers (incl. pywebview on macOS) grey out non-audio files; keep
+# explicit MIME + extensions aligned with backend/limits.py.
+AUDIO_UPLOAD_TYPES: list[str] = [
+    "audio",
+    "audio/mpeg",
+    "audio/wav",
+    "audio/x-wav",
+    "audio/wave",
+    "audio/flac",
+    "audio/x-flac",
+    "audio/mp4",
+    "audio/x-m4a",
+    "audio/m4a",
+    ".mp3",
+    ".wav",
+    ".flac",
+    ".m4a",
+]
 
 
 def ensure_src_path() -> None:
@@ -23,11 +52,18 @@ def ensure_src_path() -> None:
         sys.path.insert(0, str(_SRC))
 
 
+def _safe_upload_name(name: str | None) -> str:
+    base = Path(name or "").name.replace("\x00", "").strip()
+    if not base or base in {".", ".."}:
+        raise ValueError("Invalid upload filename")
+    return base
+
+
 def save_upload(uploaded_file) -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     run_dir = DATA_DIR / str(uuid.uuid4())
     run_dir.mkdir(parents=True, exist_ok=True)
-    dest = run_dir / uploaded_file.name
+    dest = run_dir / _safe_upload_name(getattr(uploaded_file, "name", None))
     dest.write_bytes(uploaded_file.getvalue())
     return dest
 

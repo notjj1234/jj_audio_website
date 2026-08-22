@@ -7,13 +7,11 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sqlalchemy.orm import Session
-
 from backend.config import settings
 from backend.contracts import JobEvent, JobKind, JobStatus
 from backend import db as db_module
 from backend.events import event_bus
-from backend.models import Job, JobArtifact, JobKindDB, JobStatusDB
+from backend.models import Job, JobArtifact, JobKindDB, JobStatusDB, Upload
 from backend.storage import LocalStorage, get_storage
 
 
@@ -41,9 +39,12 @@ class JobRecord:
     isolate_model: str = "htdemucs_6s"
     isolate_quality: str = "fast"
     isolate_device: str = "cpu"
+    demucs_quality: str = "balanced"
+    demucs_device: str = "cpu"
     isolate_two_stems: str | None = None
     isolate_lead_rhythm: bool = True
     isolate_dual_guitar: bool = False
+    isolate_start_sec: float = 0.0
     cancel_requested: bool = False
     work_dir: str | None = None
 
@@ -65,10 +66,10 @@ class JobManager:
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
         self._local_work: dict[str, Path] = {}
 
-    def save_upload_stream(self, filename: str, chunks) -> tuple[str, str]:
+    def save_upload_stream(self, filename: str, chunks, user_id: str) -> tuple[str, str]:
         """Save upload chunks to storage. Returns (upload_id, storage_key)."""
         upload_id = str(uuid.uuid4())
-        key = f"uploads/{upload_id}/{filename}"
+        key = f"uploads/{user_id}/{upload_id}/{filename}"
         storage = get_storage()
         if isinstance(storage, LocalStorage):
             dest = storage.local_path(key)
@@ -76,42 +77,50 @@ class JobManager:
             with dest.open("wb") as f:
                 for chunk in chunks:
                     f.write(chunk)
-            return upload_id, key
+        else:
+            import tempfile
 
-        # Buffer to temp then upload for S3
-        import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(filename).suffix) as tmp:
+                for chunk in chunks:
+                    tmp.write(chunk)
+                tmp_path = Path(tmp.name)
+            try:
+                storage.put_file(key, tmp_path)
+            finally:
+                tmp_path.unlink(missing_ok=True)
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(filename).suffix) as tmp:
-            for chunk in chunks:
-                tmp.write(chunk)
-            tmp_path = Path(tmp.name)
+        db = db_module.SessionLocal()
         try:
-            storage.put_file(key, tmp_path)
+            db.add(
+                Upload(
+                    id=upload_id,
+                    user_id=user_id,
+                    storage_key=key,
+                    filename=filename,
+                )
+            )
+            db.commit()
         finally:
-            tmp_path.unlink(missing_ok=True)
+            db.close()
         return upload_id, key
 
-    def save_upload(self, filename: str, content: bytes) -> tuple[str, Path]:
-        upload_id, key = self.save_upload_stream(filename, [content])
+    def save_upload(self, filename: str, content: bytes, user_id: str) -> tuple[str, Path]:
+        upload_id, key = self.save_upload_stream(filename, [content], user_id)
         storage = get_storage()
         if isinstance(storage, LocalStorage):
             return upload_id, storage.local_path(key)
         path = storage.open_temp(key, suffix=Path(filename).suffix)
         return upload_id, path
 
-    def resolve_upload_key(self, upload_id: str) -> str | None:
-        storage = get_storage()
-        prefix = f"uploads/{upload_id}/"
-        if isinstance(storage, LocalStorage):
-            folder = storage.root / "uploads" / upload_id
-            if not folder.exists():
+    def resolve_upload_key(self, upload_id: str, user_id: str) -> str | None:
+        db = db_module.SessionLocal()
+        try:
+            row = db.query(Upload).filter(Upload.id == upload_id, Upload.user_id == user_id).first()
+            if not row:
                 return None
-            files = list(folder.iterdir())
-            if not files:
-                return None
-            return f"uploads/{upload_id}/{files[0].name}"
-        # S3: caller should have stored key in job config; list not implemented simply
-        return prefix  # incomplete — prefer config storage_key
+            return row.storage_key
+        finally:
+            db.close()
 
     def create_job(
         self,
@@ -127,9 +136,13 @@ class JobManager:
         tempo_bpm_override: float | None = None,
         onset_threshold: float = 0.5,
         frame_threshold: float = 0.3,
+        demucs_quality: str = "balanced",
+        demucs_device: str = "cpu",
     ) -> JobRecord:
         if upload_id and not upload_key:
-            upload_key = self.resolve_upload_key(upload_id)
+            upload_key = self.resolve_upload_key(upload_id, user_id)
+            if not upload_key:
+                raise FileNotFoundError(f"Upload not found: {upload_id}")
         job_id = str(uuid.uuid4())
         config = {
             "upload_id": upload_id,
@@ -142,6 +155,8 @@ class JobManager:
             "tempo_bpm_override": tempo_bpm_override,
             "onset_threshold": onset_threshold,
             "frame_threshold": frame_threshold,
+            "demucs_quality": demucs_quality,
+            "demucs_device": demucs_device,
         }
         db = db_module.SessionLocal()
         try:
@@ -173,13 +188,14 @@ class JobManager:
         model: str = "htdemucs_6s",
         quality: str = "fast",
         device: str = "cpu",
+        start_sec: float = 0.0,
         max_duration_sec: float | None = None,
         two_stems: str | None = None,
         lead_rhythm: bool = False,
         dual_guitar: bool = False,
     ) -> JobRecord:
         if not upload_key:
-            upload_key = self.resolve_upload_key(upload_id)
+            upload_key = self.resolve_upload_key(upload_id, user_id)
         if not upload_key:
             raise FileNotFoundError(f"Upload not found: {upload_id}")
 
@@ -194,6 +210,7 @@ class JobManager:
             "model": model,
             "quality": quality,
             "device": device,
+            "start_sec": start_sec,
             "max_duration_sec": max_duration_sec,
             "two_stems": two_stems,
             "lead_rhythm": effective_lr,
@@ -254,9 +271,12 @@ class JobManager:
             isolate_model=cfg.get("model", "htdemucs_6s"),
             isolate_quality=cfg.get("quality", "fast"),
             isolate_device=cfg.get("device", "cpu"),
+            demucs_quality=cfg.get("demucs_quality", "balanced"),
+            demucs_device=cfg.get("demucs_device", "cpu"),
             isolate_two_stems=cfg.get("two_stems"),
             isolate_lead_rhythm=bool(cfg.get("lead_rhythm", True)),
             isolate_dual_guitar=bool(cfg.get("dual_guitar", False)),
+            isolate_start_sec=float(cfg.get("start_sec", 0.0)),
             cancel_requested=bool(row.cancel_requested),
             work_dir=str(self.jobs_dir / row.id),
         )

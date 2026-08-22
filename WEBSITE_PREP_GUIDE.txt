@@ -1,0 +1,443 @@
+================================================================================
+  AUDIO TOOLS — WEBSITE PREP GUIDE
+  Checklist to put this project on the public internet
+================================================================================
+
+Last updated: 2026-08-16
+
+What ships as the website
+  React SPA (web/) + FastAPI (backend/) behind Caddy
+  Streamlit (`make ui`) = local demo only — not part of production
+
+Repo docs (open these in the project)
+  DEPLOY.md                         full production runbook
+  .env.example                      full-stack env template
+  .env.lite.example                 Oracle / lite env template
+  docs/oracle-free-memory-spike.md  Oracle RAM test results
+  web/.env.example                  frontend API URL (split hosting)
+  web/vercel.json / web/netlify.toml
+
+
+================================================================================
+  QUICK LINKS (click / copy into browser)
+================================================================================
+
+--- Oracle Cloud (Path A) ---
+
+  Free Tier signup / overview
+  https://www.oracle.com/cloud/free/
+
+  Cloud console (sign in after signup)
+  https://cloud.oracle.com/
+
+  Create a compute instance (official docs)
+  https://docs.oracle.com/en-us/iaas/Content/Compute/Tasks/launchinginstance.htm
+
+  Launch your first Linux instance (tutorial)
+  https://docs.oracle.com/en-us/iaas/Content/GSG/Tasks/creatinginstance.htm
+
+  Security lists (open ports 22 / 80 / 443)
+  https://docs.oracle.com/en-us/iaas/Content/Network/Concepts/securitylists.htm
+
+  Network security groups (alternate firewall)
+  https://docs.oracle.com/en-us/iaas/Content/Network/Concepts/networksecuritygroups.htm
+
+  Always Free resources (what you get)
+  https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm
+
+  Connecting with SSH
+  https://docs.oracle.com/en-us/iaas/Content/Compute/Tasks/accessinginstance.htm
+
+--- Docker ---
+
+  Install Docker Engine on Ubuntu
+  https://docs.docker.com/engine/install/ubuntu/
+
+  Install Docker Compose plugin
+  https://docs.docker.com/compose/install/linux/
+
+--- Domain + TLS ---
+
+  Let’s Encrypt (what Caddy uses for HTTPS)
+  https://letsencrypt.org/getting-started/
+
+  Namecheap domains
+  https://www.namecheap.com/
+
+  Cloudflare Registrar / DNS
+  https://www.cloudflare.com/products/registrar/
+  https://dash.cloudflare.com/
+
+  Google Domains → Squarespace Domains
+  https://domains.squarespace.com/
+
+--- Paid VPS alternatives (Path B) ---
+
+  Hetzner Cloud
+  https://www.hetzner.com/cloud
+
+  Contabo
+  https://contabo.com/
+
+  DigitalOcean
+  https://www.digitalocean.com/
+
+  Linode (Akamai)
+  https://www.linode.com/
+
+--- Optional: frontend on a CDN (Path C) ---
+
+  Vercel
+  https://vercel.com/
+
+  Netlify
+  https://www.netlify.com/
+
+--- Useful tools ---
+
+  Check if DNS has propagated
+  https://dnschecker.org/
+
+  Generate a strong secret (or use: openssl rand -hex 32)
+  https://www.random.org/strings/
+
+
+================================================================================
+  0. PICK A HOSTING PATH
+================================================================================
+
+Do this first. Everything else depends on it.
+
+PATH A — Oracle Always Free (cheap demo)
+  Shape:  VM.Standard.A1.Flex — 2 OCPU / 12 GB RAM (ARM)
+  Stack:  docker-compose.lite.yml
+  Good:   short public demo, friends trying Isolate/Tab
+  Limits: one job at a time · clips ~≤90s · not for many concurrent users
+  Start:  https://www.oracle.com/cloud/free/
+
+PATH B — Paid VPS 16–24 GB RAM (recommended for real use)
+  Stack:  docker-compose.yml (API + worker + Postgres + Redis + MinIO)
+  Good:   concurrent jobs, longer clips, real production habits
+  Cost:   roughly ¥2,500–¥3,500/month depending on provider
+  Start:  https://www.hetzner.com/cloud  (or Contabo / DigitalOcean)
+
+PATH C — Split hosting (optional later)
+  Frontend on Vercel/Netlify · API on your Docker host
+  Set VITE_API_BASE_URL + ATT_CORS_ORIGINS (exact origins, never *)
+  Must be HTTPS + WSS end-to-end (no mixed content)
+
+
+================================================================================
+  1. LOCAL PREP (before the cloud)
+================================================================================
+
+[ ] Buy or choose a domain
+      Example: audiotools.yourname.com
+      Registrars: Namecheap / Cloudflare links above
+
+[ ] Generate ATT_SECRET_KEY
+      openssl rand -hex 32
+      (required in production — do not use the example placeholder)
+
+[ ] Choose bootstrap admin login (no open signup)
+      ATT_BOOTSTRAP_ADMIN_EMAIL=you@yourdomain.com
+      ATT_BOOTSTRAP_ADMIN_PASSWORD=<long unique password>
+
+[ ] Pick auth mode
+      Anonymous demo (current SPA default):
+        ATT_DEMO_MODE=true
+        ATT_REQUIRE_AUTH=false
+      Login-only (wire LoginPage into routes first):
+        ATT_DEMO_MODE=false
+        ATT_REQUIRE_AUTH=true
+
+[ ] Safe public defaults
+      ATT_ALLOW_YOUTUBE=false
+      ATT_MAX_UPLOAD_MB=25
+      ATT_DEFAULT_ISOLATE_QUALITY=fast
+
+
+================================================================================
+  2. ORACLE ALWAYS FREE (PATH A)
+================================================================================
+
+Skip this section if you chose Path B.
+
+---------- 2a. Account + VM ----------
+
+[ ] Sign up / open Free Tier
+      https://www.oracle.com/cloud/free/
+
+[ ] Sign in to the console
+      https://cloud.oracle.com/
+
+[ ] Create instance (☰ → Compute → Instances → Create)
+      Docs: https://docs.oracle.com/en-us/iaas/Content/Compute/Tasks/launchinginstance.htm
+      Tutorial: https://docs.oracle.com/en-us/iaas/Content/GSG/Tasks/creatinginstance.htm
+
+      Recommended settings:
+        Shape:   VM.Standard.A1.Flex  (must show Always Free eligible)
+        OCPUs:   2
+        Memory:  12 GB
+        Image:   Ubuntu 22.04 or 24.04 (ARM / aarch64)
+        Region:  your home region (Always Free capacity varies)
+
+[ ] Download and save the SSH private key when prompted
+      SSH guide: https://docs.oracle.com/en-us/iaas/Content/Compute/Tasks/accessinginstance.htm
+
+[ ] Copy the instance public IP once status is RUNNING
+
+---------- 2b. Firewall (Oracle + Ubuntu) ----------
+
+Oracle VCN Security List / NSG — allow inbound:
+  Docs: https://docs.oracle.com/en-us/iaas/Content/Network/Concepts/securitylists.htm
+
+[ ] TCP 22   SSH (ideally lock to your home IP)
+[ ] TCP 80   HTTP (Let’s Encrypt + redirects)
+[ ] TCP 443  HTTPS
+
+On the VM (Ubuntu):
+
+  sudo ufw allow OpenSSH
+  sudo ufw allow 80/tcp
+  sudo ufw allow 443/tcp
+  sudo ufw enable
+
+---------- 2c. Add swap (important on 12 GB) ----------
+
+Demucs can spike RAM. Add ~8 GB swap:
+
+  sudo fallocate -l 8G /swapfile
+  sudo chmod 600 /swapfile
+  sudo mkswap /swapfile
+  sudo swapon /swapfile
+  echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+
+---------- 2d. Install Docker ----------
+
+[ ] Follow Ubuntu install
+      https://docs.docker.com/engine/install/ubuntu/
+
+[ ] Compose plugin
+      https://docs.docker.com/compose/install/linux/
+
+[ ] Confirm
+
+  docker --version
+  docker compose version
+  uname -m          # expect: aarch64
+
+---------- 2e. Code + .env ----------
+
+[ ] Clone the repo and enter it
+
+  git clone <your-repo-url>
+  cd jj_audio_website
+
+[ ] Create env from lite template
+
+  cp .env.lite.example .env
+
+[ ] Edit .env — set at least:
+
+  ATT_SECRET_KEY=<openssl output>
+  ATT_SITE_ADDRESS=your.domain.com
+  ATT_CORS_ORIGINS=https://your.domain.com    # exact origin, NEVER *
+  ATT_ACME_EMAIL=you@yourdomain.com
+  ATT_BOOTSTRAP_ADMIN_EMAIL=...
+  ATT_BOOTSTRAP_ADMIN_PASSWORD=...
+
+  Keep lite defaults:
+  ATT_DEMO_MODE=true
+  ATT_REQUIRE_AUTH=false
+  ATT_MAX_UPLOAD_MB=25
+  ATT_DEFAULT_ISOLATE_QUALITY=fast
+  ATT_ALLOW_YOUTUBE=false
+  ATT_MAX_JOB_DURATION_SEC=90
+  ATT_SINGLE_FLIGHT_JOBS=true
+
+---------- 2f. DNS ----------
+
+[ ] At your registrar, A record:
+      your.domain.com  →  <Oracle public IP>
+
+[ ] Wait until DNS resolves before starting Caddy
+      Check: https://dnschecker.org/
+
+---------- 2g. Launch ----------
+
+  docker compose -f docker-compose.lite.yml up -d --build
+
+[ ] Health:  https://your.domain.com/v1/health
+[ ] Open the site; test Isolate with a SHORT clip (<90s), quality Fast
+
+---------- 2h. Expect these limits ----------
+
+  · First isolate is slower (models not prewarmed on lite)
+  · Second concurrent job → HTTP 503 until the first finishes
+  · Clips longer than ~90s are capped by config
+  · Real songs use more RAM than the spike test
+    (see docs/oracle-free-memory-spike.md)
+  · Anonymous jobs accumulate on disk — prune manually over time
+
+
+================================================================================
+  3. FULL PRODUCTION VPS (PATH B)
+================================================================================
+
+[ ] Rent ≥16 GB RAM VPS (24 GB nicer), x86_64, Ubuntu
+      https://www.hetzner.com/cloud
+      https://contabo.com/
+      https://www.digitalocean.com/
+
+[ ] Open ports 22 / 80 / 443 on the provider firewall
+
+[ ] Install Docker
+      https://docs.docker.com/engine/install/ubuntu/
+      https://docs.docker.com/compose/install/linux/
+
+[ ] Clone repo → cp .env.example .env → fill secrets
+      (same fields as section 1 + ATT_SITE_ADDRESS, ATT_CORS_ORIGINS,
+       ATT_ACME_EMAIL, bootstrap admin)
+
+[ ] Point DNS A record at the VPS · wait for propagation
+      https://dnschecker.org/
+
+[ ] Start stack
+
+  docker compose up -d --build
+
+[ ] Check https://$ATT_SITE_ADDRESS/v1/health
+
+Stack: Caddy (TLS) → SPA + API → Postgres + Redis + MinIO + arq worker
+Jobs run in the worker container, not the API process.
+
+
+================================================================================
+  4. DOMAIN, TLS, CORS (easy to get wrong)
+================================================================================
+
+[ ] ATT_SITE_ADDRESS = hostname people type in the browser
+[ ] ATT_CORS_ORIGINS = exact public origin(s), e.g. https://your.domain.com
+      NEVER use * in production
+[ ] Extra frontend hosts (Vercel/Netlify) must be listed too
+[ ] ATT_ACME_EMAIL = Let’s Encrypt contact
+      Overview: https://letsencrypt.org/getting-started/
+      Caddy fetches certs automatically once DNS + ports 80/443 work
+[ ] localhost testing uses Caddy’s internal CA (browser warning is normal)
+
+
+================================================================================
+  5. FRONTEND NOTES
+================================================================================
+
+Same-origin behind Caddy → leave VITE_API_BASE_URL unset (relative /v1/...).
+
+Split hosting later:
+[ ] Build with VITE_API_BASE_URL=https://your-api-host.example.com
+[ ] Deploy web/ to Vercel or Netlify
+      https://vercel.com/
+      https://www.netlify.com/
+[ ] See web/.env.example, web/vercel.json, web/netlify.toml
+
+Optional polish (not required to go live):
+  · LoginPage exists but is not routed (anonymous demo is default)
+  · Tab page hardcodes 90s max — tell users
+  · Job progress is text-only (no bar yet)
+  · Streamlit demo has more features than the public SPA
+
+
+================================================================================
+  6. SECURITY BEFORE YOU SHARE THE LINK
+================================================================================
+
+[ ] Strong ATT_SECRET_KEY (not the placeholder)
+[ ] Bootstrap admin password changed / unique
+[ ] ATT_CORS_ORIGINS exact — not *
+[ ] ATT_ALLOW_YOUTUBE=false
+[ ] ATT_MAX_UPLOAD_MB capped
+[ ] SSH key auth only; disable password SSH if possible
+[ ] Prefer locking port 22 to your home IP
+[ ] Confirm .env is not committed to git
+[ ] Rebuild images after dependency updates
+
+
+================================================================================
+  7. AFTER IT IS LIVE
+================================================================================
+
+[ ] Bookmark https://your.domain.com/v1/health
+[ ] Watch disk (uploads + models + anonymous artifacts grow)
+[ ] Prune old jobs/uploads periodically (no auto-cleaner yet)
+[ ] Full stack: back up volumes pg_data + minio_data
+[ ] Lite stack: back up the data volume if you care about history
+[ ] Oracle OOM? → shorter clips, quality=fast, confirm swap, Path B later
+[ ] Cancel stuck job: POST /v1/jobs/{id}/cancel
+[ ] SPA “Send feedback” already links to GitHub Issues
+
+
+================================================================================
+  8. READY-TO-SHARE CHECKLIST
+================================================================================
+
+Stop if any step fails.
+
+  1. DNS resolves to your VM          https://dnschecker.org/
+  2. https://your.domain.com loads (valid padlock)
+  3. https://your.domain.com/v1/health returns OK
+  4. Anonymous session works (or login, if required)
+  5. Short Isolate job (<25 MB, <90s on lite, Fast) succeeds
+  6. ZIP / stems download · mixer plays
+  7. Short Tab PDF job succeeds · PDF downloads
+  8. On Oracle lite: second concurrent job returns 503
+  9. You can SSH in and run: docker compose ... logs -f
+
+
+================================================================================
+  9. COMMAND CHEAT SHEET
+================================================================================
+
+Oracle / lite
+  cp .env.lite.example .env
+  # edit .env
+  docker compose -f docker-compose.lite.yml up -d --build
+  docker compose -f docker-compose.lite.yml logs -f
+  docker compose -f docker-compose.lite.yml down
+
+Full production
+  cp .env.example .env
+  # edit .env
+  docker compose up -d --build
+  docker compose logs -f
+  docker compose down
+
+Secret
+  openssl rand -hex 32
+
+Local SPA only (dev — not production)
+  cd web && npm install && npm run dev
+
+
+================================================================================
+  10. ORACLE — WHAT IT IS / IS NOT
+================================================================================
+
+IS
+  Free ARM VM for a small public demo
+  Use docker-compose.lite.yml + Caddy TLS + swap + open 80/443
+
+IS NOT
+  Enough for unrestricted concurrent Demucs on full songs
+  A substitute for a 16–24 GB VPS when many users hit Isolate at once
+  Automatic domain setup — you still buy/point DNS yourself
+
+Signup:   https://www.oracle.com/cloud/free/
+Console:  https://cloud.oracle.com/
+Limits:   https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm
+
+
+================================================================================
+  When in doubt, follow DEPLOY.md.
+  This file = “what do I do?” checklist.
+  DEPLOY.md  = authoritative env + compose reference.
+================================================================================

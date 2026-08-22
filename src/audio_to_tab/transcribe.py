@@ -5,9 +5,6 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from basic_pitch import ICASSP_2022_MODEL_PATH
-from basic_pitch.inference import predict
-
 from audio_to_tab.ingest import normalize_audio
 from audio_to_tab.midi_cleanup import CleanupConfig, cleanup_midi, merge_instruments_to_one
 
@@ -23,6 +20,9 @@ def transcribe_audio(
     normalize: bool = True,
 ) -> Path:
     """Run Basic Pitch on audio and write cleaned MIDI."""
+    from basic_pitch import ICASSP_2022_MODEL_PATH
+    from basic_pitch.inference import predict
+
     audio_path = Path(audio_path)
     output_path = Path(output_midi_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

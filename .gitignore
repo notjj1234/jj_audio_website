@@ -4,7 +4,9 @@ __pycache__/
 .venv/
 .venv311/
 .venv312/
+.venv-desktop/
 venv/
+*.egg-info/
 .env
 data/
 output/
@@ -32,6 +34,12 @@ web/dist/
 # Models / large artifacts
 *.wav
 !eval/fixtures/*.wav
+
+# Desktop packaging (downloaded at build time; do not commit binaries)
+packaging/ffmpeg/
+dist/
+build/
+*.spec.bak
 
 # Internal docs (not for public GitHub)
 WEB_READINESS.md

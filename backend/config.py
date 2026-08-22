@@ -2,8 +2,22 @@
 
 from __future__ import annotations
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_WEAK_BOOTSTRAP_PASSWORDS = {
+    "changeme",
+    "change-me-now",
+    "replace-with-strong-password",
+    "replace-with-a-long-unique-password",
+    "admin",
+    "password",
+}
+
+
+def _is_weak_bootstrap_password(password: str) -> bool:
+    stripped = (password or "").strip()
+    return not stripped or len(stripped) < 8 or stripped.lower() in _WEAK_BOOTSTRAP_PASSWORDS
 
 
 class Settings(BaseSettings):
@@ -19,6 +33,8 @@ class Settings(BaseSettings):
 
     secret_key: str = "dev-only-change-me"
     require_auth: bool = False
+    demo_mode: bool = False
+    anon_session_hours: int = 12
     bootstrap_admin_email: str = "admin@localhost"
     bootstrap_admin_password: str = "changeme"
     access_token_minutes: int = 30
@@ -47,11 +63,23 @@ class Settings(BaseSettings):
     job_timeout_extreme_sec: int = 14400
     default_isolate_quality: str = "fast"
     max_job_duration_sec: float = 300.0
+    # When true, only one tab/isolate job may run at a time (lite/Oracle hosts).
+    single_flight_jobs: bool = False
+    # Optional Auto override: fast_cpu | balanced | high_gpu | lite. Ignored if unrunnable.
+    recommended_mode: str | None = None
 
     @field_validator("cors_origins")
     @classmethod
     def _no_star_with_credentials_hint(cls, v: str) -> str:
         return v.strip()
+
+    @field_validator("recommended_mode")
+    @classmethod
+    def _empty_recommended_mode(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        stripped = v.strip()
+        return stripped or None
 
     @model_validator(mode="after")
     def _production_guards(self) -> Settings:
@@ -60,8 +88,12 @@ class Settings(BaseSettings):
                 raise ValueError("ATT_SECRET_KEY must be set to a strong value when ATT_ENV=production")
             if self.cors_origins.strip() == "*":
                 raise ValueError("ATT_CORS_ORIGINS must not be '*' in production")
-            if not self.require_auth:
+            if not self.require_auth and not self.demo_mode:
                 raise ValueError("ATT_REQUIRE_AUTH must be true in production")
+            if _is_weak_bootstrap_password(self.bootstrap_admin_password):
+                raise ValueError(
+                    "ATT_BOOTSTRAP_ADMIN_PASSWORD must be a strong unique value when ATT_ENV=production"
+                )
         return self
 
     def cors_origin_list(self) -> list[str]:

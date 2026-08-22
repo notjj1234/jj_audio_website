@@ -1,0 +1,164 @@
+# Build unsigned Windows / Mac desktop packages (Streamlit + Demucs on-device).
+# Trigger: tag desktop-v* or workflow_dispatch.
+#
+# Three artifacts (not a universal binary):
+#   - AudioTools-windows-x64.zip     Windows 10/11 x64
+#   - AudioTools-macos-arm64.pkg     Apple Silicon
+#   - AudioTools-macos-x64.pkg       Intel Mac (macos-15-intel; macos-13 is retired)
+name: desktop-release
+
+on:
+  push:
+    tags:
+      - "desktop-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: AudioTools-windows-x64.zip
+            arch: x64
+          - os: macos-14
+            artifact: AudioTools-macos-arm64.pkg
+            arch: arm64
+          - os: macos-15-intel
+            artifact: AudioTools-macos-x64.pkg
+            arch: x64
+
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Confirm runner architecture
+        run: |
+          python - <<'PY'
+          import platform
+          expected = "${{ matrix.arch }}"
+          machine = platform.machine().lower()
+          ok = {
+              "arm64": machine in ("arm64", "aarch64"),
+              "x64": machine in ("x86_64", "amd64"),
+          }[expected]
+          print(f"runner={machine} expected={expected}")
+          raise SystemExit(0 if ok else 1)
+          PY
+
+      - name: Verify mixer frontend is committed
+        run: |
+          test -f ui/stem_mixer_component/frontend/build/index.html || {
+            echo "Mixer frontend missing. Run make mixer-build and commit ui/stem_mixer_component/frontend/build/" >&2
+            exit 1
+          }
+
+      - name: Install CPU Torch + app + PyInstaller (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m pip install -U pip
+          python -m pip install --upgrade torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e ".[demucs,desktop]"
+
+      - name: Install app + PyInstaller (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          python -m pip install -U pip
+          python -m pip install -e ".[demucs,desktop]"
+
+      - name: Bundle ffmpeg
+        run: python packaging/bundle_ffmpeg.py
+
+      - name: PyInstaller onedir
+        run: pyinstaller packaging/audio_tools.spec --noconfirm --clean
+
+      - name: Verify onedir layout
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+          root = Path("dist/AudioTools")
+          exe = root / ("AudioTools.exe" if sys.platform.startswith("win") else "AudioTools")
+          assert exe.is_file(), f"missing {exe}"
+          ffmpeg = list(root.rglob("ffmpeg")) + list(root.rglob("ffmpeg.exe"))
+          assert ffmpeg, "bundled ffmpeg missing from onedir"
+          mixer = list(root.rglob("stem_mixer_component/frontend/build/index.html"))
+          assert mixer, "mixer frontend missing from onedir"
+          print("ok", exe, ffmpeg[0], mixer[0])
+          PY
+
+      - name: Confirm macOS binary architecture
+        if: runner.os == 'macOS'
+        run: |
+          archs=$(lipo -archs dist/AudioTools/AudioTools)
+          echo "lipo archs: $archs"
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            echo "$archs" | grep -qw arm64
+          else
+            echo "$archs" | grep -Ewq 'x86_64'
+          fi
+
+      - name: Package Windows zip
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/AudioTools/* -DestinationPath ${{ matrix.artifact }}
+
+      - name: Package macOS pkg
+        if: runner.os == 'macOS'
+        run: |
+          chmod +x packaging/make_pkg.sh packaging/make_app.sh packaging/pkg_scripts/postinstall
+          AUDIO_TOOLS_OUTPUT_DIR="$PWD" AUDIO_TOOLS_PKG_NAME="${{ matrix.artifact }}" ./packaging/make_pkg.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: release-assets/**/*
+          body: |
+            Unsigned desktop builds — Audio Isolation runs on your computer (CPU).
+
+            Pick **one** file for your machine (not a universal installer):
+
+            - **Windows 10 / 11 (x64):** `AudioTools-windows-x64.zip` → unzip → `AudioTools.exe`. SmartScreen: More info → Run anyway. Needs [WebView2](https://go.microsoft.com/fwlink/p/?LinkId=2124703) (already on Windows 11 and recent Windows 10).
+            - **Apple Silicon Mac (M1–M4):** `AudioTools-macos-arm64.pkg` — macOS 12+. Double-click → Install. Open AudioTools from Applications (right-click → Open if Gatekeeper blocks).
+            - **Intel Mac:** `AudioTools-macos-x64.pkg` — same install steps.
+
+            First launch downloads Demucs weights (needs internet once). Prefer 16 GB RAM; on 8 GB use a short clip (≤90 s) and speed **Faster**.
+
+            No App Store. Not notarized. No Windows ARM build. Tester runbook: DESKTOP.md.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

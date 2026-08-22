@@ -73,6 +73,25 @@ body {
   min-height: 28px;
 }
 
+.master-vol {
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-bottom: 0.85rem;
+}
+
+.master-vol .vol-slider {
+  width: 100%;
+  min-height: 28px;
+}
+
+.master-vol #master-vol-val {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.9;
+}
+
 .stems {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
@@ -81,7 +100,6 @@ body {
 }
 
 .stem-row {
-  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -89,12 +107,6 @@ body {
   border-radius: 0.5rem;
   padding: 0.65rem 0.75rem;
   box-sizing: border-box;
-}
-
-/* Raise the row above its grid siblings while its waveform dropdown floats open,
-   so the popover isn't painted behind cards that come later in the grid. */
-.stem-row--expanded {
-  z-index: 30;
 }
 
 .stem-head {
@@ -160,48 +172,8 @@ body {
   height: 1.1rem;
 }
 
-.stem-details {
-  position: relative;
+.stem-preview {
   margin-top: 0.5rem;
-}
-
-.stem-details summary {
-  cursor: pointer;
-  font-size: 0.8rem;
-  font-weight: 600;
-  padding: 0.35rem 0.1rem;
-  list-style: none;
-  user-select: none;
-}
-
-.stem-details summary::-webkit-details-marker {
-  display: none;
-}
-
-.stem-details summary::before {
-  content: "▸";
-  display: inline-block;
-  margin-right: 0.4rem;
-  transition: transform 0.15s ease;
-}
-
-.stem-details[open] summary::before {
-  transform: rotate(90deg);
-}
-
-/* Floats over whatever is below instead of stretching the row's own height —
-   otherwise every card in the same grid row grows to match the tallest one. */
-.stem-details[open] .stem-details-body {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
-  z-index: 1;
-  margin-top: 0.15rem;
-  padding: 0.5rem 0.6rem;
-  background: var(--secondary);
-  border-radius: 0.4rem;
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
 }
 
 .waveform-svg {

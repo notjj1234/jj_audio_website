@@ -102,6 +102,12 @@ h1 {
   max-width: 36rem;
 }
 
+.hint {
+  font-weight: 400;
+  font-size: 0.8rem;
+  color: rgba(26, 31, 28, 0.72);
+}
+
 .section-heading {
   font-family: var(--font-display);
   font-weight: 400;

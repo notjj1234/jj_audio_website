@@ -1,13 +1,15 @@
-"""Streamlit page: Audio → Guitar Tab PDF."""
+"""Streamlit page: Tab PDF — guitar tab generator."""
 
 from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+import sys
 
 import streamlit as st
 
 from ui.common import (
+    AUDIO_UPLOAD_TYPES,
     ensure_src_path,
     list_recent_runs,
     run_output_dir,
@@ -23,28 +25,19 @@ from audio_to_tab.pipeline import (  # noqa: E402
     PipelineConfig,
     run_pipeline,
 )
+from audio_to_tab.ingest import is_youtube_url  # noqa: E402
 from audio_to_tab.separate import is_demucs_available  # noqa: E402
 
 
 def main() -> None:
-    st.title("Audio → Guitar Tab PDF")
+    st.title("Tab PDF (demo)")
     st.caption(
-        "Draft transcription tool (free/open-source). "
-        "Full songs need guitar stem separation (Demucs). Solo guitar can skip it."
+        "Demo only — tabs are rough drafts. Expect wrong notes; not finished sheet music."
     )
-
-    with st.expander("How this works"):
-        st.markdown(
-            "1. **Demucs** (optional) isolates the guitar from the rest of a full mix, "
-            "so drums/bass/vocals don't confuse the next step. Skip it for solo guitar "
-            "recordings — they're already guitar-only.\n"
-            "2. **Basic Pitch** listens to the (isolated or full) audio and detects individual "
-            "notes — pitch, timing, and duration.\n"
-            "3. Detected notes are assigned to strings/frets and rendered as a guitar tab "
-            "(PDF), plus ASCII tab and MIDI files you can edit further.\n\n"
-            "This is a draft transcription tool — expect some wrong notes, especially on "
-            "busy full-mix songs."
-        )
+    st.warning(
+        "Best on short solo-guitar clips. For full songs, isolate guitar first on "
+        "**Audio Isolation**."
+    )
 
     demucs_ok = is_demucs_available()
     if not demucs_ok:
@@ -59,7 +52,6 @@ def main() -> None:
     recent_runs = list_recent_runs("tab_pdf")
     if recent_runs:
         with st.expander(f"Recent conversions ({len(recent_runs)})", expanded=False):
-            st.caption("Reopen a past conversion's downloads without re-uploading or re-converting.")
             for run in recent_runs:
                 run_artifacts = run.get("artifacts", {})
                 available = Path(run_artifacts.get("pdf", "")).exists() if run_artifacts else False
@@ -124,7 +116,7 @@ def main() -> None:
 
         uploaded = st.file_uploader(
             "Upload MP3 / WAV / FLAC / M4A",
-            type=["mp3", "wav", "flac", "m4a"],
+            type=AUDIO_UPLOAD_TYPES,
         )
         carry_over_path = st.session_state.get("carry_over_audio_path")
         carry_over_name = st.session_state.get("carry_over_audio_name")
@@ -136,18 +128,32 @@ def main() -> None:
                 f"Using audio carried over from Audio Isolation: **{carry_over_name}**. "
                 "Upload a file above to use something else instead."
             )
-        youtube_url = st.text_input("Or paste a YouTube URL")
-        st.caption(YOUTUBE_DISCLAIMER)
-
-        convert_clicked = st.button("Convert to tab PDF", type="primary")
-        st.caption(
-            "Conversions can take several minutes on CPU. There's currently no way to cancel "
-            "once started, and closing this tab may not stop server-side processing."
+        youtube_enabled = st.checkbox(
+            "Download from YouTube",
+            value=not bool(getattr(sys, "frozen", False)),
+            help=(
+                "Off by default in the desktop installer. Enable only if you have rights "
+                "to the audio. Arbitrary URLs are rejected."
+            ),
         )
+        youtube_url = ""
+        if youtube_enabled:
+            youtube_url = st.text_input("Or paste a YouTube URL")
+            st.caption(YOUTUBE_DISCLAIMER)
+        elif getattr(sys, "frozen", False):
+            st.caption(
+                "YouTube download is off in this installer build. Enable it above if you "
+                "have rights to the audio."
+            )
+
+        convert_clicked = st.button("Convert to tab PDF", type="secondary")
 
         if convert_clicked:
             if not uploaded and not youtube_url.strip() and not using_carry_over:
                 st.error("Upload an audio file or enter a YouTube URL.")
+                return
+            if youtube_url.strip() and not is_youtube_url(youtube_url):
+                st.error("Only YouTube URLs are allowed.")
                 return
 
             effective_separate = separate_stems and demucs_ok
@@ -236,6 +242,8 @@ def main() -> None:
         st.success(flash)
 
     result_title = st.session_state.get("tab_pdf_title", "Guitar Tab")
+    st.subheader(result_title)
+    st.caption("Demo output — check every note before you trust or share it.")
     if st.session_state.get("tab_pdf_skipped_separation"):
         st.info(
             "Ran without stem separation — install Demucs for better full-mix results. "
@@ -278,7 +286,7 @@ def main() -> None:
 
     source_audio_path = st.session_state.get("tab_pdf_source_audio_path")
     if source_audio_path and Path(source_audio_path).exists():
-        if st.button("Also separate this into stems →"):
+        if st.button("Separate this in Audio Isolation →", type="primary"):
             st.session_state["carry_over_audio_path"] = source_audio_path
             st.session_state["carry_over_audio_name"] = Path(source_audio_path).name
             st.switch_page(str(Path(__file__).with_name("isolate.py")))

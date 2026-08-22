@@ -1,10 +1,13 @@
-"""Streamlit page: multi-stem Audio Isolation with live stem mixer."""
+"""Streamlit page: Audio Isolation — separate songs into instrument tracks."""
 
 from __future__ import annotations
 
 import hashlib
 import io
 import json
+import shutil
+import sys
+import threading
 import time
 import uuid
 import zipfile
@@ -15,6 +18,7 @@ import streamlit as st
 from streamlit_local_storage import LocalStorage
 
 from ui.common import (
+    AUDIO_UPLOAD_TYPES,
     delete_run,
     ensure_src_path,
     list_recent_runs,
@@ -23,12 +27,25 @@ from ui.common import (
     write_run_metadata,
 )
 from ui.isolate_state import (
+    CUSTOM_STEM_CHOICES,
+    DEFAULT_CUSTOM_STEMS,
+    DEFAULT_SEPARATION_PRESET,
+    DEFAULT_SPEED_PRESET,
     ISOLATION_STAGE_ORDER,
+    SEPARATION_PRESETS,
+    SPEED_PRESETS,
+    clamp_region_bounds,
+    custom_selected_stems,
+    default_region_end,
     format_elapsed,
     format_progress_label,
+    resolve_custom_separation,
+    resolve_separation_preset,
+    resolve_speed_preset,
     should_hide_stale_results,
     stage_progress_percent,
     sync_output_name_on_upload,
+    upload_fingerprint,
 )
 from ui.media import cleanup_mix_artifacts, ensure_mixer_audio_paths, stem_media_urls
 from ui.stem_mixer_component import component_build_available, stem_mixer
@@ -38,7 +55,13 @@ ensure_src_path()
 from audio_to_tab.isolate import (  # noqa: E402
     DEMUCS_INSTALL_HINT,
     IsolateConfig,
-    SUPPORTED_MODELS,
+    MIN_REGION_SEC,
+    RegionError,
+    format_region_label,
+    format_region_label_filename,
+    format_time_sec,
+    probe_duration_sec,
+    resolve_region,
     separate_stems,
 )
 from audio_to_tab.mixer import (  # noqa: E402
@@ -51,28 +74,29 @@ from audio_to_tab.mixer import (  # noqa: E402
 )
 from audio_to_tab.separate import is_demucs_available  # noqa: E402
 
-_MODEL_HELP = {
-    "htdemucs_6s": "6 stems: drums, bass, other, vocals, guitar, piano (piano often has artifacts)",
-    "htdemucs": "4 stems: drums, bass, other, vocals — solid general quality",
-    "htdemucs_ft": "4 stems, fine-tuned — slower, slightly better quality",
-}
-
-_MODEL_SHORT = {
-    "htdemucs_6s": "htdemucs_6s (6 stems)",
-    "htdemucs": "htdemucs (4 stems)",
-    "htdemucs_ft": "htdemucs_ft (4 stems, fine-tuned)",
-}
-
 STEM_HINTS = {
-    "piano": "May contain artifacts (Demucs limitation)",
-    "lead_guitar": "Always produced from the guitar stem (best-effort when confidence is low)",
-    "rhythm_guitar": "Always produced from the guitar stem (best-effort when confidence is low)",
+    "piano": "May sound less accurate than other tracks",
+    "lead_guitar": "Created from the Guitar track (best effort)",
+    "rhythm_guitar": "Created from the Guitar track (best effort)",
     "guitar1": "Legacy spatial label",
     "guitar2": "Legacy spatial label",
 }
 
 _LS_USER_ID_KEY = "isolate_user_id"
 _LS_COMPONENT_KEY = "isolate_local_storage"
+
+
+def _stateful_expander(label: str, *, key: str, default: bool = False):
+    """
+    Expander that remembers whether the user left it open.
+
+    The live mixer reruns the page on every interaction. Without a key the
+    expander would snap back to ``default`` each time; with one, Streamlit
+    tracks the open state in ``st.session_state[key]``. ``default`` and
+    ``label`` must stay constant across reruns or the widget identity changes
+    and the state is lost.
+    """
+    return st.expander(label, expanded=default, key=key, on_change="rerun")
 
 
 def _get_browser_user_id() -> str:
@@ -180,8 +204,9 @@ def _mixer_export_fingerprint(
     volumes_db: dict,
     muted: dict,
     soloed: dict,
+    master_volume_db: float = DB_DEFAULT,
 ) -> str:
-    parts = []
+    parts = [f"master:{float(master_volume_db):.2f}"]
     for name in stem_names:
         parts.append(
             f"{name}:{float(volumes_db.get(name, DB_DEFAULT)):.2f}"
@@ -259,7 +284,7 @@ def _render_stem_presence_selector(
                 label = stem_display_name(name)
                 info = presence.get(name)
                 if not info:
-                    help_text = "No detection data available for this stem."
+                    help_text = "No detection data available for this track."
                 elif info.get("present", True):
                     help_text = f"Detected — mean level {info.get('mean_dbfs', 0.0):.1f} dBFS"
                 else:
@@ -307,6 +332,7 @@ def _build_current_mix(
     volumes_db: dict,
     muted: dict,
     soloed: dict,
+    master_volume_db: float = DB_DEFAULT,
 ) -> Path:
     mix_path = run_dir / "current_mix.wav"
     gains = effective_linear_gains(
@@ -314,12 +340,26 @@ def _build_current_mix(
         muted={n: bool(muted.get(n, False)) for n in stem_names},
         soloed={n: bool(soloed.get(n, False)) for n in stem_names},
         volume_db={n: float(volumes_db.get(n, DB_DEFAULT)) for n in stem_names},
+        master_volume_db=master_volume_db,
     )
     mix_stems_to_wav(selected_stem_paths, output_path=mix_path, gains=gains)
-    fp = _mixer_export_fingerprint(stem_names, volumes_db, muted, soloed)
+    fp = _mixer_export_fingerprint(
+        stem_names, volumes_db, muted, soloed, master_volume_db
+    )
     st.session_state["isolate_mix_ready"] = str(mix_path)
     st.session_state["isolate_mix_fp"] = fp
     return mix_path
+
+
+_ISOLATION_STAGE_DISPLAY = {
+    "ingest": "Preparing audio…",
+    "separate": "Separating tracks… this can take a while on CPU",
+    "collect": "Collecting tracks…",
+    "bass_bleed": "Checking guitar…",
+    "guitar_split": "Splitting lead / rhythm guitar…",
+    "presence": "Checking which tracks have sound…",
+    "done": "Finishing…",
+}
 
 
 def _render_live_mixer(
@@ -327,7 +367,7 @@ def _render_live_mixer(
 ) -> dict | None:
     if not component_build_available():
         st.error(
-            "Live stem mixer frontend is not built. "
+            "Live mixer is not built. "
             "Run: npm install && npm run build in ui/stem_mixer_component/frontend "
             "(or .\\scripts\\dev.ps1 mixer-build)."
         )
@@ -336,22 +376,23 @@ def _render_live_mixer(
     mixer_paths = ensure_mixer_audio_paths(stem_paths)
     if mixer_paths != stem_paths:
         st.caption(
-            "Using downsampled preview audio for browser playback (original WAVs used for downloads)."
+            "Using lighter preview audio for playback. Downloads still use the full-quality files."
         )
 
     try:
         urls = stem_media_urls(mixer_paths)
-        # Registered separately (full-quality originals) so per-stem downloads inside
-        # the mixer dropdowns are never the downsampled browser-preview audio.
+        # Registered separately (full-quality originals) so per-track downloads inside
+        # the mixer are never the downsampled browser-preview audio.
         download_urls = stem_media_urls(stem_paths, coord_prefix="isolate.download")
     except Exception as exc:
-        st.error(f"Could not register stem media URLs: {exc}")
+        st.error(f"Could not prepare track audio for the mixer: {exc}")
         return None
 
     stem_names = sort_stem_names(stem_paths.keys())
     volumes = st.session_state.setdefault("isolate_volumes_db", {})
     for name in stem_names:
         volumes.setdefault(name, DB_DEFAULT)
+    master_db = float(st.session_state.setdefault("isolate_master_volume_db", DB_DEFAULT))
 
     safe_base = (base_name or "stems").strip() or "stems"
     stems_arg = [
@@ -373,64 +414,173 @@ def _render_live_mixer(
         initial_volumes_db={n: float(volumes.get(n, DB_DEFAULT)) for n in stem_names},
         initial_muted={n: False for n in stem_names},
         initial_soloed={n: False for n in stem_names},
+        initial_master_volume_db=master_db,
         track_title=track_title,
         key=f"stem_mixer_{fingerprint}",
     )
 
 
-def _render_separation_controls() -> tuple[str, str, str, float | None, object, str]:
-    """Model + upload; Quality/duration are common first-run decisions and stay at the top
-    level. Device is the one setting almost nobody without a configured GPU touches, so it
-    stays under Advanced."""
-    model = st.selectbox(
-        "Separation model",
-        options=list(SUPPORTED_MODELS),
-        index=0,
-        format_func=lambda m: _MODEL_SHORT.get(m, m),
-        help=" | ".join(f"{k}: {v}" for k, v in _MODEL_HELP.items()),
-    )
-    if model == "htdemucs_6s":
-        st.info(
-            "Note: On the 6-stem model, guitar quality is okay; "
-            "piano often has bleeding/artifacts (Demucs limitation)."
-        )
+def _preset_radio_label(preset_id: str) -> str:
+    preset = SEPARATION_PRESETS[preset_id]
+    count = preset.get("track_count")
+    if count is None:
+        return f"{preset['label']} — {preset['tracks']}"
+    return f"{preset['label']} — {preset['tracks']} ({count} tracks)"
 
-    quality = st.selectbox(
-        "Quality",
-        options=["fast", "balanced", "high", "extreme"],
-        index=1,
-        help="Higher quality uses more Demucs shifts/overlap and is much slower on CPU.",
+
+def _speed_preset_radio_label(preset_id: str) -> str:
+    return SPEED_PRESETS[preset_id]["label"]
+
+
+def _ensure_pending_audio(uploaded: object) -> Path | None:
+    """Save upload to disk when fingerprint changes so duration/preview work."""
+    fp = upload_fingerprint(uploaded)
+    if fp is None:
+        return None
+    last_fp = st.session_state.get("isolate_upload_fp")
+    pending = st.session_state.get("isolate_pending_audio_path")
+    if fp == last_fp and pending and Path(pending).exists():
+        return Path(pending)
+    if uploaded is not None:
+        path = save_upload(uploaded)
+        st.session_state["isolate_pending_audio_path"] = str(path)
+        return path
+    return None
+
+
+def _active_source_path(uploaded: object) -> Path | None:
+    pending = st.session_state.get("isolate_pending_audio_path")
+    if pending and Path(pending).exists():
+        return Path(pending)
+    carry = st.session_state.get("carry_over_audio_path")
+    if not uploaded and carry and Path(carry).exists():
+        return Path(carry)
+    return None
+
+
+def _render_region_controls(audio_path: Path | None) -> tuple[float, float | None, str | None]:
+    """
+    Region UI on the main path. Returns (start_sec, max_duration_sec, region_label).
+
+    ``max_duration_sec`` is None for full-file processing.
+    """
+    if audio_path is None or not audio_path.exists():
+        return 0.0, None, None
+
+    duration = probe_duration_sec(audio_path)
+    if duration is None:
+        st.caption("Length: unknown — full file will be processed.")
+        return 0.0, None, None
+
+    st.caption(f"Length: **{format_time_sec(duration)}** ({duration:.1f} s)")
+
+    use_region = st.checkbox(
+        "Isolate only a section",
+        value=st.session_state.get("isolate_use_region", False),
+        key="isolate_use_region",
+        help="Off = process the entire file. On = pick start and end times.",
     )
-    limit_duration = st.checkbox(
-        "Limit duration",
-        value=False,
-        help="Off = process the full song. On = trim to a max length for faster previews.",
+
+    if not use_region:
+        st.audio(str(audio_path))
+        return 0.0, None, None
+
+    default_end = default_region_end(duration)
+    region_key = f"isolate_region_{st.session_state.get('isolate_upload_fp', 'none')}"
+    if region_key not in st.session_state:
+        st.session_state[region_key] = (0.0, default_end)
+
+    start_default, end_default = st.session_state[region_key]
+    start_default, end_default = clamp_region_bounds(
+        start_default, end_default, duration, min_length=MIN_REGION_SEC
     )
-    max_duration_sec: float | None = None
-    if limit_duration:
-        max_duration_sec = float(
-            st.slider(
-                "Max duration (seconds)",
-                min_value=15,
-                max_value=300,
-                value=90,
-                step=15,
-            )
+
+    start_sec, end_sec = st.slider(
+        "Section (start → end)",
+        min_value=0.0,
+        max_value=float(duration),
+        value=(float(start_default), float(end_default)),
+        step=1.0,
+        key=f"{region_key}_slider",
+    )
+    start_sec, end_sec = clamp_region_bounds(
+        start_sec, end_sec, duration, min_length=MIN_REGION_SEC
+    )
+    st.session_state[region_key] = (start_sec, end_sec)
+
+    length = end_sec - start_sec
+    region_label = format_region_label(start_sec, length)
+    st.caption(f"**{region_label}** ({length:.0f} s)")
+
+    try:
+        audio_bytes = audio_path.read_bytes()
+        st.audio(
+            audio_bytes,
+            format="audio/wav" if audio_path.suffix.lower() == ".wav" else None,
+            start_time=int(start_sec),
+            end_time=int(end_sec),
         )
+    except Exception:
+        st.audio(str(audio_path))
+
+    if length < MIN_REGION_SEC:
+        st.error(f"Section must be at least {MIN_REGION_SEC:.0f} seconds.")
+        return start_sec, None, region_label
+
+    return start_sec, length, region_label
+
+
+def _render_separation_controls() -> dict:
+    """Track choice, upload, region, speed preset; quality/device/name in advanced."""
+    if "isolate_separation_preset" not in st.session_state:
+        st.session_state["isolate_separation_preset"] = DEFAULT_SEPARATION_PRESET
+    if "isolate_speed_preset" not in st.session_state:
+        st.session_state["isolate_speed_preset"] = DEFAULT_SPEED_PRESET
+
+    st.subheader("What to separate")
+    preset_id = st.radio(
+        "Tracks",
+        options=list(SEPARATION_PRESETS.keys()),
+        format_func=_preset_radio_label,
+        key="isolate_separation_preset",
+        label_visibility="collapsed",
+    )
+
+    custom_stems: list[str] = []
+    preset_error: str | None = None
+    if preset_id == "custom":
+        cols = st.columns(3)
+        for idx, (stem_id, label) in enumerate(CUSTOM_STEM_CHOICES.items()):
+            with cols[idx % 3]:
+                # value= only seeds the first render; the key keeps the user's
+                # choice across the reruns the mixer and uploader trigger.
+                checked = st.checkbox(
+                    label,
+                    value=stem_id in DEFAULT_CUSTOM_STEMS,
+                    key=f"isolate_custom_{stem_id}",
+                )
+                if checked:
+                    custom_stems.append(stem_id)
+        try:
+            resolved = resolve_custom_separation(custom_stems)
+        except ValueError as exc:
+            preset_error = str(exc)
+            st.warning(preset_error)
+            resolved = resolve_separation_preset("custom")
     else:
-        st.caption(
-            "Full song will be processed. Demucs on CPU can take a long time for long tracks."
-        )
-
-    with st.expander("Advanced", expanded=False):
-        device = st.selectbox("Device", options=["cpu", "cuda"], index=0)
+        resolved = resolve_separation_preset(preset_id)
+    if resolved["caveat"]:
+        st.caption(resolved["caveat"])
 
     uploaded = st.file_uploader(
         "Upload MP3 / WAV / FLAC / M4A",
-        type=["mp3", "wav", "flac", "m4a"],
+        type=AUDIO_UPLOAD_TYPES,
         key=f"isolate_upload_{st.session_state.get('isolate_upload_key', 0)}",
     )
     _sync_upload_output_name(uploaded)
+    if uploaded is not None:
+        _ensure_pending_audio(uploaded)
+
     carry_over_path = st.session_state.get("carry_over_audio_path")
     carry_over_name = st.session_state.get("carry_over_audio_name")
     if not uploaded and carry_over_path and Path(carry_over_path).exists():
@@ -441,39 +591,88 @@ def _render_separation_controls() -> tuple[str, str, str, float | None, object, 
     default_name = Path(uploaded.name).stem if uploaded else Path(carry_over_name or "").stem
     if default_name and not st.session_state.get("isolate_output_name"):
         st.session_state["isolate_output_name"] = default_name
-    output_name = st.text_input(
-        "Output name",
-        value=default_name,
-        help="Used for downloaded file names. Defaults to the uploaded file's name.",
-        key="isolate_output_name",
+
+    audio_path = _active_source_path(uploaded)
+    start_sec, max_duration_sec, region_label = _render_region_controls(audio_path)
+
+    st.subheader("Processing speed")
+    speed_id = st.radio(
+        "Speed",
+        options=list(SPEED_PRESETS.keys()),
+        format_func=_speed_preset_radio_label,
+        key="isolate_speed_preset",
+        label_visibility="collapsed",
+        horizontal=True,
     )
-    return model, quality, device, max_duration_sec, uploaded, output_name
+    speed = resolve_speed_preset(speed_id)
+    if speed["help"]:
+        st.caption(speed["help"])
+
+    # The speed preset drives Quality/Device; an advanced override sticks until the
+    # user picks a different speed.
+    if st.session_state.get("isolate_speed_applied") != speed["id"]:
+        st.session_state["isolate_speed_applied"] = speed["id"]
+        st.session_state["isolate_quality"] = speed["quality"]
+        st.session_state["isolate_device"] = speed["device"]
+
+    with _stateful_expander(
+        "Advanced options", key="isolate_options_expanded", default=True
+    ):
+        quality = st.selectbox(
+            "Quality",
+            options=["fast", "balanced", "high", "extreme"],
+            help="Higher quality is slower, especially on CPU.",
+            key="isolate_quality",
+        )
+        device = st.selectbox(
+            "Device",
+            options=["cpu", "cuda"],
+            key="isolate_device",
+        )
+        st.text_input(
+            "Output name",
+            help="Used for downloaded file names. Defaults to the uploaded file's name.",
+            key="isolate_output_name",
+        )
+
+    output_name = st.session_state.get("isolate_output_name", default_name or "")
+    return {
+        "model": resolved["model"],
+        "two_stems": resolved["two_stems"],
+        "custom_stems": custom_stems,
+        "error": preset_error,
+        "quality": quality,
+        "device": device,
+        "start_sec": start_sec,
+        "max_duration_sec": max_duration_sec,
+        "uploaded": uploaded,
+        "output_name": output_name,
+        "region_label": region_label,
+    }
+
+
+def _ffmpeg_install_hint() -> str:
+    if sys.platform == "darwin":
+        return "Install ffmpeg: brew install ffmpeg"
+    if sys.platform.startswith("win"):
+        return "Install ffmpeg: winget install Gyan.FFmpeg (full/shared build, not essentials-only)"
+    return "Install ffmpeg: sudo apt install ffmpeg (or your distro equivalent)"
 
 
 def main() -> None:
     st.title("Audio Isolation")
-    st.caption(
-        "Separate a mix into individual instrument stems with Demucs (free/open-source). "
-        "CPU separation is slow — expect roughly the track length or longer."
-    )
 
-    with st.expander("How this works"):
-        st.markdown(
-            "1. **Demucs** (an open-source separation model) splits your uploaded mix into "
-            "individual instrument tracks — called **stems** (e.g. drums, bass, vocals, "
-            "guitar) — by learning what each instrument typically sounds like.\n"
-            "2. Once separated, use the **Live mixer** to listen to any combination of stems "
-            "at custom volumes (mute/solo included) without re-running Demucs.\n"
-            "3. Download individual stems, everything as a zip, or a custom mixdown of the "
-            "levels you dialed in.\n\n"
-            "Separation quality varies by instrument and model choice — see the model "
-            "picker's tooltip below for tradeoffs."
+    if not shutil.which("ffmpeg"):
+        st.error(
+            "ffmpeg is required for audio conversion but was not found on PATH. "
+            f"{_ffmpeg_install_hint()}"
         )
+        return
 
     demucs_ok = is_demucs_available()
     if not demucs_ok:
         st.error(
-            "Demucs is required for Audio Isolation and is not installed. "
+            "Audio separation requires Demucs, which is not installed. "
             f"{DEMUCS_INSTALL_HINT}"
         )
         return
@@ -481,10 +680,12 @@ def main() -> None:
     has_results = bool(st.session_state.get("isolate_artifacts"))
     browser_id = _get_browser_user_id()
 
-    with st.expander("Separation settings", expanded=not has_results):
-        model, quality, device, max_duration_sec, uploaded, output_name = (
-            _render_separation_controls()
-        )
+    choice = _render_separation_controls()
+    uploaded = choice["uploaded"]
+    start_sec = choice["start_sec"]
+    max_duration_sec = choice["max_duration_sec"]
+    region_label = choice["region_label"]
+    output_name = choice["output_name"]
 
     pending_new_upload = uploaded is not None
     pending_upload_fp = st.session_state.get("isolate_upload_fp")
@@ -494,23 +695,18 @@ def main() -> None:
     ):
         upload_name = uploaded.name if uploaded else "New file"
         st.info(
-            f"**{upload_name}** is ready — click **Separate stems** to replace the "
+            f"**{upload_name}** is ready — click **Separate tracks** to replace the "
             "current results."
         )
 
     recent_runs = list_recent_runs("isolate", owner=browser_id)
     if recent_runs:
-        with st.expander(
-            f"Recent isolations ({len(recent_runs)})",
-            expanded=st.session_state.get("isolate_recent_expanded", False),
+        with _stateful_expander(
+            "Recent separations", key="isolate_recent_expanded", default=False
         ):
-            st.caption(
-                "Reopen a past isolation's mixer and downloads without re-uploading or "
-                "re-running Demucs."
-            )
             if pending_new_upload:
                 st.caption(
-                    "Finish or clear your new upload before reopening a past isolation."
+                    "Finish or clear your new upload before reopening a past separation."
                 )
             for run in recent_runs:
                 run_artifacts = run.get("artifacts", {})
@@ -527,7 +723,7 @@ def main() -> None:
                         if created_at
                         else ""
                     )
-                    st.write(run.get("title") or "stems")
+                    st.write(run.get("title") or "tracks")
                     st.caption(when if available else f"{when} — files no longer available")
                 with cols[1]:
                     if available and st.button(
@@ -548,11 +744,12 @@ def main() -> None:
                             and Path(path).suffix.lower() == ".wav"
                         ]
                         st.session_state["isolate_artifacts"] = run_artifacts
-                        title = run.get("title") or "stems"
+                        title = run.get("title") or "tracks"
                         st.session_state["isolate_base_name"] = title
                         st.session_state["isolate_run_dir"] = run["run_dir"]
                         st.session_state["isolate_output_name"] = title
                         st.session_state.pop("isolate_volumes_db", None)
+                        st.session_state.pop("isolate_master_volume_db", None)
                         st.session_state.pop("isolate_mixer_state", None)
                         st.session_state.pop("isolate_mix_ready", None)
                         st.session_state.pop("isolate_mix_fp", None)
@@ -575,8 +772,8 @@ def main() -> None:
                         key=f"delete_isolate_{run['run_dir']}",
                         disabled=pending_new_upload,
                     ):
-                        # Keep "Recent isolations" open across the rerun below — without
-                        # this the expander resets to collapsed and you lose your place.
+                        # Keep "Recent separations" open across the rerun below so the
+                        # user doesn't lose their place.
                         st.session_state["isolate_recent_expanded"] = True
                         deleted = delete_run(run["run_dir"])
                         if deleted:
@@ -586,6 +783,7 @@ def main() -> None:
                                     "isolate_base_name",
                                     "isolate_run_dir",
                                     "isolate_volumes_db",
+                                    "isolate_master_volume_db",
                                     "isolate_mixer_state",
                                     "isolate_mix_ready",
                                     "isolate_mix_fp",
@@ -598,23 +796,20 @@ def main() -> None:
                                     st.session_state.pop(key, None)
                             st.rerun()
                         else:
-                            st.error("Could not delete that isolation.")
+                            st.error("Could not delete that separation.")
 
-    # Kept outside the collapsible settings so it stays reachable (e.g. to run again on a
-    # new file) without needing to re-open "Separation settings" after a result appears.
     run_separate = st.button(
-        "Separate stems",
+        "Separate tracks",
         type="primary",
         disabled=not demucs_ok,
         key="isolate_separate",
     )
-    st.caption(
-        "Separation can take roughly the track length or longer on CPU. There's currently "
-        "no way to cancel once started, and closing this tab may not stop server-side "
-        "processing."
-    )
 
     if run_separate:
+        if choice["error"]:
+            st.error(choice["error"])
+            return
+
         carry_over_path = st.session_state.get("carry_over_audio_path")
         using_carry_over = bool(
             not uploaded and carry_over_path and Path(carry_over_path).exists()
@@ -623,47 +818,115 @@ def main() -> None:
             st.error("Upload an audio file.")
             return
 
+        if max_duration_sec is not None and max_duration_sec < MIN_REGION_SEC:
+            st.error(f"Section must be at least {MIN_REGION_SEC:.0f} seconds.")
+            return
+
         output_dir = run_output_dir()
         config = IsolateConfig(
-            model=model,
-            quality=quality,
-            device=device,
+            model=choice["model"],
+            quality=choice["quality"],
+            device=choice["device"],
+            start_sec=start_sec,
             max_duration_sec=max_duration_sec,
+            two_stems=choice["two_stems"],
         )
 
-        # Weighted stage progress — Demucs dominates runtime.
         separation_started = time.monotonic()
 
         try:
-            with st.status("Starting isolation…", expanded=True) as status:
+            pending = st.session_state.get("isolate_pending_audio_path")
+            if uploaded and pending and Path(pending).exists():
+                audio_path = Path(pending)
+            elif uploaded:
+                audio_path = save_upload(uploaded)
+            else:
+                audio_path = Path(carry_over_path)
+
+            if max_duration_sec is not None:
+                file_dur = probe_duration_sec(audio_path)
+                try:
+                    _, validated_length, _ = resolve_region(
+                        file_dur,
+                        start_sec,
+                        start_sec + max_duration_sec,
+                    )
+                    config.max_duration_sec = validated_length
+                except RegionError as exc:
+                    st.error(str(exc))
+                    return
+
+            with st.status("Separating tracks…", expanded=True) as status:
                 progress_bar = st.progress(0.0)
                 progress_label = st.empty()
+                elapsed_label = st.empty()
+
+                progress_state: dict[str, str] = {
+                    "stage": "ingest",
+                    "message": "Preparing audio…",
+                }
+                result_holder: dict = {}
 
                 def on_progress(stage: str, message: str) -> None:
+                    progress_state["stage"] = stage
+                    progress_state["message"] = message
+
+                def paint_progress() -> None:
                     elapsed = format_elapsed(time.monotonic() - separation_started)
+                    stage = progress_state["stage"]
+                    message = progress_state["message"]
+                    display = _ISOLATION_STAGE_DISPLAY.get(stage, message)
+                    elapsed_label.markdown(f"**Elapsed:** `{elapsed}`")
                     if stage in ISOLATION_STAGE_ORDER:
                         pct = stage_progress_percent(stage)
                         progress_bar.progress(pct)
-                        label = format_progress_label(pct, message)
-                        if stage == "separate":
-                            label = f"{label} (elapsed {elapsed})"
-                        progress_label.caption(label)
-                    status.update(label=f"[{stage}] {message} · {elapsed}")
+                        progress_label.caption(format_progress_label(pct, display))
+                    status.update(label=f"{display} · {elapsed}")
 
-                if uploaded:
-                    audio_path = save_upload(uploaded)
-                else:
-                    audio_path = Path(carry_over_path)
-                artifacts = separate_stems(
-                    audio_path=audio_path,
-                    output_dir=output_dir,
-                    config=config,
-                    on_progress=on_progress,
-                )
+                def worker() -> None:
+                    try:
+                        result_holder["artifacts"] = separate_stems(
+                            audio_path=audio_path,
+                            output_dir=output_dir,
+                            config=config,
+                            on_progress=on_progress,
+                        )
+                    except Exception as exc:  # noqa: BLE001 — re-raised on main thread
+                        result_holder["error"] = exc
+
+                thread = threading.Thread(target=worker, daemon=True)
+                thread.start()
+                paint_progress()
+                while thread.is_alive():
+                    time.sleep(0.25)
+                    paint_progress()
+                thread.join()
+                paint_progress()
+
+                if "error" in result_holder:
+                    raise result_holder["error"]
+                artifacts = result_holder["artifacts"]
 
             cleanup_mix_artifacts(output_dir)
             st.session_state["isolate_artifacts"] = {k: str(v) for k, v in artifacts.items()}
-            resolved_name = output_name.strip() or Path(uploaded.name).stem if uploaded else audio_path.stem
+            stem_name = (
+                Path(uploaded.name).stem
+                if uploaded
+                else (
+                    Path(st.session_state.get("carry_over_audio_name") or "").stem
+                    if using_carry_over
+                    else audio_path.stem
+                )
+            )
+            resolved_name = (output_name or "").strip() or stem_name
+            if region_label and max_duration_sec is not None:
+                clip_suffix = format_region_label_filename(start_sec, max_duration_sec)
+                resolved_name = f"{resolved_name}_{clip_suffix}"
+                st.session_state["isolate_region_label"] = region_label
+                st.session_state["isolate_clip_length"] = max_duration_sec
+            else:
+                st.session_state.pop("isolate_region_label", None)
+                st.session_state.pop("isolate_clip_length", None)
             st.session_state["isolate_base_name"] = resolved_name
             st.session_state["isolate_source_audio_path"] = str(audio_path)
             st.session_state["isolate_run_dir"] = str(output_dir)
@@ -671,6 +934,7 @@ def main() -> None:
             st.session_state.pop("carry_over_audio_path", None)
             st.session_state.pop("carry_over_audio_name", None)
             st.session_state.pop("isolate_volumes_db", None)
+            st.session_state.pop("isolate_master_volume_db", None)
             st.session_state.pop("isolate_mixer_state", None)
             st.session_state.pop("isolate_mix_ready", None)
             st.session_state.pop("isolate_mix_fp", None)
@@ -700,10 +964,12 @@ def main() -> None:
                 and name != "bass_bleed_diagnostics"
                 and Path(path).suffix.lower() == ".wav"
             ]
-            st.session_state["isolate_selected_stems"] = default_isolate_selected_stems(
-                produced_stem_names, presence
+            custom_stems = choice["custom_stems"]
+            st.session_state["isolate_selected_stems"] = (
+                custom_selected_stems(produced_stem_names, custom_stems)
+                if custom_stems
+                else default_isolate_selected_stems(produced_stem_names, presence)
             )
-            # Rerun so Separation settings collapses and results sit near the top.
             stem_count = sum(
                 1
                 for name, path in artifacts.items()
@@ -716,7 +982,7 @@ def main() -> None:
                 )
             )
             st.session_state["isolate_flash"] = (
-                f"Separated {stem_count} stem(s). Live mixer and downloads are below."
+                f"Separated {stem_count} tracks. Live mixer and downloads are below."
             )
             write_run_metadata(
                 output_dir,
@@ -729,10 +995,12 @@ def main() -> None:
 
         except Exception as exc:
             st.error(
-                "Isolation failed — your file and settings are still here, "
+                "Separation failed — your file and settings are still here, "
                 "so you can just try again."
             )
-            with st.expander("Technical details"):
+            with _stateful_expander(
+                "Technical details", key="isolate_error_details_expanded", default=False
+            ):
                 st.code(str(exc))
             return
 
@@ -761,15 +1029,15 @@ def main() -> None:
     bass_bleed = _load_bass_bleed_diagnostics(artifacts_map)
     if bass_bleed.get("flagged"):
         st.warning(
-            "Guitar stem check: "
-            f"{bass_bleed.get('reason', 'anomalously bass-heavy content detected')}"
+            "Guitar check: "
+            f"{bass_bleed.get('reason', 'this track may contain extra bass bleed')}"
         )
 
     guitar_split = _load_guitar_split_diagnostics(artifacts_map)
     if guitar_split.get("outcome") == "lead_rhythm":
         if guitar_split.get("low_confidence") or guitar_split.get("forced_emit"):
             st.warning(
-                "Lead/Rhythm guitar split (best-effort, low confidence): "
+                "Lead/Rhythm guitar split (best effort, lower confidence): "
                 f"{guitar_split.get('reason', '')}"
             )
         else:
@@ -778,12 +1046,11 @@ def main() -> None:
                 f"{guitar_split.get('reason', 'split applied')}"
             )
 
-    with st.expander("Include stems (mixer & downloads)", expanded=False):
-        st.caption(
-            "Choose which already-separated stems feed the mixer and downloads below "
-            "(does not re-run Demucs — the Separation model above already produced these). "
-            "Lead/Rhythm Guitar are included by default when present."
-        )
+    with _stateful_expander(
+        "Choose tracks for the mixer and downloads",
+        key="isolate_track_picker_expanded",
+        default=True,
+    ):
         _render_stem_presence_selector(
             stem_paths, presence, _artifact_fingerprint(stem_paths)
         )
@@ -796,16 +1063,17 @@ def main() -> None:
     run_dir = Path(st.session_state.get("isolate_run_dir", next(iter(stem_paths.values())).parent))
 
     st.subheader("Live mixer")
-    st.caption(f"**Track:** {base_name}")
+    region_caption = st.session_state.get("isolate_region_label")
     source_audio_path = st.session_state.get("isolate_source_audio_path")
-    if source_audio_path and Path(source_audio_path).exists():
-        st.caption(f"Source file: `{Path(source_audio_path).name}`")
-    st.caption(
-        "Play all stems in sync. Levels apply in the mixer without re-running Demucs or "
-        "resetting the playhead. Mixer state is sent to the page when you finish adjusting "
-        "(for mix export). Volume: −60 dB to +24 dB (0 dB = unity). Open **Waveform & "
-        "download** on any instrument for its waveform and a full-quality WAV download."
+    clip_length = st.session_state.get("isolate_clip_length")
+    source_note = (
+        f" from `{Path(source_audio_path).name}`" if source_audio_path else ""
     )
+    if region_caption:
+        length_note = f" ({clip_length:.0f} s)" if clip_length else ""
+        st.caption(f"**{base_name}** — {region_caption}{length_note}{source_note}")
+    else:
+        st.caption(f"**{base_name}**{source_note}")
     mixer_state = _render_live_mixer(
         selected_stem_paths, track_title=base_name, base_name=base_name
     )
@@ -815,28 +1083,32 @@ def main() -> None:
             st.session_state["isolate_volumes_db"] = {
                 k: float(v) for k, v in mixer_state["volumesDb"].items()
             }
+        if "masterVolumeDb" in mixer_state:
+            st.session_state["isolate_master_volume_db"] = float(
+                mixer_state["masterVolumeDb"]
+            )
 
-    st.subheader("Downloads")
     if not selected_stem_paths:
-        st.info("Select at least one stem under \"Include stems\" to enable downloads.")
+        st.subheader("Downloads")
+        st.info(
+            'Select at least one track under "Choose tracks for the mixer and downloads".'
+        )
         return
 
+    # Prepare zip + mix before the Downloads heading so Streamlit does not paint a
+    # ghost second "Downloads" while blocking on mix export.
     zip_bytes = _cached_zip_bytes(selected_stem_paths, base_name, run_dir)
-    st.download_button(
-        label="Download all stems (.zip)",
-        data=zip_bytes,
-        file_name=st.session_state.get("isolate_zip_name", f"{base_name}_stems.zip"),
-        mime="application/zip",
-        key="dl_zip",
-        type="primary",
-    )
-
     stem_names = sort_stem_names(selected_stem_paths.keys())
     state = st.session_state.get("isolate_mixer_state") or {}
     volumes_db = state.get("volumesDb") or st.session_state.get("isolate_volumes_db") or {}
     muted = state.get("muted") or {n: False for n in stem_names}
     soloed = state.get("soloed") or {n: False for n in stem_names}
-    export_fp = _mixer_export_fingerprint(stem_names, volumes_db, muted, soloed)
+    master_volume_db = float(
+        state.get("masterVolumeDb", st.session_state.get("isolate_master_volume_db", DB_DEFAULT))
+    )
+    export_fp = _mixer_export_fingerprint(
+        stem_names, volumes_db, muted, soloed, master_volume_db
+    )
     ready = st.session_state.get("isolate_mix_ready")
     mix_fresh = (
         ready
@@ -853,6 +1125,7 @@ def main() -> None:
                 volumes_db,
                 muted,
                 soloed,
+                master_volume_db,
             )
             ready = st.session_state.get("isolate_mix_ready")
         except Exception as exc:
@@ -861,6 +1134,16 @@ def main() -> None:
             ready = None
             st.warning(f"Could not build current mix export: {exc}")
 
+    st.subheader("Downloads")
+    st.download_button(
+        label="Download all tracks (.zip)",
+        data=zip_bytes,
+        file_name=st.session_state.get("isolate_zip_name", f"{base_name}_stems.zip"),
+        mime="application/zip",
+        key="dl_zip",
+        type="primary",
+    )
+
     if ready:
         st.download_button(
             label="Download current mix",
@@ -868,12 +1151,12 @@ def main() -> None:
             file_name=f"{base_name}_current_mix.wav",
             mime="audio/wav",
             key="dl_current_mix",
-            help="Reflects the live mixer's current volume / mute / solo settings.",
+            help="Uses the live mixer's current volume / mute / solo settings.",
         )
 
     source_audio_path = st.session_state.get("isolate_source_audio_path")
     if source_audio_path and Path(source_audio_path).exists():
-        if st.button("Also make a tab PDF from this →"):
+        if st.button("Make a tab PDF from this →"):
             st.session_state["carry_over_audio_path"] = source_audio_path
             st.session_state["carry_over_audio_name"] = Path(source_audio_path).name
             st.switch_page(str(Path(__file__).with_name("tab_pdf.py")))

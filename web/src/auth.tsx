@@ -23,14 +23,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const token = api.getAccessToken();
-    if (!token) {
-      setLoading(false);
+    if (token) {
+      api
+        .me()
+        .then((u) => setEmail(u.email))
+        .catch(() => api.setAccessToken(null))
+        .finally(() => setLoading(false));
       return;
     }
     api
-      .me()
-      .then((u) => setEmail(u.email))
-      .catch(() => api.setAccessToken(null))
+      .startAnonymousSession()
+      .then((res) => setEmail(res.email))
+      .catch(() => {
+        /* demo session unavailable */
+      })
       .finally(() => setLoading(false));
   }, []);
 

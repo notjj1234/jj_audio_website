@@ -32,7 +32,7 @@ STEM_LABELS = {
     "rhythm_guitar": "Rhythm Guitar",
     "guitar1": "Guitar 1 (legacy)",
     "guitar2": "Guitar 2 (legacy)",
-    "no_vocals": "No vocals",
+    "no_vocals": "Instrumental",
     "no_drums": "No drums",
     "no_bass": "No bass",
     "no_other": "No other",
@@ -70,15 +70,18 @@ def effective_linear_gains(
     muted: dict[str, bool],
     soloed: dict[str, bool],
     volume_db: dict[str, float] | None = None,
+    master_volume_db: float = DB_DEFAULT,
 ) -> dict[str, float]:
     """
     DAW-style mute/solo + volume → per-stem linear gains.
 
     - If any stem is soloed, only soloed stems are audible (mute ignored).
     - Otherwise muted stems are silent.
-    - Volume is applied as dB → linear on audible stems.
+    - Per-stem volume and master volume are applied as dB → linear (multiplied).
     """
     volumes = volume_db or {}
+    master_db = max(DB_MIN, min(DB_MAX, float(master_volume_db)))
+    master_lin = db_to_linear(master_db)
     any_solo = any(soloed.get(n, False) for n in stem_names)
     gains: dict[str, float] = {}
     for name in stem_names:
@@ -88,7 +91,7 @@ def effective_linear_gains(
             audible = soloed.get(name, False)
         else:
             audible = not muted.get(name, False)
-        gains[name] = db_to_linear(db) if audible else 0.0
+        gains[name] = (db_to_linear(db) * master_lin) if audible else 0.0
     return gains
 
 

@@ -21,11 +21,12 @@ services:
       dockerfile: Dockerfile
     environment: &app_env
       ATT_ENV: production
-      ATT_REQUIRE_AUTH: "true"
+      ATT_REQUIRE_AUTH: ${ATT_REQUIRE_AUTH:-true}
+      ATT_DEMO_MODE: ${ATT_DEMO_MODE:-false}
       ATT_SECRET_KEY: ${ATT_SECRET_KEY:?set ATT_SECRET_KEY}
       ATT_CORS_ORIGINS: ${ATT_CORS_ORIGINS:-https://localhost}
       ATT_BOOTSTRAP_ADMIN_EMAIL: ${ATT_BOOTSTRAP_ADMIN_EMAIL:-admin@localhost}
-      ATT_BOOTSTRAP_ADMIN_PASSWORD: ${ATT_BOOTSTRAP_ADMIN_PASSWORD:-changeme}
+      ATT_BOOTSTRAP_ADMIN_PASSWORD: ${ATT_BOOTSTRAP_ADMIN_PASSWORD:?set ATT_BOOTSTRAP_ADMIN_PASSWORD}
       ATT_DATABASE_URL: postgresql+psycopg://att:att@postgres:5432/att
       ATT_REDIS_URL: redis://redis:6379/0
       ATT_USE_WORKER: "true"
@@ -37,6 +38,7 @@ services:
       ATT_ALLOW_YOUTUBE: "false"
       ATT_MAX_UPLOAD_MB: "50"
       ATT_DEFAULT_ISOLATE_QUALITY: fast
+      ATT_SINGLE_FLIGHT_JOBS: ${ATT_SINGLE_FLIGHT_JOBS:-false}
       ATT_DATA_DIR: /app/data
       PYTHONPATH: /app/src:/app
     volumes:

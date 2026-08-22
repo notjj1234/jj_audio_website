@@ -8,8 +8,16 @@ from types import SimpleNamespace
 import pytest
 
 from ui.isolate_state import (
+    DEFAULT_SEPARATION_PRESET,
+    DEFAULT_SPEED_PRESET,
+    clamp_region_bounds,
+    custom_selected_stems,
+    default_region_end,
     format_elapsed,
     format_progress_label,
+    resolve_custom_separation,
+    resolve_separation_preset,
+    resolve_speed_preset,
     should_hide_stale_results,
     stage_progress_percent,
     sync_output_name_on_upload,
@@ -63,3 +71,144 @@ def test_format_progress_label():
 def test_format_elapsed():
     assert format_elapsed(65) == "1:05"
     assert format_elapsed(0) == "0:00"
+
+
+def test_resolve_separation_preset_full_band():
+    resolved = resolve_separation_preset("full_band")
+    assert resolved["model"] == "htdemucs_6s"
+    assert resolved["two_stems"] is None
+    assert resolved["track_count"] == 6
+    assert "Guitar" in resolved["tracks"]
+
+
+def test_resolve_separation_preset_essential():
+    resolved = resolve_separation_preset("essential")
+    assert resolved["model"] == "htdemucs"
+    assert resolved["two_stems"] is None
+    assert resolved["track_count"] == 4
+
+
+def test_resolve_separation_preset_vocals_music():
+    resolved = resolve_separation_preset("vocals_music")
+    assert resolved["model"] == "htdemucs"
+    assert resolved["two_stems"] == "vocals"
+    assert resolved["track_count"] == 2
+    assert "Instrumental" in resolved["tracks"]
+
+
+def test_resolve_separation_preset_unknown_falls_back():
+    resolved = resolve_separation_preset("not_a_real_preset")
+    assert resolved["id"] == DEFAULT_SEPARATION_PRESET
+    assert resolved["model"] == "htdemucs_6s"
+
+
+def test_resolve_custom_separation_vocals_only_uses_two_stem_split():
+    resolved = resolve_custom_separation(["vocals"])
+    assert resolved["model"] == "htdemucs"
+    assert resolved["two_stems"] == "vocals"
+    assert resolved["stems"] == ["vocals"]
+
+
+def test_resolve_custom_separation_piano_and_vocals_needs_six_stem_model():
+    resolved = resolve_custom_separation(["piano", "vocals"])
+    assert resolved["model"] == "htdemucs_6s"
+    assert resolved["two_stems"] is None
+    assert resolved["stems"] == ["vocals", "piano"]
+    assert resolved["tracks"] == "Vocals, Piano"
+
+
+def test_resolve_custom_separation_guitar_needs_six_stem_model():
+    resolved = resolve_custom_separation(["guitar"])
+    assert resolved["model"] == "htdemucs_6s"
+    assert resolved["two_stems"] is None
+
+
+def test_resolve_custom_separation_drums_and_bass_use_four_stem_model():
+    resolved = resolve_custom_separation(["bass", "drums"])
+    assert resolved["model"] == "htdemucs"
+    assert resolved["two_stems"] is None
+    assert resolved["stems"] == ["drums", "bass"]
+
+
+def test_resolve_custom_separation_ignores_unknown_picks():
+    resolved = resolve_custom_separation(["drums", "kazoo", "drums"])
+    assert resolved["stems"] == ["drums"]
+
+
+def test_resolve_custom_separation_requires_a_pick():
+    with pytest.raises(ValueError):
+        resolve_custom_separation([])
+    with pytest.raises(ValueError):
+        resolve_custom_separation(["kazoo"])
+
+
+def test_resolve_custom_separation_has_no_caveat():
+    assert resolve_custom_separation(["vocals"])["caveat"] == ""
+
+
+def test_custom_selected_stems_only_turns_on_requested_instruments():
+    selected = custom_selected_stems(
+        ["vocals", "drums", "bass", "guitar", "piano", "other"],
+        ["vocals", "piano"],
+    )
+    assert selected == {
+        "vocals": True,
+        "drums": False,
+        "bass": False,
+        "guitar": False,
+        "piano": True,
+        "other": False,
+    }
+
+
+def test_custom_selected_stems_prefers_lead_rhythm_over_combined_guitar():
+    selected = custom_selected_stems(
+        ["guitar", "lead_guitar", "rhythm_guitar", "vocals"],
+        ["guitar"],
+    )
+    assert selected["lead_guitar"] is True
+    assert selected["rhythm_guitar"] is True
+    assert selected["guitar"] is False
+    assert selected["vocals"] is False
+
+
+def test_custom_selected_stems_keeps_combined_guitar_without_a_split():
+    selected = custom_selected_stems(["guitar", "vocals"], ["guitar"])
+    assert selected["guitar"] is True
+
+
+def test_custom_selected_stems_falls_back_to_all_when_nothing_matches():
+    selected = custom_selected_stems(["vocals", "no_vocals"], ["drums"])
+    assert selected == {"vocals": True, "no_vocals": True}
+
+
+def test_resolve_speed_preset_faster():
+    resolved = resolve_speed_preset("faster")
+    assert resolved["quality"] == "fast"
+    assert resolved["device"] == "cpu"
+
+
+def test_resolve_speed_preset_balanced():
+    resolved = resolve_speed_preset("balanced")
+    assert resolved["quality"] == "balanced"
+
+
+def test_resolve_speed_preset_best():
+    resolved = resolve_speed_preset("best")
+    assert resolved["quality"] == "high"
+
+
+def test_resolve_speed_preset_unknown_falls_back():
+    resolved = resolve_speed_preset("unknown")
+    assert resolved["id"] == DEFAULT_SPEED_PRESET
+
+
+def test_default_region_end():
+    assert default_region_end(120.0) == 30.0
+    assert default_region_end(10.0) == 10.0
+
+
+def test_clamp_region_bounds():
+    start, end = clamp_region_bounds(0, 3, 120.0, min_length=5.0)
+    assert end - start >= 5.0
+

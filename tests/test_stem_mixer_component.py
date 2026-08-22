@@ -32,3 +32,11 @@ def test_stem_mixer_accepts_track_title():
     assert "track_title" in params
     assert params["track_title"].default == ""
 
+
+def test_stem_mixer_accepts_master_volume():
+    from ui.stem_mixer_component import stem_mixer
+
+    params = inspect.signature(stem_mixer).parameters
+    assert "initial_master_volume_db" in params
+    assert params["initial_master_volume_db"].default == 0.0
+

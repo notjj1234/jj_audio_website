@@ -1,10 +1,12 @@
 import { useState, type FormEvent } from "react";
 import * as api from "../api";
 import { JobProgress } from "../components/JobProgress";
+import { ProcessingModeSelect } from "../components/ProcessingModeSelect";
 
 export function TabPage() {
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("Guitar Tab");
+  const [processingMode, setProcessingMode] = useState("auto");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [job, setJob] = useState<api.JobResponse | null>(null);
@@ -25,7 +27,7 @@ export function TabPage() {
         upload_id: up.upload_id,
         title,
         separate_stems: true,
-        max_duration_sec: 90,
+        processing_mode: processingMode,
       });
       setJob(created);
       const stop = api.watchJob(created.id, setJob);
@@ -63,6 +65,7 @@ export function TabPage() {
             onChange={(e) => setTitle(e.target.value)}
           />
         </label>
+        <ProcessingModeSelect value={processingMode} onChange={setProcessingMode} />
         {error && <p className="error">{error}</p>}
         <button type="submit" disabled={busy}>
           {busy ? "Starting…" : "Create tab job"}

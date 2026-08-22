@@ -45,7 +45,7 @@ def main() -> None:
     parser.add_argument(
         "--quality",
         choices=["fast", "balanced", "high", "extreme"],
-        default="balanced",
+        default="fast",
         help="Quality preset (affects shifts/overlap; higher = much slower)",
     )
     parser.add_argument("--device", default="cpu", help="Demucs device: cpu or cuda")
@@ -53,7 +53,13 @@ def main() -> None:
         "--max-duration",
         type=float,
         default=0.0,
-        help="Max seconds to process (0 = full file, default)",
+        help="Length in seconds of the section to process (0 = through end of file, default)",
+    )
+    parser.add_argument(
+        "--start",
+        type=float,
+        default=0.0,
+        help="Start offset in seconds before processing (default: 0)",
     )
     parser.add_argument(
         "--two-stems",
@@ -110,6 +116,7 @@ def main() -> None:
         raise SystemExit(f"Demucs is not installed. {DEMUCS_INSTALL_HINT}")
 
     max_dur = None if args.max_duration <= 0 else args.max_duration
+    start_sec = max(0.0, float(args.start))
     thr = LeadRhythmThresholds.from_env()
     if args.lr_separability_floor is not None:
         thr = replace(thr, separability_floor=args.lr_separability_floor)
@@ -122,6 +129,7 @@ def main() -> None:
         model=args.model,
         quality=args.quality,
         device=args.device,
+        start_sec=start_sec,
         max_duration_sec=max_dur,
         two_stems=args.two_stems,
         lead_rhythm=bool(args.lead_rhythm or args.dual_guitar),

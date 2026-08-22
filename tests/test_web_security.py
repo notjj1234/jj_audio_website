@@ -13,7 +13,7 @@ pytest.importorskip("fastapi")
 pytest.importorskip("jose")
 pytest.importorskip("sqlalchemy")
 
-from tests.backend_test_utils import configure_backend
+from tests.backend_test_utils import configure_backend, fake_wav_bytes
 
 
 @pytest.fixture()
@@ -58,7 +58,7 @@ def test_login_and_owner_artifacts(auth_env, monkeypatch):
     up = client.post(
         "/v1/uploads/audio",
         headers=headers,
-        files={"file": ("mix.wav", b"fake-audio-bytes", "audio/wav")},
+        files={"file": ("mix.wav", fake_wav_bytes(), "audio/wav")},
     )
     assert up.status_code == 200
     upload_id = up.json()["upload_id"]
@@ -163,7 +163,7 @@ def test_job_persists_across_manager_recreate(auth_env):
     up = client.post(
         "/v1/uploads/audio",
         headers=headers,
-        files={"file": ("mix.wav", b"fake", "audio/wav")},
+        files={"file": ("mix.wav", fake_wav_bytes(), "audio/wav")},
     )
     upload_id = up.json()["upload_id"]
     user_id = client.get("/v1/auth/me", headers=headers).json()["id"]
@@ -212,12 +212,169 @@ def test_production_settings_reject_star_cors_and_weak_secret():
             require_auth=False,
         )
 
+    with pytest.raises(ValidationError):
+        Settings(
+            env="production",
+            secret_key="strong-enough-secret-value",
+            cors_origins="https://example.com",
+            require_auth=False,
+            demo_mode=False,
+        )
+
+    demo_ok = Settings(
+        env="production",
+        secret_key="strong-enough-secret-value",
+        cors_origins="https://example.com",
+        require_auth=False,
+        demo_mode=True,
+        bootstrap_admin_password="unique-admin-pass-9x",
+    )
+    assert demo_ok.demo_mode is True
+
     ok = Settings(
         env="production",
         secret_key="strong-enough-secret-value",
         cors_origins="https://example.com",
         require_auth=True,
+        bootstrap_admin_password="unique-admin-pass-9x",
     )
     origins = ok.cors_origin_list()
     assert origins == ["https://example.com"]
     assert "*" not in origins
+
+def test_production_settings_reject_weak_bootstrap_password():
+    from backend.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings(
+            env="production",
+            secret_key="strong-enough-secret-value",
+            cors_origins="https://example.com",
+            require_auth=True,
+            bootstrap_admin_password="changeme",
+        )
+
+    with pytest.raises(ValidationError):
+        Settings(
+            env="production",
+            secret_key="strong-enough-secret-value",
+            cors_origins="https://example.com",
+            require_auth=True,
+            bootstrap_admin_password="change-me-now",
+        )
+
+    with pytest.raises(ValidationError):
+        Settings(
+            env="production",
+            secret_key="strong-enough-secret-value",
+            cors_origins="https://example.com",
+            require_auth=True,
+            bootstrap_admin_password="short",
+        )
+
+
+def test_demo_mode_unauthenticated_upload_is_401(tmp_path, monkeypatch):
+    main_mod = configure_backend(
+        tmp_path,
+        monkeypatch,
+        ATT_REQUIRE_AUTH="false",
+        ATT_DEMO_MODE="true",
+    )
+    with TestClient(main_mod.app) as client:
+        res = client.post(
+            "/v1/uploads/audio",
+            files={"file": ("mix.wav", fake_wav_bytes(), "audio/wav")},
+        )
+        assert res.status_code == 401
+
+        session = client.post("/v1/auth/session")
+        assert session.status_code == 200, session.text
+        headers = {"Authorization": f"Bearer {session.json()['access_token']}"}
+        ok = client.post(
+            "/v1/uploads/audio",
+            headers=headers,
+            files={"file": ("mix.wav", fake_wav_bytes(), "audio/wav")},
+        )
+        assert ok.status_code == 200
+
+
+def test_upload_id_cannot_be_used_by_another_user(auth_env):
+    client, _ = auth_env
+    token = _login(client)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    up = client.post(
+        "/v1/uploads/audio",
+        headers=headers,
+        files={"file": ("mix.wav", fake_wav_bytes(), "audio/wav")},
+    )
+    assert up.status_code == 200
+    upload_id = up.json()["upload_id"]
+
+    from backend.auth import hash_password
+    from backend.db import SessionLocal
+    from backend.models import User
+
+    db = SessionLocal()
+    other = User(
+        id=str(uuid.uuid4()),
+        email="idor@test.local",
+        password_hash=hash_password("otherpass"),
+        is_admin=False,
+    )
+    db.add(other)
+    db.commit()
+    db.close()
+
+    login2 = client.post(
+        "/v1/auth/login",
+        json={"email": "idor@test.local", "password": "otherpass"},
+    )
+    assert login2.status_code == 200, login2.text
+    tok2 = login2.json()["access_token"]
+    stolen = client.post(
+        "/v1/isolate/jobs",
+        headers={"Authorization": f"Bearer {tok2}"},
+        json={"upload_id": upload_id, "model": "htdemucs", "quality": "fast"},
+    )
+    assert stolen.status_code == 404
+
+
+def test_wav_extension_with_non_audio_bytes_rejected(auth_env):
+    client, _ = auth_env
+    token = _login(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    res = client.post(
+        "/v1/uploads/audio",
+        headers=headers,
+        files={"file": ("mix.wav", b"MZ" + b"\x00" * 20, "audio/wav")},
+    )
+    assert res.status_code == 400
+    assert "audio" in res.json()["detail"].lower()
+
+
+def test_openapi_disabled_in_production(tmp_path, monkeypatch):
+    main_mod = configure_backend(
+        tmp_path,
+        monkeypatch,
+        ATT_ENV="production",
+        ATT_REQUIRE_AUTH="true",
+        ATT_SECRET_KEY="strong-enough-secret-value",
+        ATT_BOOTSTRAP_ADMIN_PASSWORD="unique-admin-pass-9x",
+        ATT_CORS_ORIGINS="https://example.com",
+    )
+    with TestClient(main_mod.app) as client:
+        assert client.get("/docs").status_code == 404
+        assert client.get("/redoc").status_code == 404
+        assert client.get("/openapi.json").status_code == 404
+
+
+def test_audio_magic_bytes_unit():
+    from backend.limits import is_audio_magic, is_allowed_audio_content
+
+    assert is_audio_magic(fake_wav_bytes())
+    assert is_audio_magic(b"fLaC" + b"\x00" * 12)
+    assert is_audio_magic(b"ID3" + b"\x00" * 12)
+    assert is_audio_magic(b"\x00\x00\x00\x20ftypisom")
+    ok, _ = is_allowed_audio_content(b"MZ" + b"\x00" * 20)
+    assert ok is False

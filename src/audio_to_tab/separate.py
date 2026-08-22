@@ -19,6 +19,31 @@ def is_demucs_available() -> bool:
         return False
 
 
+def run_demucs(demucs_args: list[str]) -> None:
+    """
+    Run Demucs with CLI-style args (everything after ``python -m demucs``).
+
+    When frozen (PyInstaller), invokes ``demucs.separate.main`` in-process because
+    ``sys.executable`` is the app binary and cannot run ``-m demucs``.
+    Otherwise uses a subprocess so tests and local runs keep the same isolation.
+    """
+    if getattr(sys, "frozen", False):
+        from demucs.separate import main as demucs_main
+
+        try:
+            demucs_main(demucs_args)
+        except SystemExit as exc:
+            code = exc.code
+            if code not in (0, None):
+                raise RuntimeError(f"Demucs failed with exit code {code}") from exc
+        return
+
+    cmd = [sys.executable, "-m", "demucs", *demucs_args]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Demucs failed: {result.stderr or result.stdout}")
+
+
 def separate_guitar_stem(
     audio_path: str | Path,
     output_path: str | Path | None = None,
@@ -45,29 +70,27 @@ def separate_guitar_stem(
         out.parent.mkdir(parents=True, exist_ok=True)
 
     shifts = {"fast": "0", "balanced": "1", "high": "3", "extreme": "5"}.get(quality, "0")
-    overlap = {"fast": "0.25", "balanced": "0.25", "high": "0.5", "extreme": "0.75"}.get(quality, "0.25")
+    overlap = {"fast": "0.25", "balanced": "0.25", "high": "0.5", "extreme": "0.75"}.get(
+        quality, "0.25"
+    )
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        cmd = [
-            sys.executable,
-            "-m",
-            "demucs",
-            "-n",
-            model,
-            "-d",
-            device,
-            "-o",
-            str(tmp_path),
-            "--shifts",
-            shifts,
-            "--overlap",
-            overlap,
-            str(src),
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"Demucs failed: {result.stderr or result.stdout}")
+        run_demucs(
+            [
+                "-n",
+                model,
+                "-d",
+                device,
+                "-o",
+                str(tmp_path),
+                "--shifts",
+                shifts,
+                "--overlap",
+                overlap,
+                str(src),
+            ]
+        )
 
         guitar_files = list(tmp_path.rglob("guitar.wav"))
         if not guitar_files:

@@ -23,6 +23,8 @@ def configure_backend(tmp_path: Path, monkeypatch, **env: str):
         "ATT_BOOTSTRAP_ADMIN_PASSWORD": "changeme",
         "ATT_CORS_ORIGINS": "http://localhost:5173",
         "ATT_MAX_UPLOAD_MB": "50",
+        "ATT_RATE_LIMIT_UPLOAD": "1000/minute",
+        "ATT_RATE_LIMIT_JOBS": "1000/minute",
     }
     defaults.update(env)
     for key, value in defaults.items():
@@ -75,3 +77,19 @@ def configure_backend(tmp_path: Path, monkeypatch, **env: str):
     main_mod.data_dir = Path(new_settings.data_dir)
     main_mod.job_manager = manager_mod.JobManager(main_mod.data_dir)
     return main_mod
+
+
+def fake_wav_bytes(payload: bytes | None = None) -> bytes:
+    """Minimal RIFF/WAVE header so upload magic-byte checks pass."""
+    data = payload if payload is not None else b"\x00" * 64
+    return b"RIFF" + (36 + len(data)).to_bytes(4, "little") + b"WAVE" + data
+
+
+def login_headers(client, email: str | None = None, password: str | None = None) -> dict[str, str]:
+    from backend.config import settings as live_settings
+
+    email = email or live_settings.bootstrap_admin_email
+    password = password or live_settings.bootstrap_admin_password
+    res = client.post("/v1/auth/login", json={"email": email, "password": password})
+    assert res.status_code == 200, res.text
+    return {"Authorization": f"Bearer {res.json()['access_token']}"}

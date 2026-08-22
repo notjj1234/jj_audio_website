@@ -20,9 +20,9 @@ bass_bleed_mitigation`` for the optional, opt-in, partial high-pass mitigation.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
-import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -32,7 +32,7 @@ import numpy as np
 
 from audio_to_tab.ingest import normalize_audio
 from audio_to_tab.lead_rhythm import LeadRhythmThresholds
-from audio_to_tab.separate import is_demucs_available
+from audio_to_tab.separate import is_demucs_available, run_demucs
 
 DEMUCS_INSTALL_HINT = (
     "Demucs is required for stem separation. Install with: make install-demucs "
@@ -71,6 +71,148 @@ BASS_BLEED_ENERGY_SHARE_FLOOR = 0.65
 BASS_BLEED_HPF_CUTOFF_HZ = 60.0
 BASS_BLEED_HPF_ORDER = 4
 
+MIN_REGION_SEC = 5.0
+
+_FFMPEG_DURATION_RE = re.compile(
+    r"Duration:\s*(\d{2}):(\d{2}):(\d{2}\.\d+)",
+    re.IGNORECASE,
+)
+
+
+class RegionError(ValueError):
+    """Invalid audio region selection."""
+
+
+def format_time_sec(sec: float) -> str:
+    """Format seconds as M:SS."""
+    if sec < 0:
+        sec = 0
+    m = int(sec // 60)
+    s = int(sec % 60)
+    return f"{m}:{s:02d}"
+
+
+def format_region_label(start_sec: float, length_sec: float) -> str:
+    """Human-readable region label, e.g. ``0:32–1:15``."""
+    end_sec = start_sec + length_sec
+    return f"{format_time_sec(start_sec)}–{format_time_sec(end_sec)}"
+
+
+def format_region_label_filename(start_sec: float, length_sec: float) -> str:
+    """Filename-safe region suffix, e.g. ``0m32-1m15``."""
+
+    def _part(sec: float) -> str:
+        m = int(sec // 60)
+        s = int(sec % 60)
+        return f"{m}m{s:02d}"
+
+    end_sec = start_sec + length_sec
+    return f"{_part(start_sec)}-{_part(end_sec)}"
+
+
+def probe_duration_sec(path: str | Path) -> float | None:
+    """
+    Return audio duration in seconds, or None if it cannot be determined.
+
+    Tries ffprobe, then ffmpeg stderr parsing, then soundfile.
+    """
+    src = Path(path)
+    if not src.exists():
+        return None
+
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(src),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            try:
+                dur = float(result.stdout.strip())
+                if dur > 0:
+                    return dur
+            except ValueError:
+                pass
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        result = subprocess.run(
+            [ffmpeg, "-i", str(src)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        match = _FFMPEG_DURATION_RE.search(result.stderr or "")
+        if match:
+            hours, minutes, seconds = match.groups()
+            dur = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+            if dur > 0:
+                return dur
+
+    try:
+        import soundfile as sf
+
+        info = sf.info(str(src))
+        if info.samplerate > 0 and info.frames > 0:
+            return float(info.frames) / float(info.samplerate)
+    except Exception:
+        pass
+
+    return None
+
+
+def resolve_region(
+    duration_sec: float | None,
+    start_sec: float,
+    end_sec: float | None,
+    *,
+    cap_sec: float | None = None,
+) -> tuple[float, float, str | None]:
+    """
+    Validate and resolve a trim region.
+
+    Returns ``(start_sec, length_sec, note)`` where ``note`` explains any cap
+    shortening. Raises ``RegionError`` when the range is invalid.
+    """
+    if start_sec < 0:
+        raise RegionError("start_sec must be >= 0")
+
+    if end_sec is None:
+        if duration_sec is None:
+            raise RegionError("end_sec required when file duration is unknown")
+        end_sec = duration_sec
+
+    if start_sec >= end_sec:
+        raise RegionError("start_sec must be less than end_sec")
+
+    length = end_sec - start_sec
+    if length < MIN_REGION_SEC:
+        raise RegionError(f"region must be at least {MIN_REGION_SEC:.0f} seconds")
+
+    if duration_sec is not None and end_sec > duration_sec + 0.05:
+        raise RegionError("end_sec exceeds file duration")
+
+    note: str | None = None
+    if cap_sec is not None and length > cap_sec:
+        length = cap_sec
+        note = (
+            f"Region shortened to {cap_sec:.0f}s for processing mode limit "
+            f"({format_region_label(start_sec, length)})"
+        )
+
+    return start_sec, length, note
+
 
 @dataclass
 class DualGuitarDiagnostics:
@@ -89,8 +231,11 @@ class DualGuitarDiagnostics:
 @dataclass
 class IsolateConfig:
     model: str = "htdemucs_6s"
-    quality: str = "balanced"
+    quality: str = "fast"
     device: str = "cpu"
+    # Seconds from file start where isolation begins (default: 0 = beginning).
+    start_sec: float = 0.0
+    # Length of the section to process from start_sec. None = through end of file.
     max_duration_sec: float | None = None
     two_stems: str | None = None  # e.g. "vocals" for karaoke-style split
     # Deprecated/ignored: the Lead/Rhythm split is now always attempted
@@ -425,15 +570,34 @@ def split_dual_guitar_stem(
     return {"guitar1": p1, "guitar2": p2}, diag
 
 
-def _trim_audio(input_path: Path, max_duration_sec: float | None) -> Path:
-    if max_duration_sec is None:
+def _trim_audio(
+    input_path: Path,
+    max_duration_sec: float | None,
+    *,
+    start_sec: float = 0.0,
+) -> Path:
+    """Trim normalized audio with ffmpeg ``-ss`` + ``-t`` (after normalize, before Demucs)."""
+    if max_duration_sec is None and start_sec <= 0:
+        return input_path
+    length = max_duration_sec
+    if length is None:
         return input_path
     out = input_path.parent / f"{input_path.stem}_trim.wav"
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return input_path
     subprocess.run(
-        [ffmpeg, "-y", "-i", str(input_path), "-t", str(max_duration_sec), str(out)],
+        [
+            ffmpeg,
+            "-y",
+            "-ss",
+            str(start_sec),
+            "-i",
+            str(input_path),
+            "-t",
+            str(length),
+            str(out),
+        ],
         capture_output=True,
         check=False,
     )
@@ -480,17 +644,27 @@ def separate_stems(
 
         progress("ingest", "Normalizing audio")
         normalized = normalize_audio(src, tmp_path / "normalized.wav")
-        progress("ingest", "Trimming audio" if cfg.max_duration_sec else "Using full audio")
-        trimmed = _trim_audio(normalized, cfg.max_duration_sec)
+        trim_length = cfg.max_duration_sec
+        trim_start = cfg.start_sec
+        if trim_length is None and trim_start <= 0:
+            trim_message = "Using full audio"
+        else:
+            if trim_length is None:
+                file_dur = probe_duration_sec(normalized)
+                if file_dur is not None and file_dur > trim_start:
+                    trim_length = file_dur - trim_start
+            if trim_length is not None and trim_length > 0:
+                trim_message = f"Trimming to {format_region_label(trim_start, trim_length)}"
+            else:
+                trim_message = "Using full audio"
+        progress("ingest", trim_message)
+        trimmed = _trim_audio(normalized, trim_length, start_sec=trim_start)
 
         progress(
             "separate",
-            f"Running Demucs ({cfg.model}, quality={cfg.quality}) — this can take a long time on CPU",
+            "Separating tracks — this can take a while on CPU",
         )
-        cmd = [
-            sys.executable,
-            "-m",
-            "demucs",
+        demucs_args = [
             "-n",
             cfg.model,
             "-d",
@@ -503,12 +677,10 @@ def separate_stems(
             overlap,
         ]
         if cfg.two_stems:
-            cmd.extend(["--two-stems", cfg.two_stems])
-        cmd.append(str(trimmed))
+            demucs_args.extend(["--two-stems", cfg.two_stems])
+        demucs_args.append(str(trimmed))
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"Demucs failed: {result.stderr or result.stdout}")
+        run_demucs(demucs_args)
 
         progress("collect", "Collecting stem files")
         stem_files = list((tmp_path / "demucs_out").rglob("*.wav"))

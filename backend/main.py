@@ -18,7 +18,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -28,6 +28,8 @@ from audio_to_tab.isolate import SUPPORTED_MODELS
 from backend.auth import (
     REFRESH_COOKIE,
     create_access_token,
+    create_anon_session_token,
+    create_anonymous_user,
     create_refresh_token,
     decode_token,
     ensure_bootstrap_admin,
@@ -36,6 +38,14 @@ from backend.auth import (
     get_user_by_id,
     verify_artifact_token,
     verify_password,
+)
+from backend.capabilities import (
+    CapabilitiesResponse,
+    ProcessingModeError,
+    assert_device_allowed,
+    get_capabilities,
+    probe_host,
+    resolve_processing_mode,
 )
 from backend.config import settings
 from backend.contracts import (
@@ -51,9 +61,10 @@ from backend.contracts import (
 from backend import db as db_module
 from backend.db import get_db, init_db
 from backend.events import event_bus
+from backend.jobs import single_flight
 from backend.jobs.manager import JobManager
 from backend.jobs.runner import run_isolate_job_async, run_job_async
-from backend.limits import is_allowed_upload, normalize_filename
+from backend.limits import is_allowed_audio_content, is_allowed_upload, normalize_filename
 from backend.storage import LocalStorage, get_storage, reset_storage
 
 limiter = Limiter(key_func=get_remote_address, default_limits=[])
@@ -68,9 +79,27 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Audio Tools API", version="0.3.0", lifespan=lifespan)
+_prod = settings.env == "production"
+app = FastAPI(
+    title="Audio Tools API",
+    version="0.3.0",
+    lifespan=lifespan,
+    docs_url=None if _prod else "/docs",
+    redoc_url=None if _prod else "/redoc",
+    openapi_url=None if _prod else "/openapi.json",
+)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.middleware("http")
+async def hide_docs_in_production(request: Request, call_next):
+    path = request.url.path
+    if settings.env == "production" and (
+        path == "/openapi.json" or path == "/redoc" or path.startswith("/docs")
+    ):
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+    return await call_next(request)
 
 _origins = settings.cors_origin_list()
 _allow_creds = "*" not in _origins
@@ -130,6 +159,23 @@ def _rate_key(request: Request) -> str:
     return get_remote_address(request)
 
 
+def _resolved_processing(mode: str, *, requested_duration_sec: float | None = None):
+    probe = probe_host(settings)
+    try:
+        return resolve_processing_mode(
+            mode, probe, settings, requested_duration_sec=requested_duration_sec
+        )
+    except ProcessingModeError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+def _assert_device_or_400(device: str) -> None:
+    try:
+        assert_device_allowed(device, probe_host(settings))
+    except ProcessingModeError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
 async def _enqueue_or_run(background_tasks: BackgroundTasks, kind: str, job_id: str) -> None:
     if settings.use_worker:
         from arq import create_pool
@@ -151,6 +197,11 @@ def health() -> dict:
     return {"status": "ok", "env": settings.env, "auth": settings.require_auth}
 
 
+@app.get("/v1/system/capabilities", response_model=CapabilitiesResponse)
+def system_capabilities() -> CapabilitiesResponse:
+    return get_capabilities(settings)
+
+
 @app.post("/v1/auth/login", response_model=TokenResponse)
 @limiter.limit(settings.rate_limit_jobs)
 def login(request: Request, body: LoginRequest, response: Response, db: Session = Depends(get_db)):
@@ -168,6 +219,16 @@ def login(request: Request, body: LoginRequest, response: Response, db: Session 
         max_age=settings.refresh_token_days * 86400,
         path="/v1/auth",
     )
+    return TokenResponse(access_token=access, email=user.email)
+
+
+@app.post("/v1/auth/session", response_model=TokenResponse)
+@limiter.limit(settings.rate_limit_jobs)
+def create_session(request: Request, db: Session = Depends(get_db)):
+    if not settings.demo_mode:
+        raise HTTPException(404)
+    user = create_anonymous_user(db)
+    access = create_anon_session_token(user.id, user.email)
     return TokenResponse(access_token=access, email=user.email)
 
 
@@ -231,7 +292,12 @@ async def upload_audio(
             raise HTTPException(413, f"Upload exceeds {settings.max_upload_mb} MB limit")
         chunks.append(chunk)
 
-    upload_id, _key = job_manager.save_upload_stream(filename, chunks)
+    header = b"".join(chunks[:1]) if chunks else b""
+    ok_content, content_reason = is_allowed_audio_content(header)
+    if not ok_content:
+        raise HTTPException(400, content_reason)
+
+    upload_id, _key = job_manager.save_upload_stream(filename, chunks, user.id)
     return UploadResponse(upload_id=upload_id, filename=filename)
 
 
@@ -249,19 +315,41 @@ async def create_job(
     if body.youtube_url and not settings.allow_youtube:
         raise HTTPException(403, "YouTube ingestion is disabled")
 
-    max_dur = min(body.max_duration_sec, settings.max_job_duration_sec)
-    job = job_manager.create_job(
-        user_id=user.id,
-        upload_id=body.upload_id,
-        youtube_url=body.youtube_url,
-        title=body.title,
-        separate_stems=body.separate_stems,
-        max_duration_sec=max_dur,
-        mix_aware_filtering=body.mix_aware_filtering,
-        tempo_bpm_override=body.tempo_bpm_override,
-        onset_threshold=body.onset_threshold,
-        frame_threshold=body.frame_threshold,
-    )
+    if body.processing_mode:
+        resolved = _resolved_processing(body.processing_mode)
+        max_dur = resolved.max_duration_sec
+        demucs_quality = resolved.quality
+        demucs_device = resolved.device
+    else:
+        max_dur = min(body.max_duration_sec, settings.max_job_duration_sec)
+        demucs_quality = "balanced"
+        demucs_device = "cpu"
+
+    single_flight.acquire_or_503(enabled=settings.single_flight_jobs)
+    try:
+        job = job_manager.create_job(
+            user_id=user.id,
+            upload_id=body.upload_id,
+            youtube_url=body.youtube_url,
+            title=body.title,
+            separate_stems=body.separate_stems,
+            max_duration_sec=max_dur,
+            mix_aware_filtering=body.mix_aware_filtering,
+            tempo_bpm_override=body.tempo_bpm_override,
+            onset_threshold=body.onset_threshold,
+            frame_threshold=body.frame_threshold,
+            demucs_quality=demucs_quality,
+            demucs_device=demucs_device,
+        )
+    except FileNotFoundError as exc:
+        if settings.single_flight_jobs:
+            single_flight.release()
+        raise HTTPException(404, str(exc)) from None
+    except Exception:
+        if settings.single_flight_jobs:
+            single_flight.release()
+        raise
+
     await _enqueue_or_run(background_tasks, "tab", job.id)
     return _job_response(job, user.id)
 
@@ -277,27 +365,56 @@ async def create_isolate_job(
     request.state.user_id = user.id
     if body.model not in SUPPORTED_MODELS:
         raise HTTPException(400, f"Unsupported model. Choose from: {', '.join(SUPPORTED_MODELS)}")
-    if body.quality not in ("fast", "balanced", "high", "extreme"):
-        raise HTTPException(400, "quality must be fast|balanced|high|extreme")
 
-    max_dur = body.max_duration_sec
-    if max_dur is not None:
-        max_dur = min(max_dur, settings.max_job_duration_sec)
+    start_sec = body.start_sec
+    if body.end_sec is not None:
+        region_length = body.end_sec - start_sec
+    elif body.max_duration_sec is not None:
+        region_length = body.max_duration_sec
+    else:
+        region_length = None
 
+    if body.processing_mode:
+        resolved = _resolved_processing(
+            body.processing_mode, requested_duration_sec=region_length
+        )
+        quality = resolved.quality
+        device = resolved.device
+        max_dur = resolved.max_duration_sec
+    else:
+        if body.quality not in ("fast", "balanced", "high", "extreme"):
+            raise HTTPException(400, "quality must be fast|balanced|high|extreme")
+        _assert_device_or_400(body.device)
+        quality = body.quality or settings.default_isolate_quality
+        device = body.device
+        max_dur = region_length
+        if max_dur is None:
+            max_dur = settings.max_job_duration_sec
+        else:
+            max_dur = min(max_dur, settings.max_job_duration_sec)
+
+    single_flight.acquire_or_503(enabled=settings.single_flight_jobs)
     try:
         job = job_manager.create_isolate_job(
             user_id=user.id,
             upload_id=body.upload_id,
             model=body.model,
-            quality=body.quality or settings.default_isolate_quality,
-            device=body.device,
+            quality=quality,
+            device=device,
+            start_sec=start_sec,
             max_duration_sec=max_dur,
             two_stems=body.two_stems,
             lead_rhythm=body.lead_rhythm,
             dual_guitar=body.dual_guitar,
         )
     except FileNotFoundError as exc:
+        if settings.single_flight_jobs:
+            single_flight.release()
         raise HTTPException(404, str(exc)) from None
+    except Exception:
+        if settings.single_flight_jobs:
+            single_flight.release()
+        raise
 
     await _enqueue_or_run(background_tasks, "isolate", job.id)
     return _job_response(job, user.id)
@@ -409,25 +526,19 @@ async def job_ws(websocket: WebSocket, job_id: str) -> None:
     token = websocket.query_params.get("access_token")
     db = db_module.SessionLocal()
     try:
-        if settings.require_auth:
-            if not token:
-                await websocket.close(code=4401)
-                return
-            from backend.auth import decode_token as _dec
-
-            try:
-                payload = _dec(token, "access")
-            except HTTPException:
-                await websocket.close(code=4401)
-                return
-            user = get_user_by_id(db, payload["sub"])
-            if not user:
-                await websocket.close(code=4401)
-                return
-            job = job_manager.get_owned(job_id, user.id)
-        else:
-            user = ensure_bootstrap_admin()
-            job = job_manager.get(job_id)
+        if not token:
+            await websocket.close(code=4401)
+            return
+        try:
+            payload = decode_token(token, "access")
+        except HTTPException:
+            await websocket.close(code=4401)
+            return
+        user = get_user_by_id(db, payload["sub"])
+        if not user:
+            await websocket.close(code=4401)
+            return
+        job = job_manager.get_owned(job_id, user.id)
     finally:
         db.close()
 

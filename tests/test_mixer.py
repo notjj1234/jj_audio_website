@@ -76,6 +76,21 @@ def test_effective_linear_gains_all_muted():
     assert gains == {"vocals": 0.0, "drums": 0.0}
 
 
+def test_effective_linear_gains_master_volume_scales():
+    names = ["vocals", "drums"]
+    muted = {"vocals": False, "drums": False}
+    soloed = {"vocals": False, "drums": False}
+    gains = effective_linear_gains(
+        names,
+        muted=muted,
+        soloed=soloed,
+        volume_db={"vocals": 0.0, "drums": -6.0},
+        master_volume_db=-6.0,
+    )
+    assert gains["vocals"] == pytest.approx(db_to_linear(-6.0))
+    assert gains["drums"] == pytest.approx(db_to_linear(-6.0) * db_to_linear(-6.0))
+
+
 def test_waveform_peaks(tmp_path: Path):
     t = np.linspace(0, 1, 44100, endpoint=False)
     mono = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)

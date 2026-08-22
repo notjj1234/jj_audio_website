@@ -44,6 +44,15 @@ def create_access_token(user_id: str, email: str) -> str:
     )
 
 
+def create_anon_session_token(user_id: str, email: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(hours=settings.anon_session_hours)
+    return jwt.encode(
+        {"sub": user_id, "email": email, "type": "access", "exp": expire},
+        settings.secret_key,
+        algorithm=ALGORITHM,
+    )
+
+
 def create_refresh_token(user_id: str) -> str:
     expire = datetime.now(timezone.utc) + timedelta(days=settings.refresh_token_days)
     return jwt.encode(
@@ -85,6 +94,20 @@ def ensure_bootstrap_admin() -> User:
         db.close()
 
 
+def create_anonymous_user(db: Session) -> User:
+    user = User(
+        id=str(uuid.uuid4()),
+        email=f"anon-{uuid.uuid4().hex}@session.demo",
+        password_hash=hash_password(secrets.token_hex(32)),
+        is_admin=False,
+        is_anonymous=True,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
 def get_user_by_id(db: Session, user_id: str) -> User | None:
     return db.query(User).filter(User.id == user_id).first()
 
@@ -119,17 +142,9 @@ async def get_current_user_optional(
 
 async def get_current_user(
     user: Annotated[User | None, Depends(get_current_user_optional)],
-    db: Annotated[Session, Depends(get_db)],
 ) -> User:
     if user:
         return user
-    if not settings.require_auth:
-        admin = ensure_bootstrap_admin()
-        # Re-attach in current session
-        attached = get_user_by_id(db, admin.id)
-        if attached:
-            return attached
-        return admin
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
 

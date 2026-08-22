@@ -3,23 +3,41 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import zipfile
 from pathlib import Path
 
 from backend.config import settings
 from backend.contracts import JobKind, JobStatus
+from backend.jobs import single_flight
 from backend.jobs.manager import JobManager
 from audio_to_tab.isolate import IsolateConfig, separate_stems
 from audio_to_tab.pipeline import PipelineConfig, run_pipeline
 
+logger = logging.getLogger(__name__)
+
+
+def _public_job_error(exc: BaseException) -> str:
+    if settings.env != "production":
+        return str(exc)
+    return "Job failed"
+
 
 async def run_job_async(job_manager: JobManager, job_id: str) -> None:
+    try:
+        await _run_job_async(job_manager, job_id)
+    finally:
+        if settings.single_flight_jobs:
+            single_flight.release()
+
+
+async def _run_job_async(job_manager: JobManager, job_id: str) -> None:
     job = job_manager.get(job_id)
     if not job:
         return
 
     if job.kind == JobKind.isolate:
-        await run_isolate_job_async(job_manager, job_id)
+        await _run_isolate_job_async(job_manager, job_id)
         return
 
     if job_manager.is_cancel_requested(job_id):
@@ -41,7 +59,7 @@ async def run_job_async(job_manager: JobManager, job_id: str) -> None:
         future.result(timeout=60)
 
     upload_path = job_manager.materialize_upload(job)
-    timeout = settings.job_timeout_balanced_sec
+    timeout = settings.job_timeout_for_quality(job.demucs_quality)
 
     try:
         config = PipelineConfig(
@@ -52,6 +70,8 @@ async def run_job_async(job_manager: JobManager, job_id: str) -> None:
             tempo_bpm_override=job.tempo_bpm_override,
             onset_threshold=job.onset_threshold,
             frame_threshold=job.frame_threshold,
+            demucs_quality=job.demucs_quality,
+            demucs_device=job.demucs_device,
         )
 
         artifacts = await asyncio.wait_for(
@@ -84,11 +104,22 @@ async def run_job_async(job_manager: JobManager, job_id: str) -> None:
         job_manager.set_failed(job_id, "Job timed out")
         await job_manager.emit(job_id, "error", "Job timed out", JobStatus.failed)
     except Exception as exc:
-        job_manager.set_failed(job_id, str(exc))
-        await job_manager.emit(job_id, "error", str(exc), JobStatus.failed)
+        logger.exception("Tab job %s failed", job_id)
+        message = _public_job_error(exc)
+        job_manager.set_failed(job_id, message)
+        await job_manager.emit(job_id, "error", message, JobStatus.failed)
 
 
 async def run_isolate_job_async(job_manager: JobManager, job_id: str) -> None:
+    """Public entry used by arq worker; honors single-flight release when enabled."""
+    try:
+        await _run_isolate_job_async(job_manager, job_id)
+    finally:
+        if settings.single_flight_jobs:
+            single_flight.release()
+
+
+async def _run_isolate_job_async(job_manager: JobManager, job_id: str) -> None:
     job = job_manager.get(job_id)
     if not job:
         return
@@ -123,6 +154,7 @@ async def run_isolate_job_async(job_manager: JobManager, job_id: str) -> None:
             model=job.isolate_model,
             quality=job.isolate_quality,
             device=job.isolate_device,
+            start_sec=job.isolate_start_sec,
             max_duration_sec=job.max_duration_sec,
             two_stems=job.isolate_two_stems,
             lead_rhythm=job.isolate_lead_rhythm or job.isolate_dual_guitar,
@@ -166,5 +198,7 @@ async def run_isolate_job_async(job_manager: JobManager, job_id: str) -> None:
         job_manager.set_failed(job_id, "Job timed out")
         await job_manager.emit(job_id, "error", "Job timed out", JobStatus.failed)
     except Exception as exc:
-        job_manager.set_failed(job_id, str(exc))
-        await job_manager.emit(job_id, "error", str(exc), JobStatus.failed)
+        logger.exception("Isolate job %s failed", job_id)
+        message = _public_job_error(exc)
+        job_manager.set_failed(job_id, message)
+        await job_manager.emit(job_id, "error", message, JobStatus.failed)

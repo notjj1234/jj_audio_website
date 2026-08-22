@@ -24,11 +24,19 @@ def main() -> int:
         import torch
         from demucs.pretrained import get_model
 
-        log.info("Warming Demucs htdemucs…")
-        get_model("htdemucs")
+        log.info("Warming Demucs htdemucs_6s (default isolate model)…")
+        get_model("htdemucs_6s")
+        log.info("Demucs htdemucs_6s ready")
+
+        try:
+            log.info("Warming Demucs htdemucs (optional presets)…")
+            get_model("htdemucs")
+            log.info("Demucs htdemucs ready")
+        except Exception as exc:
+            log.warning("Demucs htdemucs prewarm skipped: %s", exc)
+
         if torch.cuda.is_available():
             log.info("CUDA available")
-        log.info("Demucs ready")
     except Exception as exc:
         log.warning("Demucs prewarm skipped: %s", exc)
 
