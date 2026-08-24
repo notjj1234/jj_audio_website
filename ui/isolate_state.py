@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,27 @@ STAGE_WEIGHTS: dict[str, float] = {
     "presence": 0.03,
     "done": 0.02,
 }
+
+# Checklist labels (short). Header copy for the current stage stays in isolate.py.
+STAGE_CHECKLIST_LABELS: dict[str, str] = {
+    "ingest": "Prepare audio",
+    "separate": "Separate tracks",
+    "collect": "Collect tracks",
+    "bass_bleed": "Check guitar",
+    "guitar_split": "Split lead / rhythm",
+    "presence": "Check which tracks have sound",
+    "done": "Finish",
+}
+
+_GUITAR_ONLY_STAGES = frozenset({"bass_bleed", "guitar_split"})
+
+# Wall-clock vs audio length for the Demucs `separate` stage at quality=fast.
+# Fast CPU is roughly 1× the clip (docs: about as long as the song).
+_DEVICE_REALTIME = {"cpu": 1.0, "cuda": 0.25, "mps": 0.8}
+# Extra work from Demucs --shifts (QUALITY_SHIFTS in isolate.py).
+_QUALITY_TIME_FACTOR = {"fast": 1.0, "balanced": 2.0, "high": 4.0, "extreme": 6.0}
+_INTRA_STAGE_CAP = 0.95
+_GUITAR_MODEL_MARKERS = ("6s", "guitar")
 
 # Plain-language separation presets → Demucs engine settings.
 # Keys are stable UI ids; labels/descriptions are user-facing.
@@ -265,6 +287,25 @@ def sync_output_name_on_upload(
     return fp, new_name, True
 
 
+ISOLATE_OUTPUT_NAME_KEY = "isolate_output_name"
+ISOLATE_OUTPUT_NAME_PENDING_KEY = "isolate_output_name_pending"
+
+
+def queue_reopen_output_name(session: MutableMapping[str, object], title: str) -> None:
+    """Stash a Reopen title for the next run. MUST NOT write the widget-bound key."""
+    session[ISOLATE_OUTPUT_NAME_PENDING_KEY] = title
+
+
+def apply_pending_output_name(session: MutableMapping[str, object]) -> str | None:
+    """Copy pending title onto the widget key. Call before ``st.text_input`` exists."""
+    pending = session.pop(ISOLATE_OUTPUT_NAME_PENDING_KEY, None)
+    if pending is None:
+        return None
+    name = str(pending)
+    session[ISOLATE_OUTPUT_NAME_KEY] = name
+    return name
+
+
 def should_hide_stale_results(
     *,
     pending_upload_fp: str | None,
@@ -274,23 +315,227 @@ def should_hide_stale_results(
     return bool(has_artifacts and pending_upload_fp is not None)
 
 
-def stage_progress_percent(stage: str, *, weights: dict[str, float] | None = None) -> float:
-    """Cumulative weighted progress (0.0–1.0) through isolation stages."""
+def expects_guitar_stem(
+    *,
+    model: str,
+    two_stems: str | None = None,
+    custom_stems: Any = None,
+) -> bool:
+    """True when this job is expected to produce a guitar stem (bass/split stages)."""
+    if two_stems:
+        return False
+    picked = [s for s in (custom_stems or []) if s]
+    if picked:
+        return "guitar" in picked
+    lowered = (model or "").lower()
+    return any(marker in lowered for marker in _GUITAR_MODEL_MARKERS)
+
+
+def isolation_stages_for_job(*, expects_guitar: bool) -> tuple[str, ...]:
+    """Stages that will actually run for this job."""
+    if expects_guitar:
+        return ISOLATION_STAGE_ORDER
+    return tuple(s for s in ISOLATION_STAGE_ORDER if s not in _GUITAR_ONLY_STAGES)
+
+
+def resolve_active_stage(stage: str, stages: tuple[str, ...]) -> str:
+    """Map a pipeline stage onto the job's visible stage list."""
+    if stage in stages:
+        return stage
+    if not stages:
+        return "ingest"
+    if stage not in ISOLATION_STAGE_ORDER:
+        return stages[0]
+    idx = ISOLATION_STAGE_ORDER.index(stage)
+    for later in ISOLATION_STAGE_ORDER[idx + 1 :]:
+        if later in stages:
+            return later
+    return stages[-1]
+
+
+def stage_progress_percent(
+    stage: str,
+    *,
+    weights: dict[str, float] | None = None,
+    stages: tuple[str, ...] | None = None,
+    intra: float = 0.0,
+) -> float:
+    """Weighted progress (0.0–1.0): prior stages + ``intra`` of the current stage.
+
+    ``intra`` is 0 at the start of a stage and 1 when that stage has finished.
+    """
+    order = stages or ISOLATION_STAGE_ORDER
     w = weights or STAGE_WEIGHTS
-    total = sum(w.get(s, 0.0) for s in ISOLATION_STAGE_ORDER)
+    total = sum(w.get(s, 0.0) for s in order)
     if total <= 0:
         return 0.0
-    if stage not in ISOLATION_STAGE_ORDER:
+    active = resolve_active_stage(stage, order)
+    if active not in order:
         return 0.0
-    idx = ISOLATION_STAGE_ORDER.index(stage)
-    done = sum(w.get(ISOLATION_STAGE_ORDER[i], 0.0) for i in range(idx + 1))
-    return min(1.0, done / total)
+    idx = order.index(active)
+    prior = sum(w.get(order[i], 0.0) for i in range(idx))
+    current = w.get(active, 0.0)
+    frac = min(1.0, max(0.0, intra))
+    return min(1.0, (prior + current * frac) / total)
 
 
-def format_progress_label(percent: float, message: str) -> str:
+def intra_stage_fraction(
+    elapsed_in_stage_sec: float,
+    estimated_stage_sec: float | None,
+) -> tuple[float, bool]:
+    """Progress within the current stage. Caps below 1 so we never invent completion.
+
+    Returns ``(fraction, is_estimated)``. ``is_estimated`` is True when a duration
+    guess was used. Without a guess, fraction stays 0.
+    """
+    if estimated_stage_sec is None or estimated_stage_sec <= 0:
+        return 0.0, False
+    if elapsed_in_stage_sec <= 0:
+        return 0.0, True
+    return min(_INTRA_STAGE_CAP, elapsed_in_stage_sec / estimated_stage_sec), True
+
+
+def estimated_stage_seconds(
+    stage: str,
+    stages: tuple[str, ...],
+    total_job_sec: float | None,
+    *,
+    weights: dict[str, float] | None = None,
+) -> float | None:
+    """Share of the job estimate that belongs to ``stage``."""
+    if total_job_sec is None or total_job_sec <= 0:
+        return None
+    w = weights or STAGE_WEIGHTS
+    total_w = sum(w.get(s, 0.0) for s in stages)
+    if total_w <= 0:
+        return None
+    return total_job_sec * (w.get(stage, 0.0) / total_w)
+
+
+def estimate_job_seconds(
+    *,
+    audio_duration_sec: float | None,
+    quality: str,
+    device: str,
+    stages: tuple[str, ...],
+    last_run: dict[str, Any] | None = None,
+    model: str | None = None,
+    expects_guitar: bool | None = None,
+) -> tuple[float | None, str]:
+    """Predicted wall time for the whole job.
+
+    Uses a prior run when quality/device/model match (confidence ``high``),
+    otherwise a clip-length × quality × device heuristic (``low``).
+    """
+    if last_run:
+        same_setup = (
+            last_run.get("quality") == quality
+            and last_run.get("device") == device
+            and (model is None or last_run.get("model") == model)
+            and (expects_guitar is None or bool(last_run.get("expects_guitar")) == bool(expects_guitar))
+        )
+        last_audio = float(last_run.get("audio_sec") or 0.0)
+        last_wall = float(last_run.get("wall_sec") or 0.0)
+        if (
+            same_setup
+            and last_audio > 0.5
+            and last_wall > 0.5
+            and audio_duration_sec
+            and audio_duration_sec > 0
+        ):
+            return last_wall * (audio_duration_sec / last_audio), "high"
+
+    if not audio_duration_sec or audio_duration_sec <= 0:
+        return None, "low"
+
+    q = _QUALITY_TIME_FACTOR.get(quality, 1.0)
+    d = _DEVICE_REALTIME.get(device, _DEVICE_REALTIME["cpu"])
+    separate_sec = audio_duration_sec * q * d
+    sep_w = STAGE_WEIGHTS["separate"]
+    active_w = sum(STAGE_WEIGHTS.get(s, 0.0) for s in stages)
+    if sep_w <= 0 or active_w <= 0:
+        return separate_sec, "low"
+    return separate_sec * (active_w / sep_w), "low"
+
+
+def estimate_remaining_seconds(
+    *,
+    elapsed_sec: float,
+    percent: float,
+    total_estimate: float | None,
+    confidence: str,
+) -> tuple[float | None, str]:
+    """Seconds left. Prefers observed rate once enough progress exists."""
+    if percent >= 0.995:
+        return 0.0, "high"
+    observed: float | None = None
+    if elapsed_sec >= 3.0 and percent >= 0.03:
+        observed = elapsed_sec * (1.0 - percent) / percent
+    planned: float | None = None
+    if total_estimate is not None:
+        planned = max(0.0, total_estimate - elapsed_sec)
+    if observed is None and planned is None:
+        return None, "low"
+    if observed is None:
+        return planned, confidence
+    if planned is None:
+        return observed, "high" if elapsed_sec >= 8 else "low"
+    blend = min(1.0, elapsed_sec / 20.0)
+    mixed = (1.0 - blend) * planned + blend * observed
+    out_conf = "high" if confidence == "high" or elapsed_sec >= 8 else "low"
+    return max(0.0, mixed), out_conf
+
+
+def checklist_items(
+    stages: tuple[str, ...],
+    current_stage: str,
+    *,
+    labels: dict[str, str] | None = None,
+    complete: bool = False,
+) -> list[dict[str, str]]:
+    """Per-stage rows with state ``done``, ``current``, or ``pending``."""
+    names = labels or STAGE_CHECKLIST_LABELS
+    active = resolve_active_stage(current_stage, stages)
+    idx = stages.index(active) if active in stages else 0
+    items: list[dict[str, str]] = []
+    for i, stage in enumerate(stages):
+        if complete or i < idx:
+            state = "done"
+        elif i == idx:
+            state = "current"
+        else:
+            state = "pending"
+        items.append(
+            {
+                "id": stage,
+                "label": names.get(stage, stage),
+                "state": state,
+            }
+        )
+    return items
+
+
+def format_checklist_markdown(items: list[dict[str, str]]) -> str:
+    """Plain-text checklist that does not rely on clickable Streamlit widgets."""
+    marks = {"done": "[done]", "current": "[now]", "pending": "[todo]"}
+    lines = []
+    for item in items:
+        mark = marks.get(item["state"], "[todo]")
+        label = item["label"]
+        if item["state"] == "current":
+            lines.append(f"{mark} **{label}**")
+        else:
+            lines.append(f"{mark} {label}")
+    return "\n\n".join(lines)
+
+
+def format_progress_label(
+    percent: float, message: str, *, estimated: bool = False
+) -> str:
     """Human-readable progress line, e.g. ``42% — Running Demucs…``."""
     pct = int(round(percent * 100))
-    return f"{pct}% — {message}"
+    prefix = f"~{pct}%" if estimated else f"{pct}%"
+    return f"{prefix} — {message}"
 
 
 def format_elapsed(seconds: float) -> str:
@@ -300,3 +545,20 @@ def format_elapsed(seconds: float) -> str:
     m = int(seconds // 60)
     s = int(seconds % 60)
     return f"{m}:{s:02d}"
+
+
+def format_eta_line(
+    elapsed_sec: float,
+    remaining_sec: float | None,
+    *,
+    confidence: str = "low",
+) -> str:
+    """Elapsed plus remaining, e.g. ``Elapsed 0:09 · ~2:40 left``."""
+    elapsed = format_elapsed(elapsed_sec)
+    if remaining_sec is None:
+        return f"Elapsed {elapsed} · estimating…"
+    if remaining_sec <= 0.5:
+        return f"Elapsed {elapsed}"
+    left = format_elapsed(remaining_sec)
+    _ = confidence  # always ~ ; low confidence uses estimating… when remaining is None
+    return f"Elapsed {elapsed} · ~{left} left"

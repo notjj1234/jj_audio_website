@@ -10,12 +10,25 @@ import pytest
 from ui.isolate_state import (
     DEFAULT_SEPARATION_PRESET,
     DEFAULT_SPEED_PRESET,
+    ISOLATE_OUTPUT_NAME_KEY,
+    ISOLATE_OUTPUT_NAME_PENDING_KEY,
     SPEED_PRESETS,
+    apply_pending_output_name,
+    checklist_items,
     clamp_region_bounds,
     custom_selected_stems,
     default_region_end,
+    estimate_job_seconds,
+    estimate_remaining_seconds,
+    estimated_stage_seconds,
+    expects_guitar_stem,
+    format_checklist_markdown,
     format_elapsed,
+    format_eta_line,
     format_progress_label,
+    intra_stage_fraction,
+    isolation_stages_for_job,
+    queue_reopen_output_name,
     resolve_custom_separation,
     resolve_separation_preset,
     resolve_speed_preset,
@@ -52,6 +65,32 @@ def test_sync_output_name_on_upload_same_file():
     assert changed is False
 
 
+def test_reopen_queues_output_name_without_touching_widget_key():
+    """Reopen must not write isolate_output_name after the text_input exists."""
+    session: dict[str, object] = {ISOLATE_OUTPUT_NAME_KEY: "old-name"}
+    queue_reopen_output_name(session, "Past run title")
+    assert session[ISOLATE_OUTPUT_NAME_KEY] == "old-name"
+    assert session[ISOLATE_OUTPUT_NAME_PENDING_KEY] == "Past run title"
+    applied = apply_pending_output_name(session)
+    assert applied == "Past run title"
+    assert session[ISOLATE_OUTPUT_NAME_KEY] == "Past run title"
+    assert ISOLATE_OUTPUT_NAME_PENDING_KEY not in session
+
+
+def test_apply_pending_output_name_noop_without_pending():
+    session: dict[str, object] = {ISOLATE_OUTPUT_NAME_KEY: "keep"}
+    assert apply_pending_output_name(session) is None
+    assert session[ISOLATE_OUTPUT_NAME_KEY] == "keep"
+
+
+def test_isolate_reopen_handler_uses_pending_not_direct_widget_write():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    assert "queue_reopen_output_name(st.session_state, title)" in source
+    assert 'st.session_state["isolate_output_name"] = title' not in source
+    assert "apply_pending_output_name(st.session_state)" in source
+
+
 def test_should_hide_stale_results():
     assert not should_hide_stale_results(pending_upload_fp=None, has_artifacts=True)
     assert not should_hide_stale_results(pending_upload_fp="x:1", has_artifacts=False)
@@ -59,14 +98,140 @@ def test_should_hide_stale_results():
 
 
 def test_stage_progress_percent_weighted():
-    assert stage_progress_percent("ingest") == pytest.approx(0.05)
-    assert stage_progress_percent("separate") == pytest.approx(0.80)
-    assert stage_progress_percent("done") == pytest.approx(1.0)
+    # Current stage counts only via ``intra`` (0 = just started, 1 = finished).
+    assert stage_progress_percent("ingest", intra=0.0) == pytest.approx(0.0)
+    assert stage_progress_percent("ingest", intra=1.0) == pytest.approx(0.05)
+    assert stage_progress_percent("separate", intra=0.0) == pytest.approx(0.05)
+    assert stage_progress_percent("separate", intra=1.0) == pytest.approx(0.80)
+    assert stage_progress_percent("done", intra=1.0) == pytest.approx(1.0)
     assert stage_progress_percent("unknown") == 0.0
+
+
+def test_stage_progress_first_mid_last_and_guitar_skipped():
+    full = isolation_stages_for_job(expects_guitar=True)
+    assert stage_progress_percent("ingest", stages=full, intra=0.0) == pytest.approx(0.0)
+
+    mid = stage_progress_percent("separate", stages=full, intra=0.0)
+    assert mid == pytest.approx(0.05)
+    assert 0.0 < mid < 1.0
+
+    assert stage_progress_percent("done", stages=full, intra=1.0) == pytest.approx(1.0)
+
+    skipped = isolation_stages_for_job(expects_guitar=False)
+    assert "guitar_split" not in skipped
+    assert "bass_bleed" not in skipped
+    # ingest 0.05 / (1.0 - 0.05 - 0.05) = 0.05/0.90
+    assert stage_progress_percent("separate", stages=skipped, intra=0.0) == pytest.approx(
+        0.05 / 0.90
+    )
+
+
+def test_checklist_first_mid_last_and_guitar_skipped():
+    full = isolation_stages_for_job(expects_guitar=True)
+    first = checklist_items(full, "ingest")
+    assert first[0]["state"] == "current"
+    assert first[0]["id"] == "ingest"
+    assert all(row["state"] == "pending" for row in first[1:])
+
+    mid = checklist_items(full, "separate")
+    assert mid[0]["state"] == "done"
+    assert mid[1]["state"] == "current"
+    assert mid[1]["id"] == "separate"
+    assert all(row["state"] == "pending" for row in mid[2:])
+
+    last = checklist_items(full, "done", complete=True)
+    assert all(row["state"] == "done" for row in last)
+
+    skipped = isolation_stages_for_job(expects_guitar=False)
+    ids = [row["id"] for row in checklist_items(skipped, "ingest")]
+    assert "guitar_split" not in ids
+    assert "bass_bleed" not in ids
+    text = format_checklist_markdown(checklist_items(skipped, "separate"))
+    assert "[now]" in text
+    assert "[done]" in text
+    assert "[todo]" in text
+    assert "Split lead / rhythm" not in text
+
+
+def test_expects_guitar_stem():
+    assert expects_guitar_stem(model="htdemucs_6s") is True
+    assert expects_guitar_stem(model="htdemucs", two_stems="vocals") is False
+    assert expects_guitar_stem(model="htdemucs") is False
+    assert expects_guitar_stem(model="htdemucs", custom_stems=["guitar", "vocals"]) is True
+    assert expects_guitar_stem(model="htdemucs_6s", custom_stems=["vocals"]) is False
+
+
+def test_intra_stage_fraction_caps_and_unestimated():
+    frac, estimated = intra_stage_fraction(30.0, 60.0)
+    assert estimated is True
+    assert frac == pytest.approx(0.5)
+    capped, _ = intra_stage_fraction(1000.0, 60.0)
+    assert capped == pytest.approx(0.95)
+    none, is_est = intra_stage_fraction(10.0, None)
+    assert none == 0.0
+    assert is_est is False
+
+
+def test_estimate_job_and_remaining_eta():
+    stages = isolation_stages_for_job(expects_guitar=True)
+    heuristic, conf = estimate_job_seconds(
+        audio_duration_sec=60.0,
+        quality="fast",
+        device="cpu",
+        stages=stages,
+    )
+    assert heuristic is not None and heuristic > 0
+    assert conf == "low"
+
+    scaled, high = estimate_job_seconds(
+        audio_duration_sec=90.0,
+        quality="fast",
+        device="cpu",
+        stages=stages,
+        model="htdemucs_6s",
+        expects_guitar=True,
+        last_run={
+            "wall_sec": 80.0,
+            "audio_sec": 60.0,
+            "quality": "fast",
+            "device": "cpu",
+            "model": "htdemucs_6s",
+            "expects_guitar": True,
+        },
+    )
+    assert high == "high"
+    assert scaled == pytest.approx(120.0)
+
+    remaining, _ = estimate_remaining_seconds(
+        elapsed_sec=10.0,
+        percent=0.25,
+        total_estimate=80.0,
+        confidence="low",
+    )
+    assert remaining is not None and remaining > 0
+
+    none_left, none_conf = estimate_remaining_seconds(
+        elapsed_sec=0.5,
+        percent=0.0,
+        total_estimate=None,
+        confidence="low",
+    )
+    assert none_left is None
+    assert none_conf == "low"
+
+    stage_share = estimated_stage_seconds("separate", stages, 100.0)
+    assert stage_share == pytest.approx(75.0)
+
+    assert format_eta_line(9, None).endswith("estimating…")
+    assert "~2:40 left" in format_eta_line(9, 160)
+    assert format_eta_line(80, 0.2) == "Elapsed 1:20"
 
 
 def test_format_progress_label():
     assert format_progress_label(0.42, "Running Demucs") == "42% — Running Demucs"
+    assert format_progress_label(0.42, "Running Demucs", estimated=True) == (
+        "~42% — Running Demucs"
+    )
 
 
 def test_format_elapsed():

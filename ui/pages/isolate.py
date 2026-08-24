@@ -31,13 +31,23 @@ from ui.isolate_state import (
     DEFAULT_CUSTOM_STEMS,
     DEFAULT_SEPARATION_PRESET,
     DEFAULT_SPEED_PRESET,
-    ISOLATION_STAGE_ORDER,
     SEPARATION_PRESETS,
     SPEED_PRESETS,
+    apply_pending_output_name,
+    checklist_items,
     clamp_region_bounds,
     custom_selected_stems,
-    format_elapsed,
+    estimate_job_seconds,
+    estimate_remaining_seconds,
+    estimated_stage_seconds,
+    expects_guitar_stem,
+    format_checklist_markdown,
+    format_eta_line,
     format_progress_label,
+    intra_stage_fraction,
+    isolation_stages_for_job,
+    queue_reopen_output_name,
+    resolve_active_stage,
     resolve_custom_separation,
     resolve_separation_preset,
     resolve_speed_preset,
@@ -579,6 +589,7 @@ def _render_region_controls(audio_path: Path | None) -> tuple[float, float | Non
 
 def _render_separation_controls() -> dict:
     """Track choice, upload, region, speed preset; quality/device/name in advanced."""
+    apply_pending_output_name(st.session_state)
     if "isolate_separation_preset" not in st.session_state:
         st.session_state["isolate_separation_preset"] = DEFAULT_SEPARATION_PRESET
     if "isolate_speed_preset" not in st.session_state:
@@ -828,7 +839,7 @@ def main() -> None:
                         title = run.get("title") or "tracks"
                         st.session_state["isolate_base_name"] = title
                         st.session_state["isolate_run_dir"] = run["run_dir"]
-                        st.session_state["isolate_output_name"] = title
+                        queue_reopen_output_name(st.session_state, title)
                         st.session_state.pop("isolate_volumes_db", None)
                         st.session_state.pop("isolate_master_volume_db", None)
                         st.session_state.pop("isolate_mixer_state", None)
@@ -932,47 +943,113 @@ def main() -> None:
             else:
                 audio_path = Path(carry_over_path)
 
-            if max_duration_sec is not None:
+            job_audio_sec: float | None = None
+            try:
                 file_dur = probe_duration_sec(audio_path)
-                try:
+                if max_duration_sec is not None:
                     _, validated_length, _ = resolve_region(
                         file_dur,
                         start_sec,
                         start_sec + max_duration_sec,
                     )
                     config.max_duration_sec = validated_length
-                except RegionError as exc:
-                    st.error(str(exc))
-                    return
+                    job_audio_sec = float(validated_length)
+                else:
+                    job_audio_sec = max(0.0, float(file_dur) - float(start_sec or 0.0))
+            except RegionError as exc:
+                st.error(str(exc))
+                return
+            except Exception:
+                if max_duration_sec is not None:
+                    job_audio_sec = float(max_duration_sec)
 
-            with st.status("Separating tracks…", expanded=True) as status:
+            guitar_job = expects_guitar_stem(
+                model=config.model,
+                two_stems=config.two_stems,
+                custom_stems=choice.get("custom_stems"),
+            )
+            job_stages = isolation_stages_for_job(expects_guitar=guitar_job)
+            job_estimate, estimate_conf = estimate_job_seconds(
+                audio_duration_sec=job_audio_sec,
+                quality=config.quality,
+                device=config.device,
+                stages=job_stages,
+                last_run=st.session_state.get("isolate_last_job_timing"),
+                model=config.model,
+                expects_guitar=guitar_job,
+            )
+
+            with st.container(border=True):
+                status_title = st.empty()
                 progress_bar = st.progress(0.0)
                 progress_label = st.empty()
-                elapsed_label = st.empty()
+                eta_label = st.empty()
+                checklist_box = st.empty()
 
-                progress_state: dict[str, str] = {
+                progress_state: dict[str, object] = {
                     "stage": "ingest",
                     "message": "Preparing audio…",
+                    "stage_started": separation_started,
                 }
                 result_holder: dict = {}
 
                 def on_progress(stage: str, message: str) -> None:
+                    if stage != progress_state["stage"]:
+                        progress_state["stage_started"] = time.monotonic()
                     progress_state["stage"] = stage
                     progress_state["message"] = message
 
-                def paint_progress() -> None:
-                    elapsed = format_elapsed(time.monotonic() - separation_started)
-                    stage = progress_state["stage"]
-                    message = progress_state["message"]
+                def paint_progress(*, complete: bool = False) -> None:
+                    now = time.monotonic()
+                    elapsed_sec = now - separation_started
+                    raw_stage = str(progress_state["stage"])
+                    stage = resolve_active_stage(raw_stage, job_stages)
+                    message = str(progress_state["message"])
                     display = _stage_display(
                         stage, device=config.device, fallback=message
                     )
-                    elapsed_label.markdown(f"**Elapsed:** `{elapsed}`")
-                    if stage in ISOLATION_STAGE_ORDER:
-                        pct = stage_progress_percent(stage)
-                        progress_bar.progress(pct)
-                        progress_label.caption(format_progress_label(pct, display))
-                    status.update(label=f"{display} · {elapsed}")
+                    if complete:
+                        intra, intra_estimated = 1.0, False
+                        pct = 1.0
+                        remaining, remain_conf = 0.0, "high"
+                    else:
+                        stage_elapsed = now - float(progress_state["stage_started"])
+                        stage_est = estimated_stage_seconds(
+                            stage, job_stages, job_estimate
+                        )
+                        intra, intra_estimated = intra_stage_fraction(
+                            stage_elapsed, stage_est
+                        )
+                        pct = stage_progress_percent(
+                            stage, stages=job_stages, intra=intra
+                        )
+                        remaining, remain_conf = estimate_remaining_seconds(
+                            elapsed_sec=elapsed_sec,
+                            percent=pct,
+                            total_estimate=job_estimate,
+                            confidence=estimate_conf,
+                        )
+                    status_title.markdown(f"**{display}**")
+                    progress_bar.progress(min(1.0, max(0.0, pct)))
+                    progress_label.caption(
+                        format_progress_label(
+                            pct,
+                            display,
+                            estimated=bool(intra_estimated and not complete),
+                        )
+                    )
+                    eta_label.caption(
+                        format_eta_line(
+                            elapsed_sec, remaining, confidence=remain_conf
+                        )
+                    )
+                    checklist_box.markdown(
+                        format_checklist_markdown(
+                            checklist_items(
+                                job_stages, stage, complete=complete
+                            )
+                        )
+                    )
 
                 def worker() -> None:
                     try:
@@ -992,11 +1069,22 @@ def main() -> None:
                     time.sleep(0.25)
                     paint_progress()
                 thread.join()
-                paint_progress()
 
                 if "error" in result_holder:
+                    paint_progress()
                     raise result_holder["error"]
+                paint_progress(complete=True)
                 artifacts = result_holder["artifacts"]
+
+            if job_audio_sec and job_audio_sec > 0:
+                st.session_state["isolate_last_job_timing"] = {
+                    "wall_sec": time.monotonic() - separation_started,
+                    "audio_sec": job_audio_sec,
+                    "quality": config.quality,
+                    "device": config.device,
+                    "model": config.model,
+                    "expects_guitar": guitar_job,
+                }
 
             cleanup_mix_artifacts(output_dir)
             st.session_state["isolate_artifacts"] = {k: str(v) for k, v in artifacts.items()}
