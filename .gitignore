@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv311/
+.venv312/
+.venv-desktop/
+.venv-desktop-cpu/
+.venv-*/
+venv/
+*.egg-info/
+.env
+data/
+output/
+eval/results.json
+eval/lead_rhythm/clips/
+eval/lead_rhythm/out/
+eval/lead_rhythm/manifest.json
+eval/lead_rhythm/RESEARCH.md
+eval/lead_rhythm/RESULTS.md
+.cache/
+
+# Flutter leftover (repo-root only — do not ignore the mixer frontend build)
+/frontend/.dart_tool/
+/frontend/build/
+/frontend/.flutter-plugins-dependencies
+
+# Stem mixer frontend (keep built assets; ignore deps)
+ui/stem_mixer_component/frontend/node_modules/
+
+# Production SPA
+web/node_modules/
+web/dist/
+
+# OS
+.DS_Store
+
+# Models / large artifacts
+*.wav
+!eval/fixtures/*.wav
+
+# Desktop packaging (downloaded at build time; do not commit binaries)
+packaging/ffmpeg/
+dist/
+/build/
+.build/
+*.spec.bak
+
+# Internal docs (not for public GitHub)
+WEB_READINESS.md
+ISOLATE_UI_UX_AUDIT.md
+PRE_PUBLIC_CHECKLIST.md
+PROJECT_BRIEFING.md
+PROJECT_STRUCTURE.md
+WEBSITE_PREP_GUIDE.txt
+docs/oracle-free-memory-spike.md
+
+# Editor / local tooling
+.vscode/
+.pytest_cache/
+packaging/_diag_*
+.streamlit/credentials.toml
+
+# Cursor local tooling / config (skills stay on disk, not in git)
+.cursor/

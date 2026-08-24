@@ -1,0 +1,35 @@
+#!/bin/bash
+# Runs as root after pkg installs AudioTools.app into /Applications.
+set -euo pipefail
+
+DEST_VOLUME="${3:-/}"
+APP="${DEST_VOLUME%/}/Applications/AudioTools.app"
+if [[ ! -d "$APP" && -n "${2:-}" && -d "${2%/}/AudioTools.app" ]]; then
+  APP="${2%/}/AudioTools.app"
+fi
+
+if [[ ! -d "$APP" ]]; then
+  echo "AudioTools.app was not installed to /Applications" >&2
+  exit 1
+fi
+
+xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
+
+# Refresh Launch Services so Finder / Spotlight show the new Applications copy.
+if [[ -x /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister ]]; then
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" 2>/dev/null || true
+fi
+
+# Open the installed app as the logged-in user. This script runs as root;
+# launching as root would use the wrong home folder and permissions.
+console_user="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
+if [[ -n "$console_user" && "$console_user" != "root" && "$console_user" != "loginwindow" ]]; then
+  console_uid="$(id -u "$console_user" 2>/dev/null || true)"
+  if [[ -n "$console_uid" ]]; then
+    launchctl asuser "$console_uid" sudo -u "$console_user" open -n "$APP" >/dev/null 2>&1 \
+      || sudo -u "$console_user" open -n "$APP" >/dev/null 2>&1 \
+      || true
+  fi
+fi
+
+exit 0

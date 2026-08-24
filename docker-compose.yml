@@ -1,0 +1,121 @@
+services:
+  caddy:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      ATT_SITE_ADDRESS: ${ATT_SITE_ADDRESS:-localhost}
+      ATT_ACME_EMAIL: ${ATT_ACME_EMAIL:-}
+    depends_on:
+      - api
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment: &app_env
+      ATT_ENV: production
+      ATT_REQUIRE_AUTH: ${ATT_REQUIRE_AUTH:-true}
+      ATT_DEMO_MODE: ${ATT_DEMO_MODE:-false}
+      ATT_SECRET_KEY: ${ATT_SECRET_KEY:?set ATT_SECRET_KEY}
+      ATT_CORS_ORIGINS: ${ATT_CORS_ORIGINS:-https://localhost}
+      ATT_BOOTSTRAP_ADMIN_EMAIL: ${ATT_BOOTSTRAP_ADMIN_EMAIL:-admin@localhost}
+      ATT_BOOTSTRAP_ADMIN_PASSWORD: ${ATT_BOOTSTRAP_ADMIN_PASSWORD:?set ATT_BOOTSTRAP_ADMIN_PASSWORD}
+      ATT_DATABASE_URL: postgresql+psycopg://att:att@postgres:5432/att
+      ATT_REDIS_URL: redis://redis:6379/0
+      ATT_USE_WORKER: "true"
+      ATT_STORAGE_BACKEND: s3
+      ATT_S3_ENDPOINT_URL: http://minio:9000
+      ATT_S3_ACCESS_KEY: ${ATT_S3_ACCESS_KEY:-minioadmin}
+      ATT_S3_SECRET_KEY: ${ATT_S3_SECRET_KEY:-minioadmin}
+      ATT_S3_BUCKET: audio-tools
+      ATT_ALLOW_YOUTUBE: "false"
+      ATT_MAX_UPLOAD_MB: "50"
+      ATT_DEFAULT_ISOLATE_QUALITY: fast
+      ATT_SINGLE_FLIGHT_JOBS: ${ATT_SINGLE_FLIGHT_JOBS:-false}
+      ATT_DATA_DIR: /app/data
+      PYTHONPATH: /app/src:/app
+    volumes:
+      - app_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
+    command: >
+      sh -c "python scripts/prewarm.py || true;
+      python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      <<: *app_env
+    volumes:
+      - app_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
+    command: >
+      sh -c "python scripts/prewarm.py || true;
+      arq backend.worker.WorkerSettings"
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: att
+      POSTGRES_PASSWORD: att
+      POSTGRES_DB: att
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U att -d att"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${ATT_S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${ATT_S3_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    environment:
+      MC_HOST_local: http://${ATT_S3_ACCESS_KEY:-minioadmin}:${ATT_S3_SECRET_KEY:-minioadmin}@minio:9000
+    entrypoint:
+      - /bin/sh
+      - -c
+      - sleep 3; mc mb -p local/audio-tools || true; exit 0
+
+volumes:
+  caddy_data:
+  caddy_config:
+  pg_data:
+  redis_data:
+  minio_data:
+  app_data:

@@ -1,0 +1,57 @@
+# Lite / Oracle Always Free profile: single API process, sqlite, local disk.
+# No Postgres, Redis, MinIO, or arq worker.
+#
+#   cp .env.lite.example .env
+#   docker compose -f docker-compose.lite.yml up -d --build
+#
+# See DEPLOY.md "Oracle Always Free (experimental)".
+
+services:
+  caddy:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      ATT_SITE_ADDRESS: ${ATT_SITE_ADDRESS:-localhost}
+      ATT_ACME_EMAIL: ${ATT_ACME_EMAIL:-}
+    depends_on:
+      - api
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      ATT_ENV: ${ATT_ENV:-production}
+      ATT_REQUIRE_AUTH: ${ATT_REQUIRE_AUTH:-false}
+      ATT_DEMO_MODE: ${ATT_DEMO_MODE:-true}
+      ATT_SECRET_KEY: ${ATT_SECRET_KEY:?set ATT_SECRET_KEY}
+      ATT_CORS_ORIGINS: ${ATT_CORS_ORIGINS:-https://localhost}
+      ATT_BOOTSTRAP_ADMIN_EMAIL: ${ATT_BOOTSTRAP_ADMIN_EMAIL:-admin@localhost}
+      ATT_BOOTSTRAP_ADMIN_PASSWORD: ${ATT_BOOTSTRAP_ADMIN_PASSWORD:?set ATT_BOOTSTRAP_ADMIN_PASSWORD}
+      ATT_DATABASE_URL: sqlite:////app/data/app.db
+      ATT_USE_WORKER: "false"
+      ATT_STORAGE_BACKEND: local
+      ATT_ALLOW_YOUTUBE: ${ATT_ALLOW_YOUTUBE:-false}
+      ATT_MAX_UPLOAD_MB: ${ATT_MAX_UPLOAD_MB:-25}
+      ATT_DEFAULT_ISOLATE_QUALITY: ${ATT_DEFAULT_ISOLATE_QUALITY:-fast}
+      ATT_MAX_JOB_DURATION_SEC: ${ATT_MAX_JOB_DURATION_SEC:-90}
+      ATT_SINGLE_FLIGHT_JOBS: ${ATT_SINGLE_FLIGHT_JOBS:-true}
+      ATT_DATA_DIR: /app/data
+      PYTHONPATH: /app/src:/app
+    volumes:
+      - app_data:/app/data
+    # Skip Demucs prewarm on lite hosts to keep idle RAM low; first job downloads weights.
+    command: >
+      sh -c "python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000"
+
+volumes:
+  caddy_data:
+  caddy_config:
+  app_data:
