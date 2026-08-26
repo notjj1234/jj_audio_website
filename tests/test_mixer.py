@@ -145,6 +145,28 @@ def test_mix_stems_to_wav_all_silent(tmp_path: Path):
     assert float(np.max(np.abs(data))) == pytest.approx(0.0, abs=1e-3)
 
 
+def test_mix_stems_true_peak_ceiling(tmp_path: Path):
+    """Hot solo mix is limited to ~−1 dBTP (TRUE_PEAK_CEILING), not full-scale."""
+    from audio_to_tab.mixer import TRUE_PEAK_CEILING, apply_true_peak_ceiling
+
+    hot = np.full((1000, 2), 2.0, dtype=np.float32)
+    limited = apply_true_peak_ceiling(hot)
+    peak = float(np.max(np.abs(limited)))
+    assert peak == pytest.approx(TRUE_PEAK_CEILING, rel=1e-4)
+
+    sr = 44100
+    t = np.linspace(0, 0.2, sr // 5, endpoint=False)
+    tone = 1.5 * np.sin(2 * np.pi * 440 * t)  # hotter than full scale
+    p1 = tmp_path / "hot.wav"
+    _write_stereo_wav(p1, tone, tone, sr)
+    out = tmp_path / "limited.wav"
+    mix_stems_to_wav({"a": p1}, output_path=out, gains={"a": 1.0})
+    data, _ = sf.read(str(out), always_2d=True)
+    # PCM_16 write + ceiling → peak at or under ceiling (int16 quantize).
+    assert float(np.max(np.abs(data))) <= TRUE_PEAK_CEILING + 0.02
+    assert float(np.max(np.abs(data))) > 0.5
+
+
 def test_mix_stems_sample_rate_mismatch(tmp_path: Path):
     t = np.linspace(0, 0.1, 4410, endpoint=False)
     tone = 0.2 * np.sin(2 * np.pi * 200 * t)

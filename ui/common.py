@@ -62,7 +62,7 @@ def desktop_app_version() -> str:
 
         return str(__version__)
     except Exception:
-        return "0.1.0"
+        return "0.1.1"
 
 
 def desktop_demo_blurb(version: str | None = None, edition: str | None = None) -> str:
@@ -101,6 +101,8 @@ def write_run_metadata(
     title: str,
     artifacts: dict[str, str],
     owner: str | None = None,
+    source_kind: str | None = None,
+    source_fingerprint: str | None = None,
 ) -> None:
     """
     Persist small metadata alongside a run's artifacts so it can be listed as "Recent".
@@ -116,6 +118,10 @@ def write_run_metadata(
     }
     if owner is not None:
         meta["owner"] = owner
+    if source_kind is not None:
+        meta["source_kind"] = source_kind
+    if source_fingerprint is not None:
+        meta["source_fingerprint"] = source_fingerprint
     Path(run_dir).mkdir(parents=True, exist_ok=True)
     (Path(run_dir) / _META_FILENAME).write_text(json.dumps(meta), encoding="utf-8")
 

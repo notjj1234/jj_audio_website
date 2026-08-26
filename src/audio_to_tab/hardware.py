@@ -123,6 +123,11 @@ def get_desktop_probe(*, force: bool = False) -> HostProbe:
     return _cached_probe
 
 
+def get_desktop_probe_without_torch() -> HostProbe:
+    """RAM-only probe for first UI paint. Does not import torch."""
+    return HostProbe(cuda=False, mps=False, ram_gb=probe_ram_gb())
+
+
 def _platform(platform: str | None) -> str:
     return platform if platform is not None else sys.platform
 

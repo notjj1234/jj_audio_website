@@ -101,6 +101,17 @@ export async function getJob(jobId: string): Promise<JobResponse> {
   return api(`/v1/jobs/${jobId}`);
 }
 
+export async function listJobs(opts?: {
+  kind?: JobKind;
+  limit?: number;
+}): Promise<JobResponse[]> {
+  const params = new URLSearchParams();
+  if (opts?.kind) params.set("kind", opts.kind);
+  if (opts?.limit != null) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  return api(`/v1/jobs${qs ? `?${qs}` : ""}`);
+}
+
 export type ProcessingModeInfo = {
   id: string;
   label: string;

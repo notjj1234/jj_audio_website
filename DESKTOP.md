@@ -14,7 +14,7 @@ For the website stack (FastAPI + React + Caddy), see [`DEPLOY.md`](DEPLOY.md) �
 | RAM | **16 GB preferred**. **8 GB minimum** — use short clips (≤90 s) and speed **Auto** / **Faster**. |
 | GPU | Optional **NVIDIA CUDA** on Windows. Download the **NVIDIA** Setup only if you have an NVIDIA GPU. Mac isolation is CPU-only. |
 | Python | **3.10–3.12 only** (3.11 recommended). Not 3.13. |
-| ffmpeg | Full/shared build on PATH (Homebrew, apt, or Windows Gyan.FFmpeg — not essentials-only). |
+| ffmpeg | Full/shared build on PATH (Homebrew, apt, or Windows Gyan.FFmpeg — not essentials-only). Installer builds bundle ffmpeg. |
 | Disk | ~5 GB free for venv + PyTorch; more for Demucs weights on first run. |
 | Node | **Not required** for testers — the stem mixer frontend is already built in-repo. |
 
@@ -54,11 +54,19 @@ Contributor install (tests/eval extras): `make install` / `./scripts/dev.sh inst
 ## First run
 
 1. **pip / PyTorch** — first install can download ~2 GB (CPU wheels on Windows/Linux).
-2. **Demucs weights** — `tester` prewarms `htdemucs_6s` (default 6-stem model). Extra models download if you pick other track presets.
+2. **Demucs weights** — `tester` prewarms `htdemucs_6s` (default 6-stem model). Extra models download if you pick other track presets. Optional **guitar-ft** weights (~330 MB) download on first use when that Advanced checkbox is on; they cache as `$TORCH_HOME/checkpoints/guitar_htdemucs_6s.pt`. Meta’s pretrained Demucs weights are provided for scientific/research use (code is MIT; see facebookresearch/demucs#327).
 3. Open **Audio Isolation**, upload a **≤90 s** clip first, leave Quality on **fast**, click **Separate tracks**.
 4. Use the live mixer; download stems or a mix.
 
 CPU separation often takes about as long as the song (or longer). Streamlit **Stop** may abort the page run, but a heavy Demucs child process can keep running until it finishes.
+
+## YouTube downloads
+
+Public YouTube URLs only (no login, no age-restricted / private / members-only). The UI already shows a ToS disclaimer; you are responsible for having rights to the audio.
+
+Testers do **not** install extra tools for YouTube. Paste a public URL and click **Download audio** (or **Separate tracks**). The app uses bundled ffmpeg + yt-dlp with a retry ladder. If YouTube still rejects the URL, **upload the audio file** instead.
+
+Maintainers: keep yt-dlp current (`.venv-desktop/bin/pip install -U yt-dlp`). Frozen testers need a rebuilt installer. The app retries after clearing yt-dlp’s player cache on 403.
 
 ## Which installer to download
 
@@ -144,7 +152,7 @@ Installer data dirs (not the same as `make tester`):
 | | macOS app | Windows CPU | Windows NVIDIA |
 |--|-----------|-------------|----------------|
 | Stems / runs | `~/Library/Application Support/AudioTools/runs` | `%LOCALAPPDATA%\AudioTools\runs` | `%LOCALAPPDATA%\AudioToolsNVIDIA\runs` |
-| Demucs weights | `~/Library/Caches/AudioTools/torch` | `%LOCALAPPDATA%\AudioTools\models` (shared) | `%LOCALAPPDATA%\AudioTools\models` (shared) |
+| Demucs weights | `~/Library/Caches/AudioTools/torch` (`checkpoints/guitar_htdemucs_6s.pt` ~330 MB if guitar-ft is on) | `%LOCALAPPDATA%\AudioTools\models` (shared) | `%LOCALAPPDATA%\AudioTools\models` (shared) |
 | Logs | `~/Library/Application Support/AudioTools/logs` | `%LOCALAPPDATA%\AudioTools\logs` | `%LOCALAPPDATA%\AudioToolsNVIDIA\logs` |
 
 ## Smoke test matrix (expected)
@@ -165,6 +173,8 @@ When using `./scripts/dev.sh tester` / `.\scripts\dev.ps1 tester` (not the insta
 
 - macOS / Linux: `~/.cache/torch` (or `$TORCH_HOME`)
 - Windows: `%USERPROFILE%\.cache\torch` (or `%TORCH_HOME%`)
+
+Optional guitar-ft: `$TORCH_HOME/checkpoints/guitar_htdemucs_6s.pt` (~330 MB). Meta Demucs weights are research-purpose; the guitar-ft fine-tune is Apache-2.0 and does not change that.
 
 UI run folders default to `data/ui_runs/` in the repo. Override with `AUDIO_TOOLS_DATA_DIR`.
 

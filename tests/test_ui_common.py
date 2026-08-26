@@ -2,9 +2,25 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import json
 
 import ui.common as common
+
+
+def test_write_run_metadata_includes_source_kind(tmp_path):
+    run_dir = tmp_path / "run-1"
+    common.write_run_metadata(
+        run_dir,
+        page="isolate",
+        title="Party",
+        artifacts={"vocals": str(run_dir / "vocals.wav")},
+        source_kind="youtube",
+        source_fingerprint="youtube:https://youtu.be/abc",
+    )
+    meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+    assert meta["source_kind"] == "youtube"
+    assert meta["source_fingerprint"] == "youtube:https://youtu.be/abc"
+    assert meta["page"] == "isolate"
 
 
 def test_delete_run_removes_directory(tmp_path, monkeypatch):

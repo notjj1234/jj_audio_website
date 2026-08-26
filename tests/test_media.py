@@ -7,10 +7,14 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from unittest.mock import MagicMock, patch
+
 from ui.media import (
     PREVIEW_DURATION_THRESHOLD_SEC,
     cleanup_mix_artifacts,
     ensure_mixer_audio_paths,
+    ensure_region_preview_wav,
+    region_preview_cache_key,
     should_use_previews,
 )
 
@@ -52,3 +56,58 @@ def test_ensure_mixer_audio_paths_short_uses_original(tmp_path: Path):
     _write_tone(p, 2.0)
     out = ensure_mixer_audio_paths({"vocals": p})
     assert out["vocals"] == p
+
+
+def test_region_preview_cache_key_includes_start_and_end():
+    full = region_preview_cache_key("fpabc", 0.0, None)
+    clip = region_preview_cache_key("fpabc", 10.0, 30.0)
+    other = region_preview_cache_key("fpabc", 12.0, 30.0)
+    assert full != clip
+    assert clip != other
+    assert "10" in clip or "10.0" in clip
+
+
+def test_ensure_region_preview_wav_full_file_returns_source(tmp_path: Path):
+    src = tmp_path / "song.wav"
+    src.write_bytes(b"wav")
+    out = ensure_region_preview_wav(
+        src,
+        start_sec=0.0,
+        length_sec=None,
+        fingerprint="fp1",
+        cache_dir=tmp_path / "cache",
+    )
+    assert out == src
+
+
+def test_ensure_region_preview_wav_trim_uses_ss_before_input(tmp_path: Path):
+    src = tmp_path / "song.wav"
+    src.write_bytes(b"wav")
+    cache = tmp_path / "cache"
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        Path(cmd[-1]).write_bytes(b"trimmed")
+        return MagicMock(returncode=0)
+
+    with patch("ui.media.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
+        "ui.media.subprocess.run", side_effect=fake_run
+    ):
+        out = ensure_region_preview_wav(
+            src,
+            start_sec=10.0,
+            length_sec=30.0,
+            fingerprint="fp1",
+            cache_dir=cache,
+        )
+
+    assert out.exists()
+    assert out != src
+    cmd = seen[0]
+    ss_idx = cmd.index("-ss")
+    i_idx = cmd.index("-i")
+    t_idx = cmd.index("-t")
+    assert ss_idx < i_idx < t_idx
+    assert cmd[ss_idx + 1] == "10.0"
+    assert cmd[t_idx + 1] == "30.0"

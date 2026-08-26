@@ -111,11 +111,21 @@ async def _run_job_async(job_manager: JobManager, job_id: str) -> None:
 
 
 async def run_isolate_job_async(job_manager: JobManager, job_id: str) -> None:
-    """Public entry used by arq worker; honors single-flight release when enabled."""
+    """Public entry used by arq worker; serializes Demucs via single-flight when needed."""
+    serialize = bool(settings.single_flight_jobs or not settings.use_worker)
+    acquired = False
     try:
+        if serialize:
+            while not single_flight.try_acquire():
+                if job_manager.is_cancel_requested(job_id):
+                    job_manager.set_cancelled(job_id)
+                    await job_manager.emit(job_id, "cancelled", "Cancelled", JobStatus.cancelled)
+                    return
+                await asyncio.sleep(0.5)
+            acquired = True
         await _run_isolate_job_async(job_manager, job_id)
     finally:
-        if settings.single_flight_jobs:
+        if acquired:
             single_flight.release()
 
 

@@ -425,16 +425,16 @@ def test_split_midside_centered_lead_wide_rhythm(tmp_path: Path):
     assert diag.method in ("midside", "spatial", "register")
 
 
-def test_default_isolate_selected_stems_prefers_lead_rhythm_when_present():
+def test_default_isolate_selected_stems_combined_guitar_only():
     from ui.isolate_state import custom_selected_stems
 
     selected = custom_selected_stems(
         ["vocals", "guitar", "lead_guitar", "rhythm_guitar"],
         ("guitar",),
     )
-    assert selected["lead_guitar"] is True
-    assert selected["rhythm_guitar"] is True
-    assert selected["guitar"] is False
+    assert selected["guitar"] is True
+    assert selected["lead_guitar"] is False
+    assert selected["rhythm_guitar"] is False
     assert selected["vocals"] is False
 
 

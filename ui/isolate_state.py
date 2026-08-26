@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from audio_to_tab.hardware import HostProbe, resolve_desktop_speed
 
@@ -13,17 +15,15 @@ ISOLATION_STAGE_ORDER = (
     "separate",
     "collect",
     "bass_bleed",
-    "guitar_split",
     "presence",
     "done",
 )
 
 STAGE_WEIGHTS: dict[str, float] = {
     "ingest": 0.05,
-    "separate": 0.75,
+    "separate": 0.80,
     "collect": 0.05,
     "bass_bleed": 0.05,
-    "guitar_split": 0.05,
     "presence": 0.03,
     "done": 0.02,
 }
@@ -34,12 +34,11 @@ STAGE_CHECKLIST_LABELS: dict[str, str] = {
     "separate": "Separate tracks",
     "collect": "Collect tracks",
     "bass_bleed": "Check guitar",
-    "guitar_split": "Split lead / rhythm",
     "presence": "Check which tracks have sound",
     "done": "Finish",
 }
 
-_GUITAR_ONLY_STAGES = frozenset({"bass_bleed", "guitar_split"})
+_GUITAR_ONLY_STAGES = frozenset({"bass_bleed"})
 
 # Wall-clock vs audio length for the Demucs `separate` stage at quality=fast.
 # Fast CPU is roughly 1× the clip (docs: about as long as the song).
@@ -105,7 +104,7 @@ CUSTOM_STEM_OUTPUTS: dict[str, tuple[str, ...]] = {
     "vocals": ("vocals",),
     "drums": ("drums",),
     "bass": ("bass",),
-    "guitar": ("guitar", "lead_guitar", "rhythm_guitar"),
+    "guitar": ("guitar",),
     "piano": ("piano",),
     "other": ("other",),
 }
@@ -143,6 +142,24 @@ SPEED_PRESETS: dict[str, dict[str, Any]] = {
 }
 
 DEFAULT_SPEED_PRESET = "auto"
+
+
+def resolve_isolate_user_id(session: MutableMapping[str, Any], stored: str | None) -> str:
+    """Pick a library owner id without waiting on browser localStorage.
+
+    Prefers an existing session id, then a stored browser id, else mints one.
+    Never sleeps or reruns.
+    """
+    cached = session.get("isolate_user_id")
+    if isinstance(cached, str) and cached.strip():
+        return cached.strip()
+    if isinstance(stored, str) and stored.strip():
+        user_id = stored.strip()
+        session["isolate_user_id"] = user_id
+        return user_id
+    user_id = uuid4().hex
+    session["isolate_user_id"] = user_id
+    return user_id
 
 
 def resolve_speed_preset(preset_id: str, probe=None, *, platform: str | None = None) -> dict[str, Any]:
@@ -241,8 +258,7 @@ def custom_selected_stems(
     """
     Mixer/download selection after a Custom run: on for what the user asked for.
 
-    Combined Guitar is dropped when the Lead/Rhythm split produced both halves,
-    matching the default behaviour of the other presets.
+    Default path emits a single combined Guitar stem (no lead/rhythm).
     """
     produced = list(produced_stem_names)
     wanted: set[str] = set()
@@ -252,9 +268,6 @@ def custom_selected_stems(
     selected = {name: name in wanted for name in produced}
     if not any(selected.values()):
         return {name: True for name in produced}
-    if selected.get("lead_guitar") and selected.get("rhythm_guitar"):
-        if "guitar" in selected:
-            selected["guitar"] = False
     return selected
 
 
@@ -289,6 +302,8 @@ def sync_output_name_on_upload(
 
 ISOLATE_OUTPUT_NAME_KEY = "isolate_output_name"
 ISOLATE_OUTPUT_NAME_PENDING_KEY = "isolate_output_name_pending"
+ISOLATE_YOUTUBE_URL_KEY = "isolate_youtube_url"
+ISOLATE_YOUTUBE_URL_PENDING_KEY = "isolate_youtube_url_pending"
 
 
 def queue_reopen_output_name(session: MutableMapping[str, object], title: str) -> None:
@@ -306,13 +321,376 @@ def apply_pending_output_name(session: MutableMapping[str, object]) -> str | Non
     return name
 
 
+def queue_clear_youtube_url(session: MutableMapping[str, object]) -> None:
+    """Clear the YouTube field on the next run. MUST NOT write the widget-bound key."""
+    session[ISOLATE_YOUTUBE_URL_PENDING_KEY] = ""
+
+
+def apply_pending_youtube_url(session: MutableMapping[str, object]) -> str | None:
+    """Copy pending URL onto the widget key. Call before ``st.text_input`` exists."""
+    if ISOLATE_YOUTUBE_URL_PENDING_KEY not in session:
+        return None
+    pending = session.pop(ISOLATE_YOUTUBE_URL_PENDING_KEY)
+    value = str(pending)
+    session[ISOLATE_YOUTUBE_URL_KEY] = value
+    return value
+
+
 def should_hide_stale_results(
     *,
     pending_upload_fp: str | None,
     has_artifacts: bool,
+    results_source_fp: str | None = None,
 ) -> bool:
-    """True when a new upload is queued but prior separation results are still loaded."""
-    return bool(has_artifacts and pending_upload_fp is not None)
+    """True when a *new* source is queued that differs from the loaded run's source.
+
+    Having any upload fingerprint while artifacts exist is not enough — after a
+    finished run the fingerprint may still be set. Hide only when the pending
+    source is different from the run that produced the current mixer.
+    """
+    if not has_artifacts or pending_upload_fp is None:
+        return False
+    if results_source_fp is None:
+        # Legacy callers: treat any pending fp as a new source.
+        return True
+    return pending_upload_fp != results_source_fp
+
+
+WORKSPACE_KEY = "isolate_workspace"
+WORKSPACE_TABS = ("New", "Mixer", "Queue")
+WORKSPACE_NEXT_KEY = "_isolate_workspace_next"
+LISTEN_PICKER_KEY = "isolate_listen_picker"
+LISTEN_PICKER_NEXT_KEY = "_isolate_listen_picker_next"
+
+
+def apply_workspace_tab(session: MutableMapping[str, Any], *, has_artifacts: bool) -> str:
+    """Resolve New/Mixer/Queue before ``st.tabs`` is instantiated.
+
+    Launch always lands on New so the static form paints immediately. A finishing
+    job sets ``WORKSPACE_NEXT_KEY`` then reruns so Mixer can open without fighting
+    an already-mounted tab widget.
+    """
+    _ = has_artifacts
+    nxt = session.pop(WORKSPACE_NEXT_KEY, None)
+    if nxt in WORKSPACE_TABS:
+        session[WORKSPACE_KEY] = nxt
+        return str(nxt)
+    current = session.get(WORKSPACE_KEY)
+    if current not in WORKSPACE_TABS:
+        session[WORKSPACE_KEY] = "New"
+        return "New"
+    return str(current)
+
+
+QUEUE_IN_FLIGHT_STATUSES = frozenset({"queued", "running", "failed", "cancelled"})
+ISOLATE_UI_STATE_FILENAME = "isolate_ui_state.json"
+
+
+def partition_queue_jobs(jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Split jobs into in-flight first, then succeeded. Empty only when both are empty."""
+    in_flight: list[dict[str, Any]] = []
+    succeeded: list[dict[str, Any]] = []
+    for job in jobs:
+        status = job.get("status")
+        if status in QUEUE_IN_FLIGHT_STATUSES:
+            in_flight.append(job)
+        elif status == "succeeded":
+            succeeded.append(job)
+    return {
+        "in_flight": in_flight,
+        "succeeded": succeeded,
+        "empty": not in_flight and not succeeded,
+    }
+
+
+def recent_runs_with_owner_fallback(
+    owned: list[dict[str, Any]],
+    unfiltered: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Desktop library: use owner-scoped runs, else every isolate run on disk."""
+    return owned if owned else unfiltered
+
+
+def pick_library_row(
+    rows: list[dict[str, Any]],
+    preferred_run_dir: str | None,
+) -> dict[str, Any] | None:
+    """Newest row, unless preferred_run_dir still exists in the library."""
+    if not rows:
+        return None
+    if preferred_run_dir:
+        wanted = str(preferred_run_dir)
+        for row in rows:
+            if str(row.get("run_dir") or "") == wanted:
+                return row
+    return rows[0]
+
+
+def listen_picker_default(
+    options: list[str],
+    loaded_run_dir: str | None,
+    current: str | None,
+) -> str | None:
+    """Selectbox value: loaded mixer run, else current if still listed, else first option."""
+    if not options:
+        return None
+    if loaded_run_dir and str(loaded_run_dir) in options:
+        return str(loaded_run_dir)
+    if current and str(current) in options:
+        return str(current)
+    return options[0]
+
+
+def apply_listen_picker_pending(session: MutableMapping[str, Any]) -> None:
+    """Apply a deferred picker reset before the selectbox is instantiated."""
+    nxt = session.pop(LISTEN_PICKER_NEXT_KEY, None)
+    if nxt:
+        session[LISTEN_PICKER_KEY] = str(nxt)
+
+
+def select_rehydrate_row(
+    session: MutableMapping[str, Any],
+    rows: list[dict[str, Any]],
+    *,
+    wav_exists,
+) -> dict[str, Any] | None:
+    """Library row to load when the session has no usable mixer wavs."""
+    if session_mixer_artifacts_ok(session, wav_exists=wav_exists):
+        return None
+    preferred = session.get("isolate_viewing_run_dir") or session.get("isolate_run_dir")
+    return pick_library_row(rows, str(preferred) if preferred else None)
+
+
+def session_mixer_artifacts_ok(session: MutableMapping[str, Any], *, wav_exists) -> bool:
+    """True when session already points at mixer wavs that still exist."""
+    arts = session.get("isolate_artifacts")
+    if not isinstance(arts, dict) or not arts:
+        return False
+    return any(
+        str(path).endswith(".wav") and wav_exists(str(path))
+        for path in arts.values()
+    )
+
+
+def isolate_ui_state_payload(session: MutableMapping[str, Any]) -> dict[str, Any]:
+    nxt = session.get(WORKSPACE_NEXT_KEY)
+    tab = nxt if nxt in WORKSPACE_TABS else session.get(WORKSPACE_KEY)
+    workspace = tab if tab in WORKSPACE_TABS else "New"
+    viewing = session.get("isolate_viewing_run_dir")
+    run_dir = session.get("isolate_run_dir")
+    return {
+        "workspace": workspace,
+        "viewing_run_dir": str(viewing) if viewing else None,
+        "run_dir": str(run_dir) if run_dir else None,
+    }
+
+
+def apply_stored_isolate_ui_state(
+    session: MutableMapping[str, Any],
+    stored: dict[str, Any] | None,
+) -> None:
+    """Fill missing session tab/run pointers from disk. Live session keys win."""
+    if not stored:
+        return
+    tab = stored.get("workspace")
+    if session.get(WORKSPACE_KEY) not in WORKSPACE_TABS and tab in WORKSPACE_TABS:
+        session[WORKSPACE_KEY] = tab
+    if not session.get("isolate_viewing_run_dir") and stored.get("viewing_run_dir"):
+        session["isolate_viewing_run_dir"] = str(stored["viewing_run_dir"])
+    if not session.get("isolate_run_dir") and stored.get("run_dir"):
+        session["isolate_run_dir"] = str(stored["run_dir"])
+
+
+def read_isolate_ui_state(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_isolate_ui_state(path: Path, payload: dict[str, Any]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def seed_consumed_job_ids(jobs: list[dict[str, Any]]) -> list[str]:
+    """Succeeded job ids already on disk — treat as seen so launch does not rerun."""
+    ids: list[str] = []
+    for job in jobs:
+        if job.get("status") != "succeeded":
+            continue
+        jid = str(job.get("id") or "").strip()
+        if jid:
+            ids.append(jid)
+    return ids
+
+
+def next_unconsumed_succeeded_job(
+    jobs: list[dict[str, Any]],
+    consumed_ids: list[str],
+    viewing_id: str | None,
+) -> tuple[dict[str, Any] | None, bool]:
+    """First succeeded job not yet consumed. Bool is True when the mixer may auto-load it."""
+    seen = {str(item) for item in consumed_ids if item}
+    for job in jobs:
+        jid = str(job.get("id") or "").strip()
+        if not jid or jid in seen or job.get("status") != "succeeded":
+            continue
+        return job, should_auto_apply_job(viewing_id, jid)
+    return None, False
+
+
+def plan_isolate_job_poll(
+    jobs: list[dict[str, Any]],
+    *,
+    consumed_ids: list[str] | None,
+    viewing_id: str | None,
+    form_drawn: bool,
+) -> dict[str, Any]:
+    """Decide whether a job poll may apply a result or rerun the page.
+
+    A fresh session (``consumed_ids is None``) records historical successes and
+    never reruns — otherwise two finished jobs ping-pong ``st.rerun`` and the
+    Isolate form never paints.
+    """
+    if consumed_ids is None:
+        return {
+            "consumed_ids": seed_consumed_job_ids(jobs),
+            "apply_job": None,
+            "notify_only": False,
+            "rerun": False,
+        }
+    consumed = [str(item) for item in consumed_ids if item]
+    job, auto = next_unconsumed_succeeded_job(jobs, consumed, viewing_id)
+    if job is None or not form_drawn:
+        return {
+            "consumed_ids": consumed,
+            "apply_job": None,
+            "notify_only": False,
+            "rerun": False,
+        }
+    jid = str(job.get("id") or "")
+    return {
+        "consumed_ids": consumed + [jid],
+        "apply_job": job,
+        "notify_only": not auto,
+        "rerun": True,
+    }
+
+
+ISOLATE_USER_ID_FILENAME = "isolate_user_id"
+
+SOURCE_KIND_FILE = "file"
+SOURCE_KIND_YOUTUBE = "youtube"
+_YOUTUBE_FINGERPRINT_PREFIX = "youtube:"
+
+
+def infer_source_kind(
+    *,
+    source_kind: Any = None,
+    source_fingerprint: Any = None,
+    youtube_url: Any = None,
+) -> str:
+    """``youtube`` or ``file``. Explicit kind wins; else fingerprint/URL; else file."""
+    kind = str(source_kind or "").strip().lower()
+    if kind in {SOURCE_KIND_FILE, SOURCE_KIND_YOUTUBE}:
+        return kind
+    if str(youtube_url or "").strip():
+        return SOURCE_KIND_YOUTUBE
+    fingerprint = str(source_fingerprint or "")
+    if fingerprint.startswith(_YOUTUBE_FINGERPRINT_PREFIX):
+        return SOURCE_KIND_YOUTUBE
+    return SOURCE_KIND_FILE
+
+
+def format_source_title(title: str | None, kind: str) -> str:
+    """Queue / Listening-to label, e.g. ``YouTube · Party Wadokoni_``."""
+    name = (title or "tracks").strip() or "tracks"
+    label = "YouTube" if infer_source_kind(source_kind=kind) == SOURCE_KIND_YOUTUBE else "File"
+    return f"{label} · {name}"
+
+
+def format_source_caption(
+    title: str | None,
+    kind: str,
+    *,
+    filename: str | None = None,
+    region_label: str | None = None,
+    clip_length: float | None = None,
+) -> str:
+    """Mixer caption, e.g. ``**Calm Like You** · File (`Calm Like You.wav`)``."""
+    name = (title or "tracks").strip() or "tracks"
+    parts = [f"**{name}**"]
+    if region_label:
+        length_note = f" ({float(clip_length):.0f} s)" if clip_length else ""
+        parts.append(f"{region_label}{length_note}")
+    if infer_source_kind(source_kind=kind) == SOURCE_KIND_YOUTUBE:
+        parts.append("YouTube")
+    elif filename:
+        parts.append(f"File (`{filename}`)")
+    else:
+        parts.append("File")
+    return " · ".join(parts)
+
+
+def read_stored_user_id(path: Path) -> str | None:
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return text or None
+
+
+def write_stored_user_id(path: Path, user_id: str) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(user_id, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def load_persist_isolate_user_id(session: MutableMapping[str, Any], path: Path) -> str:
+    """Session UUID, persisted to a local file (never a blocking browser component)."""
+    stored = read_stored_user_id(path)
+    user_id = resolve_isolate_user_id(session, stored)
+    if stored != user_id:
+        write_stored_user_id(path, user_id)
+    return user_id
+
+
+def pending_upload_fp_for_stale(session: MutableMapping[str, Any]) -> str | None:
+    """Fingerprint of a staged isolate source, independent of the file_uploader widget.
+
+    Used when the New tab is not mounted so ``uploaded`` is unavailable.
+    """
+    pending_fp = session.get("isolate_pending_fp") or session.get("isolate_upload_fp")
+    pending_path = session.get("isolate_pending_audio_path")
+    has_file = bool(pending_path and Path(str(pending_path)).exists())
+    youtube_on = bool(session.get("isolate_youtube_enabled"))
+    youtube_url = (session.get("isolate_youtube_url") or "").strip() if youtube_on else ""
+    if (has_file or youtube_url) and pending_fp:
+        return str(pending_fp)
+    return None
+
+
+def pending_audio_needs_resave(
+    *,
+    uploaded_fp: str | None,
+    pending_fp: str | None,
+    pending_path_exists: bool,
+) -> bool:
+    """True when the uploader's file is not yet mirrored on the pending path."""
+    if uploaded_fp is None:
+        return False
+    if not pending_path_exists:
+        return True
+    return uploaded_fp != pending_fp
 
 
 def expects_guitar_stem(
@@ -562,3 +940,49 @@ def format_eta_line(
     left = format_elapsed(remaining_sec)
     _ = confidence  # always ~ ; low confidence uses estimating… when remaining is None
     return f"Elapsed {elapsed} · ~{left} left"
+
+
+def should_auto_apply_job(viewing_id: str | None, job_id: str) -> bool:
+    """True when a finished job may replace the mixer (latest / unpinned / same id)."""
+    if not job_id:
+        return False
+    if viewing_id in (None, "", "latest"):
+        return True
+    return viewing_id == job_id
+
+
+def running_progress_view(status: dict[str, Any], now: float) -> dict[str, Any]:
+    """Pure snapshot of running-job progress for the queue banner and row."""
+    stages_raw = status.get("stages") or ISOLATION_STAGE_ORDER
+    stages = tuple(str(s) for s in stages_raw)
+    stage = str(status.get("stage") or "ingest")
+    message = str(status.get("message") or "")
+    started_at = float(status.get("started_at") or now)
+    stage_started = float(status.get("stage_started_at") or started_at)
+    try:
+        total_est = float(status["job_estimate_sec"]) if status.get("job_estimate_sec") is not None else None
+    except (TypeError, ValueError):
+        total_est = None
+    confidence = str(status.get("estimate_confidence") or "low")
+    elapsed_in = max(0.0, now - stage_started)
+    stage_est = estimated_stage_seconds(stage, stages, total_est)
+    intra, intra_estimated = intra_stage_fraction(elapsed_in, stage_est)
+    percent = stage_progress_percent(stage, stages=stages, intra=intra)
+    elapsed = max(0.0, now - started_at)
+    remaining, rem_conf = estimate_remaining_seconds(
+        elapsed_sec=elapsed,
+        percent=percent,
+        total_estimate=total_est,
+        confidence=confidence,
+    )
+    human = STAGE_CHECKLIST_LABELS.get(stage, message or stage)
+    label = format_progress_label(percent, human, estimated=intra_estimated and confidence == "low")
+    items = checklist_items(stages, stage)
+    return {
+        "percent": percent,
+        "label": label,
+        "eta_line": format_eta_line(elapsed, remaining, confidence=rem_conf),
+        "checklist_md": format_checklist_markdown(items),
+        "message": message or human,
+        "estimated": intra_estimated,
+    }

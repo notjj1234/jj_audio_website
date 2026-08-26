@@ -111,7 +111,7 @@ def test_entitlements_allow_pyinstaller_hardened_runtime():
 def test_make_pkg_signs_and_defaults_to_desktop_version():
     script = (ROOT / "packaging" / "make_pkg.sh").read_text(encoding="utf-8")
     assert "macos_signing.py" in script
-    assert "AUDIO_TOOLS_VERSION:-0.1.0" in script
+    assert "AUDIO_TOOLS_VERSION:-0.1.1" in script
     assert "pkgbuild" in script
     assert "macos-arm64-silicon.pkg" in script
     assert "macos-x64-intel.pkg" in script
@@ -121,7 +121,7 @@ def test_make_pkg_signs_and_defaults_to_desktop_version():
 
 def test_make_app_copies_without_quarantine_xattrs():
     script = (ROOT / "packaging" / "make_app.sh").read_text(encoding="utf-8")
-    assert "AUDIO_TOOLS_VERSION:-0.1.0" in script
+    assert "AUDIO_TOOLS_VERSION:-0.1.1" in script
     assert "--noqtn" in script or "xattr -cr" in script
 
 

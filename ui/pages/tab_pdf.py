@@ -25,7 +25,7 @@ from audio_to_tab.pipeline import (  # noqa: E402
     PipelineConfig,
     run_pipeline,
 )
-from audio_to_tab.ingest import is_youtube_url  # noqa: E402
+from audio_to_tab.ingest import YouTubeDownloadError, is_youtube_url  # noqa: E402
 from audio_to_tab.separate import is_demucs_available  # noqa: E402
 
 
@@ -226,6 +226,8 @@ def main() -> None:
                 # Rerun so Conversion settings collapses and results sit near the top.
                 st.rerun()
 
+            except YouTubeDownloadError as exc:
+                st.error(str(exc))
             except Exception as exc:
                 st.error(
                     "Conversion failed — your file and settings are still here, "

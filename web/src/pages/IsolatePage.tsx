@@ -14,8 +14,9 @@ const STEM_LABELS: Record<string, string> = {
   other: "Other",
   guitar: "Guitar",
   piano: "Piano",
-  lead_guitar: "Lead",
-  rhythm_guitar: "Rhythm",
+  // Legacy artifacts only — default isolate path no longer emits these.
+  lead_guitar: "Lead (legacy)",
+  rhythm_guitar: "Rhythm (legacy)",
   guitar1: "Guitar 1",
   guitar2: "Guitar 2",
 };
@@ -79,6 +80,7 @@ export function IsolatePage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [job, setJob] = useState<api.JobResponse | null>(null);
+  const [jobList, setJobList] = useState<api.JobResponse[]>([]);
   const [stopWatch, setStopWatch] = useState<(() => void) | null>(null);
   const [clipLabel, setClipLabel] = useState<string | null>(null);
 
@@ -100,6 +102,26 @@ export function IsolatePage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      api
+        .listJobs({ kind: "isolate", limit: 10 })
+        .then((rows) => {
+          if (!cancelled) setJobList(rows);
+        })
+        .catch(() => {
+          /* ignore */
+        });
+    };
+    refresh();
+    const t = window.setInterval(refresh, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(t);
+    };
+  }, [job?.id, job?.status]);
 
   useEffect(() => {
     previewStopRef.current?.();
@@ -410,6 +432,35 @@ export function IsolatePage() {
       </form>
 
       <div style={{ marginTop: "1.5rem" }}>
+        {jobList.length > 0 && (
+          <div className="results-card" style={{ marginBottom: "1rem" }}>
+            <h2 className="section-heading">Job queue</h2>
+            <p className="hint">
+              Jobs run one at a time. Queuing several songs means a long wait and high
+              CPU/RAM use — this is not parallel Demucs.
+            </p>
+            <ul className="stack" style={{ listStyle: "none", padding: 0 }}>
+              {jobList.map((j) => (
+                <li key={j.id} style={{ marginBottom: "0.35rem" }}>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => {
+                      stopWatch?.();
+                      setJob(j);
+                      if (!["succeeded", "failed", "cancelled"].includes(j.status)) {
+                        const stop = api.watchJob(j.id, setJob);
+                        setStopWatch(() => stop);
+                      }
+                    }}
+                  >
+                    {j.status} — {j.message || j.stage || j.id.slice(0, 8)}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         {clipLabel && job && (
           <p className="hint">
             <strong>Clip {clipLabel}</strong>

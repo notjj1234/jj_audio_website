@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import logging
 import os
 import shutil
@@ -23,17 +24,18 @@ GUITAR_FT_FILENAME = "guitar_htdemucs_6s.pt"
 GUITAR_FT_URL = (
     f"https://huggingface.co/{GUITAR_FT_HF_REPO}/resolve/main/{GUITAR_FT_FILENAME}"
 )
+# Hugging Face blob SHA256 for guitar_htdemucs_6s.pt (330 MB / 329654071 bytes).
+GUITAR_FT_SHA256 = "4fde369e41582ba5c2759b6ab926a44af467c64d4566bf914374ab267b19260e"
 SUPPORTED_GUITAR_CHECKPOINTS = frozenset({GUITAR_FT_CHECKPOINT_ID})
 
 
 def is_demucs_available() -> bool:
-    """Return True if the Demucs package is importable."""
-    try:
-        import demucs  # noqa: F401
+    """Return True if the Demucs package is installed.
 
-        return True
-    except ImportError:
-        return False
+    Uses ``find_spec`` so the desktop UI can paint without importing Demucs or
+    Torch. Real separation still imports Demucs inside the job worker.
+    """
+    return importlib.util.find_spec("demucs") is not None
 
 
 def _torch_cache_dir() -> Path:
@@ -47,11 +49,39 @@ def guitar_ft_weights_path() -> Path:
     return _torch_cache_dir() / "checkpoints" / GUITAR_FT_FILENAME
 
 
+def guitar_ft_weights_sha256(path: Path | None = None) -> str:
+    """Return sha256 hex digest of cached guitar-ft weights (for pinning/tests)."""
+    target = path or guitar_ft_weights_path()
+    digest = hashlib.sha256()
+    with target.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_guitar_ft_weights(path: Path | None = None) -> Path:
+    """Raise if the cached file is missing or its SHA256 does not match the pin."""
+    target = path or guitar_ft_weights_path()
+    if not target.is_file():
+        raise RuntimeError(f"guitar-ft weights not found at {target}")
+    digest = guitar_ft_weights_sha256(target)
+    if digest != GUITAR_FT_SHA256:
+        target.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"guitar-ft weights hash mismatch (got {digest}, expected {GUITAR_FT_SHA256})"
+        )
+    return target
+
+
 def download_guitar_ft_weights(*, force: bool = False) -> Path:
     """Download guitar-ft weights into the torch cache (urllib, no huggingface_hub)."""
     path = guitar_ft_weights_path()
     if path.exists() and not force:
-        return path
+        try:
+            return verify_guitar_ft_weights(path)
+        except RuntimeError:
+            logger.warning("Cached guitar-ft weights failed hash check; re-downloading")
+            path.unlink(missing_ok=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".part")
     try:
@@ -63,17 +93,24 @@ def download_guitar_ft_weights(*, force: bool = False) -> Path:
         if tmp.exists():
             tmp.unlink(missing_ok=True)
         raise RuntimeError(f"Failed to download guitar-ft weights from {GUITAR_FT_URL}") from exc
-    return path
+    return verify_guitar_ft_weights(path)
 
 
-def guitar_ft_weights_sha256(path: Path | None = None) -> str:
-    """Return sha256 hex digest of cached guitar-ft weights (for pinning/tests)."""
-    target = path or guitar_ft_weights_path()
-    digest = hashlib.sha256()
-    with target.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def remap_guitar_ft_state_dict(
+    state_dict: dict,
+    wrapper_keys: set[str] | frozenset[str],
+) -> dict:
+    """Prefix inner HTDemucs keys with ``models.0.`` for Demucs BagOfModels.
+
+    ``get_model("htdemucs_6s")`` wraps the network; the guitar-ft training
+    checkpoint stores the inner module's ``state_dict`` without that prefix.
+    """
+    if not isinstance(state_dict, dict) or not state_dict:
+        return state_dict
+    sample = list(state_dict.keys())[:3]
+    if any(key in wrapper_keys for key in sample):
+        return state_dict
+    return {f"models.0.{key}": value for key, value in state_dict.items()}
 
 
 def load_guitar_ft_state_dict(weights_path: Path):
@@ -110,7 +147,11 @@ def run_demucs_guitar_ft_inprocess(
 
     weights_path = download_guitar_ft_weights()
     model = get_model("htdemucs_6s")
-    model.load_state_dict(load_guitar_ft_state_dict(weights_path))
+    state_dict = remap_guitar_ft_state_dict(
+        load_guitar_ft_state_dict(weights_path),
+        set(model.state_dict().keys()),
+    )
+    model.load_state_dict(state_dict)
     model.eval()
 
     dev_name = device

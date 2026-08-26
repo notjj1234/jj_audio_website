@@ -77,7 +77,7 @@ class IsolateJobCreateRequest(BaseModel):
     def _alias_dual_guitar(self) -> IsolateJobCreateRequest:
         if self.dual_guitar and not self.lead_rhythm:
             self.lead_rhythm = True
-        if self.lead_rhythm and self.lead_rhythm_mode == "confident":
+        if self.dual_guitar:
             self.lead_rhythm_mode = "best_effort"
         return self
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import subprocess
 from pathlib import Path
@@ -126,3 +127,60 @@ def stem_media_urls(stem_paths: dict[str, Path], *, coord_prefix: str = "isolate
     for i, (name, path) in enumerate(sorted(stem_paths.items())):
         urls[name] = media_url_for_file(path, coordinates=f"{coord_prefix}.{i}.{name}")
     return urls
+
+
+def region_preview_cache_key(
+    fingerprint: str, start_sec: float, length_sec: float | None
+) -> str:
+    """Stable cache id: source fingerprint plus start/end (or full)."""
+    digest = hashlib.sha256(fingerprint.encode("utf-8", errors="replace")).hexdigest()[:16]
+    if length_sec is None:
+        return f"{digest}_full"
+    return f"{digest}_{float(start_sec):.3f}_{float(length_sec):.3f}"
+
+
+def ensure_region_preview_wav(
+    src: Path,
+    *,
+    start_sec: float,
+    length_sec: float | None,
+    fingerprint: str,
+    cache_dir: Path,
+) -> Path:
+    """Return a wav whose duration is the isolate section, or ``src`` for a full file.
+
+    Does not read the source into Python. Uses ffmpeg ``-ss`` before ``-i``.
+    """
+    if (length_sec is None or length_sec <= 0) and start_sec <= 0:
+        return src
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    dest = cache_dir / f"{region_preview_cache_key(fingerprint, start_sec, length_sec)}.wav"
+    try:
+        if dest.exists() and dest.stat().st_mtime >= src.stat().st_mtime:
+            return dest
+    except OSError:
+        pass
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return src
+    cmd: list[str] = [
+        ffmpeg,
+        "-y",
+        "-ss",
+        str(float(start_sec)),
+        "-i",
+        str(src),
+    ]
+    if length_sec is not None and length_sec > 0:
+        cmd.extend(["-t", str(float(length_sec))])
+    cmd.extend(["-ac", "2", "-ar", str(PREVIEW_SAMPLE_RATE), str(dest)])
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        check=False,
+        **subprocess_run_kwargs(),
+    )
+    if result.returncode == 0 and dest.exists():
+        return dest
+    return src

@@ -24,6 +24,7 @@ from audio_to_tab.isolate import (
     analyze_bass_bleed,
     apply_bass_bleed_mitigation,
     detect_present_stems,
+    effective_demucs_segment,
     format_region_label,
     probe_duration_sec,
     resolve_region,
@@ -46,12 +47,52 @@ def test_supported_models():
     assert "htdemucs_ft" in SUPPORTED_MODELS
 
 
+def test_is_demucs_available_does_not_import_torch(monkeypatch):
+    from audio_to_tab.separate import is_demucs_available
+    import inspect
+
+    src = inspect.getsource(is_demucs_available)
+    assert "find_spec" in src
+    assert "import demucs" not in src
+    assert "import torch" not in src
+
+    monkeypatch.setattr(
+        "audio_to_tab.separate.importlib.util.find_spec",
+        lambda name: object() if name == "demucs" else None,
+    )
+    assert is_demucs_available() is True
+    monkeypatch.setattr(
+        "audio_to_tab.separate.importlib.util.find_spec",
+        lambda name: None,
+    )
+    assert is_demucs_available() is False
+
+
 def test_isolate_config_defaults_to_full_song():
     assert IsolateConfig().max_duration_sec is None
 
 
 def test_isolate_config_default_quality_is_fast():
     assert IsolateConfig().quality == "fast"
+
+
+def test_effective_demucs_segment_clamps_htdemucs_6s_below_transformer_max():
+    """htdemucs_6s rejects --segment > 7.8; CLI only accepts ints, so cap at 7."""
+    assert effective_demucs_segment("htdemucs_6s", 8) == 7
+    assert effective_demucs_segment("htdemucs_6s", 7) == 7
+    assert effective_demucs_segment("htdemucs_6s", 20) == 7
+
+
+def test_effective_demucs_segment_keeps_ram_target_for_four_stem_models():
+    assert effective_demucs_segment("htdemucs", 8) == 8
+    assert effective_demucs_segment("htdemucs_ft", 8) == 8
+    assert effective_demucs_segment("htdemucs", 12) == 10
+
+
+def test_effective_demucs_segment_omits_flag_when_disabled():
+    assert effective_demucs_segment("htdemucs_6s", None) is None
+    assert effective_demucs_segment("htdemucs_6s", 0) is None
+    assert effective_demucs_segment("htdemucs_6s", -1) is None
 
 
 def test_separate_stems_requires_demucs(tmp_path: Path):
@@ -89,6 +130,7 @@ def test_separate_stems_collects_wavs(tmp_path: Path):
     audio = tmp_path / "song.wav"
     audio.write_bytes(b"fake-wav")
     out_dir = tmp_path / "stems"
+    seen_cmd: list[list[str]] = []
 
     def fake_normalize(src, dest=None):
         dest = Path(dest) if dest else tmp_path / "norm.wav"
@@ -98,6 +140,7 @@ def test_separate_stems_collects_wavs(tmp_path: Path):
 
     def fake_run(cmd, capture_output=True, text=True, **_kwargs):
         # Demucs output layout: -o <dir> → <dir>/<model>/<track>/*.wav
+        seen_cmd.append(list(cmd))
         assert "-m" in cmd and "demucs" in cmd
         assert "-n" in cmd and "htdemucs_6s" in cmd
         out_flag = cmd.index("-o")
@@ -106,8 +149,7 @@ def test_separate_stems_collects_wavs(tmp_path: Path):
         track_dir.mkdir(parents=True, exist_ok=True)
         for name in ("vocals", "drums", "bass", "other", "piano"):
             (track_dir / f"{name}.wav").write_bytes(b"stem-" + name.encode())
-        # Guitar must be a real (if tiny/silent) WAV: the split is now always
-        # attempted whenever a guitar stem exists, so it must be loadable.
+        # Guitar WAV must be loadable for bass-bleed / presence stages.
         sf.write(str(track_dir / "guitar.wav"), np.zeros((256, 2), dtype=np.float32), 44100)
         return MagicMock(returncode=0, stderr="", stdout="")
 
@@ -124,11 +166,19 @@ def test_separate_stems_collects_wavs(tmp_path: Path):
         )
 
     assert {"vocals", "drums", "bass", "other", "guitar", "piano"} <= set(artifacts)
-    assert "guitar_split_diagnostics" in artifacts
+    assert "guitar_split_diagnostics" not in artifacts
+    assert "lead_guitar" not in artifacts
     assert "stem_presence_diagnostics" in artifacts
     for path in artifacts.values():
         assert path.exists()
         assert path.parent == out_dir
+    # Default path passes --jobs 1 and --segment for RAM-safe CPU runs.
+    # Demucs argparse requires an int; htdemucs_6s max training segment is 7.8
+    # so we must pass 7, not 8.
+    assert "--jobs" in seen_cmd[0] and "1" in seen_cmd[0]
+    assert "--segment" in seen_cmd[0]
+    seg_idx = seen_cmd[0].index("--segment")
+    assert seen_cmd[0][seg_idx + 1] == "7"
 
 
 def test_separate_stems_passes_two_stems_flag(tmp_path: Path):
@@ -195,7 +245,7 @@ def _fake_demucs_with_guitar(stereo_left, stereo_right, sr: int = 44100):
 
 
 def test_separate_stems_lead_rhythm_when_confident(tmp_path: Path):
-    """Lead/Rhythm split is attempted automatically — no config flag needed."""
+    """Lead/Rhythm runs only when lead_rhythm=True (CLI/eval opt-in)."""
     audio = tmp_path / "song.wav"
     audio.write_bytes(b"fake-wav")
     out_dir = tmp_path / "stems"
@@ -220,7 +270,7 @@ def test_separate_stems_lead_rhythm_when_confident(tmp_path: Path):
         artifacts = separate_stems(
             audio,
             out_dir,
-            IsolateConfig(model="htdemucs_6s", max_duration_sec=15),
+            IsolateConfig(model="htdemucs_6s", max_duration_sec=15, lead_rhythm=True),
         )
 
     assert "guitar" in artifacts
@@ -236,6 +286,41 @@ def test_separate_stems_lead_rhythm_when_confident(tmp_path: Path):
     assert "superseded" in presence["guitar"]["reason"]
     assert presence["lead_guitar"]["present"] is True
     assert presence["rhythm_guitar"]["present"] is True
+
+
+def test_separate_stems_default_skips_lead_rhythm(tmp_path: Path):
+    """Default isolate path never calls Lead/Rhythm post-process."""
+    audio = tmp_path / "song.wav"
+    audio.write_bytes(b"fake-wav")
+    out_dir = tmp_path / "stems"
+    sr = 44100
+    n = sr * 2
+    t = np.linspace(0, 2, n, endpoint=False)
+    left = np.sin(2 * np.pi * 900 * t)
+    right = 0.7 * np.sin(2 * np.pi * 180 * t)
+    called = {"n": 0}
+
+    def fake_split(*_a, **_kw):
+        called["n"] += 1
+        return {}, None
+
+    with (
+        patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
+        patch("audio_to_tab.isolate.normalize_audio", side_effect=_fake_normalize_factory(tmp_path)),
+        patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
+        patch("audio_to_tab.separate.subprocess.run", side_effect=_fake_demucs_with_guitar(left, right)),
+        patch("audio_to_tab.lead_rhythm.split_lead_rhythm_guitar", side_effect=fake_split),
+    ):
+        artifacts = separate_stems(
+            audio,
+            out_dir,
+            IsolateConfig(model="htdemucs_6s", max_duration_sec=15),
+        )
+
+    assert called["n"] == 0
+    assert "guitar" in artifacts
+    assert "lead_guitar" not in artifacts
+    assert "guitar_split_diagnostics" not in artifacts
 
 
 def test_separate_stems_lead_rhythm_skips_mono_by_default(tmp_path: Path):
@@ -263,7 +348,7 @@ def test_separate_stems_lead_rhythm_skips_mono_by_default(tmp_path: Path):
         artifacts = separate_stems(
             audio,
             out_dir,
-            IsolateConfig(model="htdemucs_6s", max_duration_sec=15),
+            IsolateConfig(model="htdemucs_6s", max_duration_sec=15, lead_rhythm=True),
         )
 
     assert "guitar" in artifacts
@@ -305,6 +390,7 @@ def test_separate_stems_lead_rhythm_best_effort_emits_on_mono(tmp_path: Path):
             IsolateConfig(
                 model="htdemucs_6s",
                 max_duration_sec=15,
+                lead_rhythm=True,
                 lead_rhythm_mode="best_effort",
             ),
         )

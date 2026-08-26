@@ -18,6 +18,26 @@ audio-isolate --audio /path/to/mix.wav --output ./eval/lead_rhythm/out_stage1 \
 
 Pass for a stage-1 challenger: guitar SIR / listening beats stock `htdemucs_6s` on the same clips. Piano bleed and bass bleed inside the guitar band remain known limits.
 
+### Guitar-ft A/B (stock vs `htdemucs_6s_guitar_ft`)
+
+Stay Advanced **opt-in** until this listen pass holds. Do **not** default Full band to guitar-ft or invert the checkbox without it. Do not publish author MoisesDB SDR as product metrics.
+
+Use three rights-cleared clips (local only, not committed):
+
+1. Typical rock/pop full band with a clear guitar part.
+2. Dense mix with piano/keys (expect residual piano in guitar — fail only if **worse** than stock).
+3. Distorted guitar + bass (bleed may remain).
+
+```bash
+export PYTHONPATH=src:.
+audio-isolate --audio CLIP --output ./eval/lead_rhythm/out_stock \
+  --model htdemucs_6s --quality fast
+audio-isolate --audio CLIP --output ./eval/lead_rhythm/out_gft \
+  --model htdemucs_6s --quality fast --guitar-checkpoint htdemucs_6s_guitar_ft
+```
+
+A/B `guitar.wav` in the mixer (or SI-SDR / SIR vs guitar GT when you have it). First guitar-ft run downloads ~330 MB to `$TORCH_HOME/checkpoints/guitar_htdemucs_6s.pt`.
+
 ## Stage 2 — Lead / Rhythm post-process
 
 ### Binary pass (challenger vs current DSP)

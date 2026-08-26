@@ -357,7 +357,7 @@ def test_isolate_job_passes_lead_rhythm_flag(client, headers, monkeypatch):
     assert status is not None
     assert status["status"] == "succeeded", status.get("error")
     assert seen_configs and seen_configs[0].lead_rhythm is True
-    assert seen_configs[0].lead_rhythm_mode == "best_effort"
+    assert seen_configs[0].lead_rhythm_mode == "confident"
     job2 = client.post(
         "/v1/isolate/jobs",
         headers=headers,
@@ -379,8 +379,9 @@ def test_isolate_job_passes_lead_rhythm_flag(client, headers, monkeypatch):
         time.sleep(0.1)
     assert status2 is not None
     assert status2["status"] == "succeeded", status2.get("error")
-    assert seen_configs and seen_configs[0].lead_rhythm is True
-    assert seen_configs[0].lead_rhythm_mode == "best_effort"
+    assert len(seen_configs) >= 2
+    assert seen_configs[-1].lead_rhythm is True
+    assert seen_configs[-1].lead_rhythm_mode == "best_effort"
 
 
 def test_auth_session_404_when_demo_mode_off(client):

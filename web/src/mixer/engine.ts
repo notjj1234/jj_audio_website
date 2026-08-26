@@ -91,6 +91,8 @@ export class StemMixerEngine {
   private buffers = new Map<string, AudioBuffer>();
   private gains = new Map<string, GainNode>();
   private sources = new Map<string, AudioBufferSourceNode>();
+  private masterGain: GainNode | null = null;
+  private limiter: DynamicsCompressorNode | null = null;
   private stemIds: string[] = [];
   private playing = false;
   private startedAt = 0;
@@ -120,7 +122,23 @@ export class StemMixerEngine {
 
   async ensureContext(): Promise<AudioContext> {
     this.ctx = await ensureAudioContext(this.ctx);
+    this.ensureMasterBus();
     return this.ctx;
+  }
+
+  private ensureMasterBus(): void {
+    if (!this.ctx) return;
+    if (this.masterGain && this.limiter) return;
+    this.masterGain = this.ctx.createGain();
+    this.masterGain.gain.value = 1;
+    this.limiter = this.ctx.createDynamicsCompressor();
+    this.limiter.threshold.value = -1;
+    this.limiter.knee.value = 0;
+    this.limiter.ratio.value = 20;
+    this.limiter.attack.value = 0.003;
+    this.limiter.release.value = 0.1;
+    this.masterGain.connect(this.limiter);
+    this.limiter.connect(this.ctx.destination);
   }
 
   async loadStems(
@@ -145,6 +163,7 @@ export class StemMixerEngine {
     if (!this.ctx) {
       return { errors: ["AudioContext unavailable"] };
     }
+    this.ensureMasterBus();
 
     const errors: string[] = [];
     let loaded = 0;
@@ -160,7 +179,7 @@ export class StemMixerEngine {
         this.buffers.set(stem.id, buf);
         this.duration = Math.max(this.duration, buf.duration);
         const gain = this.ctx.createGain();
-        gain.connect(this.ctx.destination);
+        gain.connect(this.masterGain!);
         this.gains.set(stem.id, gain);
       } catch (e) {
         errors.push(`${stem.label}: ${e instanceof Error ? e.message : String(e)}`);

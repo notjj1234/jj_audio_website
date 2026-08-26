@@ -363,7 +363,7 @@ def _desktop_app_version() -> str:
         init_py.read_text(encoding="utf-8"),
         re.M,
     )
-    return match.group(1) if match else "0.1.0"
+    return match.group(1) if match else "0.1.1"
 
 
 def _version_tuple(version: str) -> tuple[int, int, int, int]:

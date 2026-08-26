@@ -309,6 +309,24 @@ class JobManager:
         finally:
             db.close()
 
+    def list_owned(
+        self,
+        user_id: str,
+        *,
+        kind: JobKind | None = None,
+        limit: int = 20,
+    ) -> list[JobRecord]:
+        """Newest-first jobs for a user (serial queue UI)."""
+        db = db_module.SessionLocal()
+        try:
+            q = db.query(Job).filter(Job.user_id == user_id)
+            if kind is not None:
+                q = q.filter(Job.kind == JobKindDB(kind.value))
+            rows = q.order_by(Job.created_at.desc()).limit(limit).all()
+            return [self._row_to_record(r) for r in rows]
+        finally:
+            db.close()
+
     def job_output_dir(self, job_id: str) -> Path:
         path = self.jobs_dir / job_id
         path.mkdir(parents=True, exist_ok=True)

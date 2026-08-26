@@ -63,6 +63,29 @@ SUPPORTED_MODELS = ("htdemucs_6s", "htdemucs", "htdemucs_ft")
 QUALITY_SHIFTS = {"fast": "0", "balanced": "1", "high": "3", "extreme": "5"}
 QUALITY_OVERLAP = {"fast": "0.25", "balanced": "0.25", "high": "0.5", "extreme": "0.75"}
 
+# Transformer Demucs checkpoints reject --segment longer than they were trained on.
+# CLI --segment is an int; htdemucs_6s max is 7.8s so 7 is the largest valid value.
+DEMUCS_MAX_SEGMENT_SEC = {
+    "htdemucs_6s": 7,
+    "htdemucs": 10,
+    "htdemucs_ft": 10,
+}
+
+
+def effective_demucs_segment(model: str, requested: int | float | None) -> int | None:
+    """Clamp Demucs --segment to the model training limit, or None to omit the flag."""
+    if requested is None:
+        return None
+    try:
+        value = int(round(float(requested)))
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    cap = DEMUCS_MAX_SEGMENT_SEC.get(model, 7)
+    return min(value, cap)
+
+
 # Demucs always writes the full stem set for a model, even when an instrument
 # isn't actually present in the mix. These gate the auto-detection heuristic
 # used to flag which produced stems are audibly real vs. near-silent filler.
@@ -257,9 +280,10 @@ class IsolateConfig:
     # Length of the section to process from start_sec. None = through end of file.
     max_duration_sec: float | None = None
     two_stems: str | None = None  # e.g. "vocals" for karaoke-style split
-    # Emit policy for Lead/Rhythm post-process. Default confident-only emit.
+    # Emit policy for Lead/Rhythm post-process. Default path never runs the split
+    # unless lead_rhythm / dual_guitar is True (CLI/eval opt-in).
     lead_rhythm_mode: str = "confident"  # confident | best_effort
-    # Deprecated alias: True → best_effort for backward-compatible callers.
+    # Opt-in: True → run Lead/Rhythm post-process (eval/CLI). Default isolate = False.
     lead_rhythm: bool = False
     dual_guitar: bool = False  # deprecated alias for lead_rhythm
     # Optional stage-1 guitar checkpoint (htdemucs_6s only). None = stock Demucs.
@@ -271,12 +295,19 @@ class IsolateConfig:
     # because it is a lossy tradeoff (see BASS_BLEED_HPF_CUTOFF_HZ docstring),
     # not a correction of the underlying Demucs separation.
     bass_bleed_mitigation: bool = False
+    # Demucs --jobs (keep 1 on 8–16 GB desktop to avoid OOM from parallel chunks).
+    demucs_jobs: int = 1
+    # Demucs --segment length in seconds. None = model default (full-track tensors).
+    # ~8s reduces peak RAM on CPU; clamped per model in effective_demucs_segment
+    # because htdemucs_6s was trained at 7.8s max. Must be int — Demucs argparse
+    # rejects '8.0'.
+    demucs_segment: int | None = 8
 
     def __post_init__(self) -> None:
-        # dual_guitar=True enables lead_rhythm for one-release backward compatibility.
+        # dual_guitar=True enables lead_rhythm (deprecated alias) with best_effort emit.
         if self.dual_guitar and not self.lead_rhythm:
             self.lead_rhythm = True
-        if self.lead_rhythm and self.lead_rhythm_mode == "confident":
+        if self.dual_guitar:
             self.lead_rhythm_mode = "best_effort"
         if self.guitar_checkpoint and self.guitar_checkpoint not in SUPPORTED_GUITAR_CHECKPOINTS:
             raise ValueError(
@@ -728,7 +759,12 @@ def separate_stems(
                 shifts,
                 "--overlap",
                 overlap,
+                "--jobs",
+                str(max(1, int(cfg.demucs_jobs))),
             ]
+            segment = effective_demucs_segment(cfg.model, cfg.demucs_segment)
+            if segment is not None:
+                demucs_args.extend(["--segment", str(segment)])
             if cfg.two_stems:
                 demucs_args.extend(["--two-stems", cfg.two_stems])
             demucs_args.append(str(trimmed))
@@ -770,12 +806,16 @@ def separate_stems(
             progress("bass_bleed", bass_bleed_diag.reason)
 
         lead_rhythm_diag = None
+        # Default isolate path: one combined Guitar stem. Lead/Rhythm only when
+        # explicitly opted in (CLI/eval via lead_rhythm / dual_guitar).
+        run_lead_rhythm = bool(cfg.lead_rhythm or cfg.dual_guitar)
         if "guitar" not in artifacts:
-            progress(
-                "guitar_split",
-                "Lead/Rhythm skipped — no guitar stem (use htdemucs_6s)",
-            )
-        else:
+            if run_lead_rhythm:
+                progress(
+                    "guitar_split",
+                    "Lead/Rhythm skipped — no guitar stem (use htdemucs_6s)",
+                )
+        elif run_lead_rhythm:
             from audio_to_tab.lead_rhythm import split_lead_rhythm_guitar
 
             emit_mode = resolve_lead_rhythm_mode(

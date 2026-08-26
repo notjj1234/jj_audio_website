@@ -5,26 +5,23 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import shutil
 import sys
-import threading
 import time
 import uuid
 import zipfile
-from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
-from streamlit_local_storage import LocalStorage
 
 from ui.common import (
     AUDIO_UPLOAD_TYPES,
-    delete_run,
+    DATA_DIR,
     ensure_src_path,
     list_recent_runs,
     run_output_dir,
     save_upload,
-    write_run_metadata,
 )
 from ui.isolate_state import (
     CUSTOM_STEM_CHOICES,
@@ -33,37 +30,68 @@ from ui.isolate_state import (
     DEFAULT_SPEED_PRESET,
     SEPARATION_PRESETS,
     SPEED_PRESETS,
+    WORKSPACE_KEY,
+    WORKSPACE_NEXT_KEY,
+    WORKSPACE_TABS,
+    ISOLATE_UI_STATE_FILENAME,
+    ISOLATE_USER_ID_FILENAME,
+    LISTEN_PICKER_KEY,
+    LISTEN_PICKER_NEXT_KEY,
+    apply_listen_picker_pending,
     apply_pending_output_name,
-    checklist_items,
+    apply_pending_youtube_url,
+    apply_stored_isolate_ui_state,
+    apply_workspace_tab,
     clamp_region_bounds,
-    custom_selected_stems,
-    estimate_job_seconds,
-    estimate_remaining_seconds,
-    estimated_stage_seconds,
-    expects_guitar_stem,
-    format_checklist_markdown,
-    format_eta_line,
-    format_progress_label,
-    intra_stage_fraction,
-    isolation_stages_for_job,
+    format_source_caption,
+    format_source_title,
+    infer_source_kind,
+    isolate_ui_state_payload,
+    listen_picker_default,
+    load_persist_isolate_user_id,
+    partition_queue_jobs,
+    pending_audio_needs_resave,
+    pending_upload_fp_for_stale,
+    plan_isolate_job_poll,
+    queue_clear_youtube_url,
     queue_reopen_output_name,
-    resolve_active_stage,
+    read_isolate_ui_state,
+    recent_runs_with_owner_fallback,
     resolve_custom_separation,
     resolve_separation_preset,
     resolve_speed_preset,
+    running_progress_view,
+    select_rehydrate_row,
+    session_mixer_artifacts_ok,
     should_hide_stale_results,
-    stage_progress_percent,
     sync_output_name_on_upload,
     upload_fingerprint,
+    write_isolate_ui_state,
 )
-from ui.media import cleanup_mix_artifacts, ensure_mixer_audio_paths, stem_media_urls
+from ui.isolate_jobs import (
+    IsolateJobSpec,
+    apply_succeeded_job_to_session,
+    delete_all_finished_jobs,
+    delete_finished_job,
+    delete_library_run,
+    enqueue_job,
+    ensure_worker_started,
+    format_job_error,
+    jobs_visible_in_queue,
+    list_jobs,
+    merge_library_runs,
+    queued_job_ids,
+    queued_wait_caption,
+    read_status,
+    remove_job,
+)
+from ui.media import ensure_mixer_audio_paths, ensure_region_preview_wav, stem_media_urls
 from ui.stem_mixer_component import component_build_available, stem_mixer
 
 ensure_src_path()
 
 from audio_to_tab.isolate import (  # noqa: E402
     DEMUCS_INSTALL_HINT,
-    IsolateConfig,
     MIN_REGION_SEC,
     RegionError,
     format_region_label,
@@ -71,7 +99,6 @@ from audio_to_tab.isolate import (  # noqa: E402
     format_time_sec,
     probe_duration_sec,
     resolve_region,
-    separate_stems,
 )
 from audio_to_tab.hardware import (  # noqa: E402
     CUDA_UNAVAILABLE_MESSAGE,
@@ -80,7 +107,12 @@ from audio_to_tab.hardware import (  # noqa: E402
     desktop_system_summary,
     ensure_cuda_available,
     get_desktop_probe,
-    separate_progress_message,
+    get_desktop_probe_without_torch,
+)
+from audio_to_tab.ingest import (  # noqa: E402
+    YouTubeDownloadError,
+    download_youtube_audio,
+    is_youtube_url,
 )
 from audio_to_tab.mixer import (  # noqa: E402
     DB_DEFAULT,
@@ -90,19 +122,16 @@ from audio_to_tab.mixer import (  # noqa: E402
     stem_display_name,
     waveform_peaks,
 )
+from audio_to_tab.pipeline import YOUTUBE_DISCLAIMER  # noqa: E402
 from audio_to_tab.separate import is_demucs_available  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 STEM_HINTS = {
     "piano": "May sound less accurate than other tracks",
-    "lead_guitar": "Only when the split is confident; Guitar is the full guitar track.",
-    "rhythm_guitar": "Only when the split is confident; Guitar is the full guitar track.",
     "guitar1": "Legacy spatial label",
     "guitar2": "Legacy spatial label",
 }
-
-_LS_USER_ID_KEY = "isolate_user_id"
-_LS_COMPONENT_KEY = "isolate_local_storage"
-
 
 def _stateful_expander(label: str, *, key: str, default: bool = False):
     """
@@ -118,53 +147,34 @@ def _stateful_expander(label: str, *, key: str, default: bool = False):
 
 
 def _get_browser_user_id() -> str:
-    """
-    Persistent anonymous id for this browser (localStorage), cached in session_state.
+    """Anonymous owner id for this session, persisted to a local file."""
+    return load_persist_isolate_user_id(st.session_state, DATA_DIR / ISOLATE_USER_ID_FILENAME)
 
-    The LocalStorage component often returns an empty dict on the first script run
-    before browser data arrives, so we hydrate once before minting a new id.
-    """
-    cached = st.session_state.get("isolate_user_id")
-    if isinstance(cached, str) and cached:
-        return cached
 
-    local_s = LocalStorage(key=_LS_COMPONENT_KEY)
-    stored_items = st.session_state.get(_LS_COMPONENT_KEY)
-    if isinstance(stored_items, dict):
-        local_s.storedItems = stored_items
-    else:
-        stored_items = local_s.getAll() or {}
+def _isolate_ui_state_path() -> Path:
+    return DATA_DIR / ISOLATE_UI_STATE_FILENAME
 
-    stored = None
-    if isinstance(stored_items, dict):
-        stored = stored_items.get(_LS_USER_ID_KEY)
-    if not stored:
-        stored = local_s.getItem(_LS_USER_ID_KEY)
 
-    if isinstance(stored, str) and stored.strip():
-        user_id = stored.strip()
-        st.session_state["isolate_user_id"] = user_id
-        return user_id
+def _persist_isolate_ui_state() -> None:
+    write_isolate_ui_state(_isolate_ui_state_path(), isolate_ui_state_payload(st.session_state))
 
-    # First empty observation: wait briefly for the component to report browser state,
-    # then rerun once before minting so we don't overwrite an existing id.
-    if not st.session_state.get("_isolate_user_id_hydrated"):
-        st.session_state["_isolate_user_id_hydrated"] = True
-        time.sleep(0.5)
-        stored_items = st.session_state.get(_LS_COMPONENT_KEY) or {}
-        if isinstance(stored_items, dict):
-            local_s.storedItems = stored_items
-            stored = stored_items.get(_LS_USER_ID_KEY) or local_s.getItem(_LS_USER_ID_KEY)
-            if isinstance(stored, str) and stored.strip():
-                user_id = stored.strip()
-                st.session_state["isolate_user_id"] = user_id
-                return user_id
-        st.rerun()
 
-    user_id = uuid.uuid4().hex
-    local_s.setItem(_LS_USER_ID_KEY, user_id, key="isolate_set_user_id")
-    st.session_state["isolate_user_id"] = user_id
-    return user_id
+def _restore_isolate_ui_state() -> None:
+    apply_stored_isolate_ui_state(
+        st.session_state,
+        read_isolate_ui_state(_isolate_ui_state_path()),
+    )
+
+
+def _session_has_mixer_wavs() -> bool:
+    return session_mixer_artifacts_ok(
+        st.session_state,
+        wav_exists=lambda path: Path(path).is_file(),
+    )
+
+
+def _wav_exists(path: str) -> bool:
+    return Path(path).is_file()
 
 
 def _stem_waveform_peaks(path: Path, *, num_points: int = 80) -> list[float]:
@@ -196,6 +206,16 @@ def _stem_paths_from_artifacts(artifacts_map: dict) -> dict[str, Path]:
 
 def _increment_upload_key() -> None:
     st.session_state["isolate_upload_key"] = st.session_state.get("isolate_upload_key", 0) + 1
+    st.session_state.pop("isolate_upload_fp", None)
+    st.session_state.pop("isolate_pending_audio_path", None)
+    st.session_state.pop("isolate_pending_fp", None)
+    st.session_state.pop("isolate_duration_sec", None)
+    st.session_state.pop("isolate_duration_fp", None)
+
+
+def _clear_pending_source() -> None:
+    st.session_state.pop("isolate_pending_audio_path", None)
+    st.session_state.pop("isolate_pending_fp", None)
     st.session_state.pop("isolate_upload_fp", None)
     st.session_state.pop("isolate_duration_sec", None)
     st.session_state.pop("isolate_duration_fp", None)
@@ -295,23 +315,11 @@ def default_isolate_selected_stems(
     produced_stem_names: list[str],
     presence: dict,
 ) -> dict[str, bool]:
-    """
-    Initial Detected Instruments checkbox state.
-
-    Lead Guitar and Rhythm Guitar are always checked when present.
-    Combined Guitar is unchecked when both derived stems exist.
-    """
-    selected = {
+    """Initial Detected Instruments checkbox state — prefer present stems."""
+    return {
         name: bool(presence.get(name, {}).get("present", True))
         for name in produced_stem_names
     }
-    for name in ("lead_guitar", "rhythm_guitar"):
-        if name in selected:
-            selected[name] = True
-    if "lead_guitar" in selected and "rhythm_guitar" in selected:
-        if "guitar" in selected:
-            selected["guitar"] = False
-    return selected
 
 
 def _render_stem_presence_selector(
@@ -397,23 +405,6 @@ def _build_current_mix(
     return mix_path
 
 
-_ISOLATION_STAGE_DISPLAY = {
-    "ingest": "Preparing audio…",
-    "separate": "Separating tracks… this can take a while on CPU",
-    "collect": "Collecting tracks…",
-    "bass_bleed": "Checking guitar…",
-    "guitar_split": "Splitting lead / rhythm guitar…",
-    "presence": "Checking which tracks have sound…",
-    "done": "Finishing…",
-}
-
-
-def _stage_display(stage: str, *, device: str, fallback: str) -> str:
-    if stage == "separate":
-        return separate_progress_message(device).replace(" — ", "… ", 1)
-    return _ISOLATION_STAGE_DISPLAY.get(stage, fallback)
-
-
 def _render_live_mixer(
     stem_paths: dict[str, Path], *, track_title: str = "", base_name: str = "stems"
 ) -> dict | None:
@@ -489,15 +480,21 @@ def _ensure_pending_audio(uploaded: object) -> Path | None:
     fp = upload_fingerprint(uploaded)
     if fp is None:
         return None
-    last_fp = st.session_state.get("isolate_upload_fp")
     pending = st.session_state.get("isolate_pending_audio_path")
-    if fp == last_fp and pending and Path(pending).exists():
-        return Path(pending)
-    if uploaded is not None:
-        path = save_upload(uploaded)
-        st.session_state["isolate_pending_audio_path"] = str(path)
-        return path
-    return None
+    pending_fp = st.session_state.get("isolate_pending_fp")
+    pending_exists = bool(pending and Path(pending).exists())
+    if pending_audio_needs_resave(
+        uploaded_fp=fp,
+        pending_fp=pending_fp if isinstance(pending_fp, str) else None,
+        pending_path_exists=pending_exists,
+    ):
+        if uploaded is not None:
+            path = save_upload(uploaded)
+            st.session_state["isolate_pending_audio_path"] = str(path)
+            st.session_state["isolate_pending_fp"] = fp
+            return path
+        return None
+    return Path(pending) if pending_exists else None
 
 
 def _active_source_path(uploaded: object) -> Path | None:
@@ -510,11 +507,28 @@ def _active_source_path(uploaded: object) -> Path | None:
     return None
 
 
+def _closed_selectbox(label: str, options: list[str], *, key: str, help: str | None = None):
+    """Dropdown that does not accept typed free-text (Streamlit ≥1.55 combobox)."""
+    kwargs: dict = {
+        "label": label,
+        "options": options,
+        "key": key,
+        "accept_new_options": False,
+    }
+    if help:
+        kwargs["help"] = help
+    try:
+        return st.selectbox(**kwargs, filter_mode=None)
+    except TypeError:
+        return st.selectbox(**kwargs)
+
+
 def _render_region_controls(audio_path: Path | None) -> tuple[float, float | None, str | None]:
     """
-    Region UI on the main path. Returns (start_sec, max_duration_sec, region_label).
+    Region sliders (Advanced). Returns (start_sec, max_duration_sec, region_label).
 
-    ``max_duration_sec`` is None for full-file processing.
+    ``max_duration_sec`` is None for full-file processing. Preview is rendered
+    on the Basic path — not here.
     """
     if audio_path is None or not audio_path.exists():
         return 0.0, None, None
@@ -526,7 +540,7 @@ def _render_region_controls(audio_path: Path | None) -> tuple[float, float | Non
 
     st.caption(f"Length: **{format_time_sec(duration)}** ({duration:.1f} s)")
 
-    region_key = f"isolate_region_{st.session_state.get('isolate_upload_fp', 'none')}"
+    region_key = f"isolate_region_{st.session_state.get('isolate_pending_fp') or st.session_state.get('isolate_upload_fp', 'none')}"
     if region_key not in st.session_state:
         st.session_state[region_key] = (0.0, float(duration))
 
@@ -565,17 +579,6 @@ def _render_region_controls(audio_path: Path | None) -> tuple[float, float | Non
     region_label = format_region_label(start_sec, length)
     st.caption(f"**{region_label}** ({length:.0f} s)")
 
-    try:
-        audio_bytes = audio_path.read_bytes()
-        st.audio(
-            audio_bytes,
-            format="audio/wav" if audio_path.suffix.lower() == ".wav" else None,
-            start_time=int(start_sec),
-            end_time=int(end_sec),
-        )
-    except Exception:
-        st.audio(str(audio_path))
-
     if length < MIN_REGION_SEC:
         st.error(f"Section must be at least {MIN_REGION_SEC:.0f} seconds.")
         return start_sec, None, region_label
@@ -587,21 +590,161 @@ def _render_region_controls(audio_path: Path | None) -> tuple[float, float | Non
     return start_sec, length, region_label
 
 
+def _render_section_preview(
+    audio_path: Path | None,
+    start_sec: float,
+    max_duration_sec: float | None,
+    region_label: str | None,
+) -> None:
+    """Play the section that will be isolated (or the full file)."""
+    if audio_path is None or not audio_path.exists():
+        return
+    fp = str(
+        st.session_state.get("isolate_pending_fp")
+        or st.session_state.get("isolate_upload_fp")
+        or audio_path.name
+    )
+    if max_duration_sec is None:
+        st.caption("Preview — full file (what will be processed)")
+        try:
+            st.audio(str(audio_path))
+        except Exception:
+            pass
+        return
+    label = region_label or format_region_label(start_sec, float(max_duration_sec))
+    st.caption(f"Preview — **{label}** ({float(max_duration_sec):.0f} s)")
+    try:
+        with st.spinner("Preparing section preview…"):
+            preview = ensure_region_preview_wav(
+                audio_path,
+                start_sec=start_sec,
+                length_sec=float(max_duration_sec),
+                fingerprint=fp,
+                cache_dir=DATA_DIR / "region_previews",
+            )
+        st.audio(str(preview))
+    except Exception:
+        try:
+            st.audio(str(audio_path))
+        except Exception:
+            pass
+
+
+def _persist_kwargs() -> dict:
+    """Keep isolate widgets across page switches when Streamlit supports it."""
+    try:
+        import inspect
+
+        if "persist_state" in inspect.signature(st.radio).parameters:
+            return {"persist_state": "session"}
+    except Exception:
+        pass
+    return {}
+
+
 def _render_separation_controls() -> dict:
-    """Track choice, upload, region, speed preset; quality/device/name in advanced."""
+    """New tab: source, tracks, speed, Advanced, section preview."""
     apply_pending_output_name(st.session_state)
+    apply_pending_youtube_url(st.session_state)
     if "isolate_separation_preset" not in st.session_state:
         st.session_state["isolate_separation_preset"] = DEFAULT_SEPARATION_PRESET
     if "isolate_speed_preset" not in st.session_state:
         st.session_state["isolate_speed_preset"] = DEFAULT_SPEED_PRESET
 
-    st.subheader("What to separate")
+    persist = _persist_kwargs()
+
+    uploaded = st.file_uploader(
+        "Upload MP3 / WAV / FLAC / M4A",
+        type=AUDIO_UPLOAD_TYPES,
+        key=f"isolate_upload_{st.session_state.get('isolate_upload_key', 0)}",
+    )
+    _sync_upload_output_name(uploaded)
+    if uploaded is not None:
+        _ensure_pending_audio(uploaded)
+
+    youtube_error: str | None = None
+    youtube_enabled = st.checkbox(
+        "Download from YouTube",
+        value=not bool(getattr(sys, "frozen", False)),
+        key="isolate_youtube_enabled",
+        help=(
+            "Off by default in the desktop installer. Enable only if you have rights "
+            "to the audio. Arbitrary URLs are rejected."
+        ),
+        **persist,
+    )
+    youtube_url = ""
+    if youtube_enabled:
+        youtube_url = st.text_input(
+            "Or paste a YouTube URL",
+            key="isolate_youtube_url",
+            **persist,
+        )
+        st.caption(YOUTUBE_DISCLAIMER)
+        url_ready = youtube_url.strip()
+        if url_ready and not is_youtube_url(url_ready):
+            youtube_error = "Only YouTube URLs are allowed."
+            st.error(youtube_error)
+        elif url_ready and st.button(
+            "Download audio",
+            key="isolate_youtube_download",
+            help="Fetch the audio now so you can preview it before starting isolation.",
+        ):
+            try:
+                with st.spinner("Downloading YouTube audio…"):
+                    path = download_youtube_audio(url_ready, run_output_dir())
+                st.session_state["isolate_pending_audio_path"] = str(path)
+                st.session_state["isolate_pending_fp"] = f"youtube:{url_ready}"
+                st.session_state["isolate_upload_fp"] = f"youtube:{url_ready}"
+                if not st.session_state.get("isolate_output_name"):
+                    st.session_state["isolate_output_name"] = path.stem
+                st.rerun()
+            except YouTubeDownloadError as exc:
+                youtube_error = str(exc)
+                st.error(youtube_error)
+            except Exception as exc:
+                youtube_error = f"YouTube download failed: {exc}"
+                st.error(youtube_error)
+        pending = st.session_state.get("isolate_pending_audio_path")
+        pending_fp = st.session_state.get("isolate_pending_fp")
+        if (
+            pending
+            and Path(pending).exists()
+            and isinstance(pending_fp, str)
+            and pending_fp == f"youtube:{url_ready}"
+        ):
+            st.caption(f"Ready: **{Path(pending).stem}**")
+    elif getattr(sys, "frozen", False):
+        st.caption(
+            "YouTube download is off in this installer build. Enable it above if you "
+            "have rights to the audio."
+        )
+
+    if st.button("New file", key="isolate_new_file"):
+        _increment_upload_key()
+        st.session_state.pop("carry_over_audio_path", None)
+        st.session_state.pop("carry_over_audio_name", None)
+        st.rerun()
+
+    carry_over_path = st.session_state.get("carry_over_audio_path")
+    carry_over_name = st.session_state.get("carry_over_audio_name")
+    if not uploaded and carry_over_path and Path(carry_over_path).exists():
+        st.caption(
+            f"Using audio carried over from Tab PDF: **{carry_over_name}**. "
+            "Upload a file above to use something else instead."
+        )
+    default_name = Path(uploaded.name).stem if uploaded else Path(carry_over_name or "").stem
+    if default_name and not st.session_state.get("isolate_output_name"):
+        st.session_state["isolate_output_name"] = default_name
+
+    audio_path = _active_source_path(uploaded)
+
     preset_id = st.radio(
         "Tracks",
         options=list(SEPARATION_PRESETS.keys()),
         format_func=_preset_radio_label,
         key="isolate_separation_preset",
-        label_visibility="collapsed",
+        **persist,
     )
 
     custom_stems: list[str] = []
@@ -610,12 +753,11 @@ def _render_separation_controls() -> dict:
         cols = st.columns(3)
         for idx, (stem_id, label) in enumerate(CUSTOM_STEM_CHOICES.items()):
             with cols[idx % 3]:
-                # value= only seeds the first render; the key keeps the user's
-                # choice across the reruns the mixer and uploader trigger.
                 checked = st.checkbox(
                     label,
                     value=stem_id in DEFAULT_CUSTOM_STEMS,
                     key=f"isolate_custom_{stem_id}",
+                    **persist,
                 )
                 if checked:
                     custom_stems.append(stem_id)
@@ -630,48 +772,23 @@ def _render_separation_controls() -> dict:
     if resolved["caveat"]:
         st.caption(resolved["caveat"])
 
-    uploaded = st.file_uploader(
-        "Upload MP3 / WAV / FLAC / M4A",
-        type=AUDIO_UPLOAD_TYPES,
-        key=f"isolate_upload_{st.session_state.get('isolate_upload_key', 0)}",
+    probe = (
+        get_desktop_probe()
+        if st.session_state.get("isolate_options_expanded")
+        else get_desktop_probe_without_torch()
     )
-    _sync_upload_output_name(uploaded)
-    if uploaded is not None:
-        _ensure_pending_audio(uploaded)
-
-    carry_over_path = st.session_state.get("carry_over_audio_path")
-    carry_over_name = st.session_state.get("carry_over_audio_name")
-    if not uploaded and carry_over_path and Path(carry_over_path).exists():
-        st.caption(
-            f"Using audio carried over from Tab PDF: **{carry_over_name}**. "
-            "Upload a file above to use something else instead."
-        )
-    default_name = Path(uploaded.name).stem if uploaded else Path(carry_over_name or "").stem
-    if default_name and not st.session_state.get("isolate_output_name"):
-        st.session_state["isolate_output_name"] = default_name
-
-    audio_path = _active_source_path(uploaded)
-    start_sec, max_duration_sec, region_label = _render_region_controls(audio_path)
-
-    probe = get_desktop_probe()
-    st.caption(desktop_system_summary(probe))
-    st.caption(desktop_recommend_caption(probe))
-
-    st.subheader("Processing speed")
     speed_id = st.radio(
         "Speed",
         options=list(SPEED_PRESETS.keys()),
         format_func=_speed_preset_radio_label,
         key="isolate_speed_preset",
-        label_visibility="collapsed",
         horizontal=True,
+        **persist,
     )
     speed = resolve_speed_preset(speed_id, probe)
     if speed["help"]:
         st.caption(speed["help"])
 
-    # The speed preset drives Quality/Device; an advanced override sticks until the
-    # user picks a different speed.
     if st.session_state.get("isolate_speed_applied") != speed["id"]:
         st.session_state["isolate_speed_applied"] = speed["id"]
         st.session_state["isolate_quality"] = speed["quality"]
@@ -681,18 +798,24 @@ def _render_separation_controls() -> dict:
     if st.session_state.get("isolate_device") not in device_options:
         st.session_state["isolate_device"] = device_options[0]
 
+    if audio_path and audio_path.exists():
+        st.caption("Optional section: open Advanced")
+
+    start_sec, max_duration_sec, region_label = 0.0, None, None
     with _stateful_expander(
-        "Advanced options", key="isolate_options_expanded", default=True
+        "Advanced options", key="isolate_options_expanded", default=False
     ):
-        quality = st.selectbox(
+        st.caption(desktop_system_summary(probe))
+        st.caption(desktop_recommend_caption(probe))
+        quality = _closed_selectbox(
             "Quality",
-            options=["fast", "balanced", "high", "extreme"],
-            help="Higher quality is slower, especially on CPU.",
+            ["fast", "balanced", "high", "extreme"],
             key="isolate_quality",
+            help="Higher quality is slower, especially on CPU.",
         )
-        device = st.selectbox(
+        device = _closed_selectbox(
             "Device",
-            options=device_options,
+            device_options,
             key="isolate_device",
             help="GPU acceleration is NVIDIA CUDA only.",
         )
@@ -700,33 +823,37 @@ def _render_separation_controls() -> dict:
             "Output name",
             help="Used for downloaded file names. Defaults to the uploaded file's name.",
             key="isolate_output_name",
+            **persist,
         )
+        # Opt-in until eval/lead_rhythm Stage-1 3-clip listen beats stock 6s.
         st.checkbox(
-            "Always split Lead/Rhythm (best effort)",
-            help=(
-                "When off (default), Lead and Rhythm tracks are created only when "
-                "the split is confident. Combined Guitar is always available."
-            ),
-            key="isolate_lead_rhythm_best_effort",
-        )
-        use_guitar_ft = st.checkbox(
             "Use guitar-focused Demucs weights (experimental)",
             help=(
-                "Optional htdemucs_6s fine-tune for cleaner guitar isolation on Full band. "
-                "Downloads ~330 MB on first use; falls back to stock weights on failure."
+                "Optional guitar-focused htdemucs_6s weights (~330 MB first download, "
+                "cached under TORCH_HOME/checkpoints). Falls back to stock if download "
+                "or load fails. Piano/synth and bass can still bleed into guitar. "
+                "Meta Demucs weights are provided for scientific/research use."
             ),
             key="isolate_guitar_ft",
+            **persist,
         )
+        st.markdown("**Section (optional)**")
+        start_sec, max_duration_sec, region_label = _render_region_controls(audio_path)
 
+    if audio_path and audio_path.exists():
+        _render_section_preview(audio_path, start_sec, max_duration_sec, region_label)
+
+    quality = st.session_state.get("isolate_quality", speed["quality"])
+    device = st.session_state.get("isolate_device", speed["device"])
     output_name = st.session_state.get("isolate_output_name", default_name or "")
     guitar_checkpoint = None
-    if use_guitar_ft and resolved["model"] == "htdemucs_6s":
+    if st.session_state.get("isolate_guitar_ft") and resolved["model"] == "htdemucs_6s":
         guitar_checkpoint = "htdemucs_6s_guitar_ft"
     return {
         "model": resolved["model"],
         "two_stems": resolved["two_stems"],
         "custom_stems": custom_stems,
-        "error": preset_error,
+        "error": preset_error or youtube_error,
         "quality": quality,
         "device": device,
         "start_sec": start_sec,
@@ -734,12 +861,11 @@ def _render_separation_controls() -> dict:
         "uploaded": uploaded,
         "output_name": output_name,
         "region_label": region_label,
-        "lead_rhythm_mode": (
-            "best_effort"
-            if st.session_state.get("isolate_lead_rhythm_best_effort")
-            else "confident"
-        ),
         "guitar_checkpoint": guitar_checkpoint,
+        "youtube_url": youtube_url.strip() if youtube_enabled else "",
+        "tracks_label": resolved.get("tracks") or "",
+        "preset_label": resolved.get("label") or "",
+        "audio_path": audio_path,
     }
 
 
@@ -751,513 +877,247 @@ def _ffmpeg_install_hint() -> str:
     return "Install ffmpeg: sudo apt install ffmpeg (or your distro equivalent)"
 
 
-def main() -> None:
-    st.title("Audio Isolation")
-
-    if not shutil.which("ffmpeg"):
-        st.error(
-            "ffmpeg is required for audio conversion but was not found on PATH. "
-            f"{_ffmpeg_install_hint()}"
-        )
+def _rehydrate_artifacts_from_disk(browser_id: str | None) -> None:
+    """Restore mixer results from last-viewed run, else the latest library row."""
+    rows = _library_rows_available(browser_id)
+    row = select_rehydrate_row(st.session_state, rows, wav_exists=_wav_exists)
+    if row is None:
         return
+    _apply_library_row(row, viewing_mode="latest", reopen_name=False)
 
-    demucs_ok = is_demucs_available()
-    if not demucs_ok:
-        st.error(
-            "Audio separation requires Demucs, which is not installed. "
-            f"{DEMUCS_INSTALL_HINT}"
-        )
-        return
 
-    has_results = bool(st.session_state.get("isolate_artifacts"))
-    browser_id = _get_browser_user_id()
+def _refresh_isolate_from_disk(browser_id: str | None) -> None:
+    ensure_worker_started()
+    _rehydrate_artifacts_from_disk(browser_id)
+    _persist_isolate_ui_state()
+    st.rerun()
 
-    choice = _render_separation_controls()
-    uploaded = choice["uploaded"]
-    start_sec = choice["start_sec"]
-    max_duration_sec = choice["max_duration_sec"]
-    region_label = choice["region_label"]
-    output_name = choice["output_name"]
 
-    pending_new_upload = uploaded is not None
-    pending_upload_fp = st.session_state.get("isolate_upload_fp")
-    if should_hide_stale_results(
-        pending_upload_fp=pending_upload_fp,
-        has_artifacts=has_results,
-    ):
-        upload_name = uploaded.name if uploaded else "New file"
-        st.info(
-            f"**{upload_name}** is ready — click **Separate tracks** to replace the "
-            "current results."
-        )
+def _open_mixer_workspace() -> None:
+    """Request Mixer on the next full run, before ``st.tabs`` is instantiated."""
+    st.session_state[WORKSPACE_NEXT_KEY] = "Mixer"
 
-    recent_runs = list_recent_runs("isolate", owner=browser_id)
-    if recent_runs:
-        with _stateful_expander(
-            "Recent separations", key="isolate_recent_expanded", default=False
-        ):
-            if pending_new_upload:
-                st.caption(
-                    "Finish or clear your new upload before reopening a past separation."
-                )
-            for run in recent_runs:
-                run_artifacts = run.get("artifacts", {})
-                available = bool(run_artifacts) and all(
-                    Path(p).exists()
-                    for name, p in run_artifacts.items()
-                    if Path(p).suffix.lower() == ".wav"
-                )
-                cols = st.columns([3, 1, 1])
-                with cols[0]:
-                    created_at = run.get("created_at")
-                    when = (
-                        datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
-                        if created_at
-                        else ""
-                    )
-                    st.write(run.get("title") or "tracks")
-                    st.caption(when if available else f"{when} — files no longer available")
-                with cols[1]:
-                    if available and st.button(
-                        "Reopen",
-                        key=f"reopen_isolate_{run['run_dir']}",
-                        disabled=pending_new_upload,
-                    ):
-                        presence = _load_stem_presence(run_artifacts)
-                        produced_stem_names = [
-                            name
-                            for name, path in run_artifacts.items()
-                            if name
-                            not in (
-                                "guitar_split_diagnostics",
-                                "stem_presence_diagnostics",
-                                "bass_bleed_diagnostics",
-                            )
-                            and Path(path).suffix.lower() == ".wav"
-                        ]
-                        st.session_state["isolate_artifacts"] = run_artifacts
-                        title = run.get("title") or "tracks"
-                        st.session_state["isolate_base_name"] = title
-                        st.session_state["isolate_run_dir"] = run["run_dir"]
-                        queue_reopen_output_name(st.session_state, title)
-                        st.session_state.pop("isolate_volumes_db", None)
-                        st.session_state.pop("isolate_master_volume_db", None)
-                        st.session_state.pop("isolate_mixer_state", None)
-                        st.session_state.pop("isolate_mix_ready", None)
-                        st.session_state.pop("isolate_mix_fp", None)
-                        st.session_state.pop("isolate_zip_fp", None)
-                        st.session_state["isolate_selected_stems"] = (
-                            default_isolate_selected_stems(produced_stem_names, presence)
-                        )
-                        st.session_state.pop("isolate_flash", None)
-                        st.session_state.pop("isolate_source_audio_path", None)
-                        _increment_upload_key()
-                        reopened_paths = _stem_paths_from_artifacts(run_artifacts)
-                        if reopened_paths:
-                            st.session_state["isolate_results_fp"] = _artifact_fingerprint(
-                                reopened_paths
-                            )
-                        st.rerun()
-                with cols[2]:
-                    if st.button(
-                        "Delete",
-                        key=f"delete_isolate_{run['run_dir']}",
-                        disabled=pending_new_upload,
-                    ):
-                        # Keep "Recent separations" open across the rerun below so the
-                        # user doesn't lose their place.
-                        st.session_state["isolate_recent_expanded"] = True
-                        deleted = delete_run(run["run_dir"])
-                        if deleted:
-                            if st.session_state.get("isolate_run_dir") == run["run_dir"]:
-                                for key in (
-                                    "isolate_artifacts",
-                                    "isolate_base_name",
-                                    "isolate_run_dir",
-                                    "isolate_volumes_db",
-                                    "isolate_master_volume_db",
-                                    "isolate_mixer_state",
-                                    "isolate_mix_ready",
-                                    "isolate_mix_fp",
-                                    "isolate_zip_fp",
-                                    "isolate_selected_stems",
-                                    "isolate_results_fp",
-                                    "isolate_source_audio_path",
-                                    "isolate_flash",
-                                ):
-                                    st.session_state.pop(key, None)
-                            st.rerun()
-                        else:
-                            st.error("Could not delete that separation.")
 
-    run_separate = st.button(
-        "Separate tracks",
-        type="primary",
-        disabled=not demucs_ok,
-        key="isolate_separate",
+def _open_queue_workspace() -> None:
+    """Request Queue on the next full run, before ``st.tabs`` is instantiated."""
+    st.session_state[WORKSPACE_NEXT_KEY] = "Queue"
+
+
+def _ensure_workspace_tab(*, has_artifacts: bool) -> None:
+    apply_workspace_tab(st.session_state, has_artifacts=has_artifacts)
+
+
+def _staged_source_name() -> str:
+    pending = st.session_state.get("isolate_pending_audio_path")
+    if pending and Path(str(pending)).exists():
+        return Path(str(pending)).stem
+    return "New file"
+
+
+def _render_running_progress(status: dict) -> None:
+    view = running_progress_view(status, time.time())
+    st.progress(min(1.0, max(0.0, float(view["percent"]))))
+    bits = [str(view.get("label") or ""), str(view.get("eta_line") or "")]
+    st.markdown(" · ".join(b for b in bits if b))
+    if view.get("message"):
+        st.caption(view["message"])
+    st.markdown(view["checklist_md"])
+
+
+def _job_source_title(job: dict) -> str:
+    title = job.get("title") or str(job.get("id") or "")[:8] or "track"
+    kind = infer_source_kind(
+        source_kind=job.get("source_kind"),
+        source_fingerprint=job.get("source_fingerprint"),
     )
+    return format_source_title(str(title), kind)
 
-    if run_separate:
-        if choice["error"]:
-            st.error(choice["error"])
-            return
 
-        carry_over_path = st.session_state.get("carry_over_audio_path")
-        using_carry_over = bool(
-            not uploaded and carry_over_path and Path(carry_over_path).exists()
-        )
-        if not uploaded and not using_carry_over:
-            st.error("Upload an audio file.")
-            return
+def _render_job_queue_panel() -> None:
+    ensure_worker_started()
+    parts = partition_queue_jobs(jobs_visible_in_queue(list_jobs(limit=30)))
+    if parts["empty"]:
+        st.caption("No jobs yet.")
+        return
+    if parts["succeeded"]:
+        if st.button("Delete all finished", key="isolate_delete_all_finished"):
+            dirs = delete_all_finished_jobs(parts["succeeded"])
+            _clear_mixer_if_run_deleted(dirs)
+            st.rerun()
+    waiting_ids = queued_job_ids()
+    for job in parts["in_flight"]:
+        _render_queue_job_row(job, waiting_ids=waiting_ids)
+    for job in parts["succeeded"]:
+        _render_queue_job_row(job, waiting_ids=waiting_ids)
 
-        if max_duration_sec is not None and max_duration_sec < MIN_REGION_SEC:
-            st.error(f"Section must be at least {MIN_REGION_SEC:.0f} seconds.")
-            return
 
-        output_dir = run_output_dir()
-        try:
-            ensure_cuda_available(choice["device"], get_desktop_probe())
-        except RuntimeError:
-            st.error(CUDA_UNAVAILABLE_MESSAGE)
-            return
+def _clear_mixer_if_run_deleted(run_dirs: list[str] | str | None) -> None:
+    if not run_dirs:
+        return
+    targets = {str(run_dirs)} if isinstance(run_dirs, str) else {str(d) for d in run_dirs if d}
+    current = st.session_state.get("isolate_run_dir") or st.session_state.get(
+        "isolate_viewing_run_dir"
+    )
+    if current and str(current) in targets:
+        _clear_loaded_mixer()
+        _persist_isolate_ui_state()
 
-        config = IsolateConfig(
-            model=choice["model"],
-            quality=choice["quality"],
-            device=choice["device"],
-            start_sec=start_sec,
-            max_duration_sec=max_duration_sec,
-            two_stems=choice["two_stems"],
-            lead_rhythm_mode=choice.get("lead_rhythm_mode", "confident"),
-            guitar_checkpoint=choice.get("guitar_checkpoint"),
-        )
 
-        separation_started = time.monotonic()
-
-        try:
-            pending = st.session_state.get("isolate_pending_audio_path")
-            if uploaded and pending and Path(pending).exists():
-                audio_path = Path(pending)
-            elif uploaded:
-                audio_path = save_upload(uploaded)
-            else:
-                audio_path = Path(carry_over_path)
-
-            job_audio_sec: float | None = None
-            try:
-                file_dur = probe_duration_sec(audio_path)
-                if max_duration_sec is not None:
-                    _, validated_length, _ = resolve_region(
-                        file_dur,
-                        start_sec,
-                        start_sec + max_duration_sec,
-                    )
-                    config.max_duration_sec = validated_length
-                    job_audio_sec = float(validated_length)
+def _render_queue_job_row(job: dict, *, waiting_ids: list[str]) -> None:
+    status = job.get("status", "unknown")
+    title = _job_source_title(job)
+    job_id = str(job.get("id") or "")
+    label = "done" if status == "succeeded" else status
+    n_actions = 2 if status == "succeeded" else 1
+    cols = st.columns([4, *([1] * n_actions)])
+    with cols[0]:
+        st.write(f"**{title}** — {label}")
+        if status == "failed":
+            st.caption(format_job_error(job.get("error") or job.get("message")))
+        elif status == "queued":
+            st.caption(queued_wait_caption(job_id, waiting_ids))
+        elif status == "cancelled":
+            st.caption("Removed from queue")
+        elif status == "running":
+            st.caption("Separating…")
+    if status == "succeeded" and job_id:
+        with cols[1]:
+            if st.button("Open in Mixer", key=f"open_mixer_{job_id}"):
+                fresh = read_status(job_id) or job
+                if apply_succeeded_job_to_session(
+                    st.session_state,
+                    fresh,
+                    viewing_mode=job_id,
+                ):
+                    run_dir = fresh.get("run_dir")
+                    if run_dir:
+                        st.session_state["isolate_listen_applied_dir"] = str(run_dir)
+                    _open_mixer_workspace()
+                    _persist_isolate_ui_state()
+                    st.rerun()
                 else:
-                    job_audio_sec = max(0.0, float(file_dur) - float(start_sec or 0.0))
-            except RegionError as exc:
-                st.error(str(exc))
-                return
-            except Exception:
-                if max_duration_sec is not None:
-                    job_audio_sec = float(max_duration_sec)
-
-            guitar_job = expects_guitar_stem(
-                model=config.model,
-                two_stems=config.two_stems,
-                custom_stems=choice.get("custom_stems"),
-            )
-            job_stages = isolation_stages_for_job(expects_guitar=guitar_job)
-            job_estimate, estimate_conf = estimate_job_seconds(
-                audio_duration_sec=job_audio_sec,
-                quality=config.quality,
-                device=config.device,
-                stages=job_stages,
-                last_run=st.session_state.get("isolate_last_job_timing"),
-                model=config.model,
-                expects_guitar=guitar_job,
-            )
-
-            with st.container(border=True):
-                status_title = st.empty()
-                progress_bar = st.progress(0.0)
-                progress_label = st.empty()
-                eta_label = st.empty()
-                checklist_box = st.empty()
-
-                progress_state: dict[str, object] = {
-                    "stage": "ingest",
-                    "message": "Preparing audio…",
-                    "stage_started": separation_started,
-                }
-                result_holder: dict = {}
-
-                def on_progress(stage: str, message: str) -> None:
-                    if stage != progress_state["stage"]:
-                        progress_state["stage_started"] = time.monotonic()
-                    progress_state["stage"] = stage
-                    progress_state["message"] = message
-
-                def paint_progress(*, complete: bool = False) -> None:
-                    now = time.monotonic()
-                    elapsed_sec = now - separation_started
-                    raw_stage = str(progress_state["stage"])
-                    stage = resolve_active_stage(raw_stage, job_stages)
-                    message = str(progress_state["message"])
-                    display = _stage_display(
-                        stage, device=config.device, fallback=message
-                    )
-                    if complete:
-                        intra, intra_estimated = 1.0, False
-                        pct = 1.0
-                        remaining, remain_conf = 0.0, "high"
-                    else:
-                        stage_elapsed = now - float(progress_state["stage_started"])
-                        stage_est = estimated_stage_seconds(
-                            stage, job_stages, job_estimate
-                        )
-                        intra, intra_estimated = intra_stage_fraction(
-                            stage_elapsed, stage_est
-                        )
-                        pct = stage_progress_percent(
-                            stage, stages=job_stages, intra=intra
-                        )
-                        remaining, remain_conf = estimate_remaining_seconds(
-                            elapsed_sec=elapsed_sec,
-                            percent=pct,
-                            total_estimate=job_estimate,
-                            confidence=estimate_conf,
-                        )
-                    status_title.markdown(f"**{display}**")
-                    progress_bar.progress(min(1.0, max(0.0, pct)))
-                    progress_label.caption(
-                        format_progress_label(
-                            pct,
-                            display,
-                            estimated=bool(intra_estimated and not complete),
-                        )
-                    )
-                    eta_label.caption(
-                        format_eta_line(
-                            elapsed_sec, remaining, confidence=remain_conf
-                        )
-                    )
-                    checklist_box.markdown(
-                        format_checklist_markdown(
-                            checklist_items(
-                                job_stages, stage, complete=complete
-                            )
-                        )
-                    )
-
-                def worker() -> None:
-                    try:
-                        result_holder["artifacts"] = separate_stems(
-                            audio_path=audio_path,
-                            output_dir=output_dir,
-                            config=config,
-                            on_progress=on_progress,
-                        )
-                    except Exception as exc:  # noqa: BLE001 — re-raised on main thread
-                        result_holder["error"] = exc
-
-                thread = threading.Thread(target=worker, daemon=True)
-                thread.start()
-                paint_progress()
-                while thread.is_alive():
-                    time.sleep(0.25)
-                    paint_progress()
-                thread.join()
-
-                if "error" in result_holder:
-                    paint_progress()
-                    raise result_holder["error"]
-                paint_progress(complete=True)
-                artifacts = result_holder["artifacts"]
-
-            if job_audio_sec and job_audio_sec > 0:
-                st.session_state["isolate_last_job_timing"] = {
-                    "wall_sec": time.monotonic() - separation_started,
-                    "audio_sec": job_audio_sec,
-                    "quality": config.quality,
-                    "device": config.device,
-                    "model": config.model,
-                    "expects_guitar": guitar_job,
-                }
-
-            cleanup_mix_artifacts(output_dir)
-            st.session_state["isolate_artifacts"] = {k: str(v) for k, v in artifacts.items()}
-            stem_name = (
-                Path(uploaded.name).stem
-                if uploaded
-                else (
-                    Path(st.session_state.get("carry_over_audio_name") or "").stem
-                    if using_carry_over
-                    else audio_path.stem
-                )
-            )
-            resolved_name = (output_name or "").strip() or stem_name
-            if region_label and max_duration_sec is not None:
-                clip_suffix = format_region_label_filename(start_sec, max_duration_sec)
-                resolved_name = f"{resolved_name}_{clip_suffix}"
-                st.session_state["isolate_region_label"] = region_label
-                st.session_state["isolate_clip_length"] = max_duration_sec
-            else:
-                st.session_state.pop("isolate_region_label", None)
-                st.session_state.pop("isolate_clip_length", None)
-            st.session_state["isolate_base_name"] = resolved_name
-            st.session_state["isolate_source_audio_path"] = str(audio_path)
-            st.session_state["isolate_run_dir"] = str(output_dir)
-            # Consumed — clear so it doesn't linger for unrelated future separations.
-            st.session_state.pop("carry_over_audio_path", None)
-            st.session_state.pop("carry_over_audio_name", None)
-            st.session_state.pop("isolate_volumes_db", None)
-            st.session_state.pop("isolate_master_volume_db", None)
-            st.session_state.pop("isolate_mixer_state", None)
-            st.session_state.pop("isolate_mix_ready", None)
-            st.session_state.pop("isolate_mix_fp", None)
-            st.session_state.pop("isolate_zip_fp", None)
-            _increment_upload_key()
-
-            new_stem_paths = {
-                name: Path(path)
-                for name, path in artifacts.items()
-                if name
-                not in (
-                    "guitar_split_diagnostics",
-                    "stem_presence_diagnostics",
-                    "bass_bleed_diagnostics",
-                )
-                and Path(path).suffix.lower() == ".wav"
-            }
-            if new_stem_paths:
-                st.session_state["isolate_results_fp"] = _artifact_fingerprint(new_stem_paths)
-
-            presence = _load_stem_presence(artifacts)
-            produced_stem_names = [
-                name
-                for name, path in artifacts.items()
-                if name != "guitar_split_diagnostics"
-                and name != "stem_presence_diagnostics"
-                and name != "bass_bleed_diagnostics"
-                and Path(path).suffix.lower() == ".wav"
-            ]
-            custom_stems = choice["custom_stems"]
-            st.session_state["isolate_selected_stems"] = (
-                custom_selected_stems(produced_stem_names, custom_stems)
-                if custom_stems
-                else default_isolate_selected_stems(produced_stem_names, presence)
-            )
-            stem_count = sum(
-                1
-                for name, path in artifacts.items()
-                if Path(path).suffix.lower() == ".wav"
-                and name
-                not in (
-                    "guitar_split_diagnostics",
-                    "stem_presence_diagnostics",
-                    "bass_bleed_diagnostics",
-                )
-            )
-            st.session_state["isolate_flash"] = (
-                f"Separated {stem_count} tracks. Live mixer and downloads are below."
-            )
-            write_run_metadata(
-                output_dir,
-                page="isolate",
-                title=st.session_state["isolate_base_name"],
-                artifacts=artifacts,
-                owner=browser_id,
-            )
+                    st.caption("Those files are no longer available.")
+        with cols[2]:
+            if st.button("Delete", key=f"delete_finished_{job_id}"):
+                result = delete_finished_job(read_status(job_id) or job)
+                _clear_mixer_if_run_deleted(result.get("run_dir"))
+                st.rerun()
+        return
+    with cols[1]:
+        if status == "running" and job_id:
+            if st.button(
+                "Stop",
+                key=f"stop_job_{job_id}",
+                help="Cancel this separation. The next queued song then starts (still one at a time).",
+            ):
+                remove_job(job_id)
+                ensure_worker_started()
+                st.rerun()
+        elif job_id and st.button(
+            "Remove",
+            key=f"remove_job_{job_id}",
+            help="Drop this job from the list. The next queued song then starts (still one at a time).",
+        ):
+            remove_job(job_id)
+            ensure_worker_started()
             st.rerun()
 
-        except Exception as exc:
+
+def _render_status_strip(jobs: list) -> None:
+    """Running / queued / failed only. Empty when idle."""
+    running = None
+    failed = None
+    for job in jobs:
+        jid = job.get("id")
+        if not jid:
+            continue
+        fresh = read_status(jid) or job
+        status = fresh.get("status")
+        if status == "running" and running is None:
+            running = fresh
+        elif status == "failed" and failed is None:
+            failed = fresh
+    waiting_ids = queued_job_ids()
+    show_queued = running is None and failed is None and bool(waiting_ids)
+    if not (running or failed or show_queued):
+        return
+    with st.container(border=True, key="isolate_status_strip"):
+        if running:
+            st.info(f"Separating **{_job_source_title(running)}**")
+            _render_running_progress(running)
+        elif failed:
             st.error(
-                "Separation failed — your file and settings are still here, "
-                "so you can just try again."
+                f"**{_job_source_title(failed)}** failed: "
+                f"{format_job_error(failed.get('error'))}"
             )
-            with _stateful_expander(
-                "Technical details", key="isolate_error_details_expanded", default=False
-            ):
-                st.code(str(exc))
-            return
+        elif show_queued:
+            st.caption(queued_wait_caption(waiting_ids[0], waiting_ids))
 
-    artifacts_map = st.session_state.get("isolate_artifacts")
-    if not artifacts_map:
-        return
 
-    if should_hide_stale_results(
-        pending_upload_fp=st.session_state.get("isolate_upload_fp"),
-        has_artifacts=True,
-    ):
-        return
-
-    if flash := st.session_state.pop("isolate_flash", None):
-        st.success(flash)
-
-    base_name = st.session_state.get("isolate_base_name", "stems")
-    stem_paths = _stem_paths_from_artifacts(artifacts_map)
-    if not stem_paths:
-        return
-
-    st.session_state["isolate_results_fp"] = _artifact_fingerprint(stem_paths)
-
-    presence = _load_stem_presence(artifacts_map)
-
-    bass_bleed = _load_bass_bleed_diagnostics(artifacts_map)
-    if bass_bleed.get("flagged"):
-        st.warning(
-            "Guitar check: "
-            f"{bass_bleed.get('reason', 'this track may contain extra bass bleed')}"
-        )
-
-    guitar_split = _load_guitar_split_diagnostics(artifacts_map)
-    if guitar_split.get("outcome") == "lead_rhythm":
-        if guitar_split.get("low_confidence") or guitar_split.get("forced_emit"):
-            st.warning(
-                "Lead/Rhythm guitar split (best effort, lower confidence): "
-                f"{guitar_split.get('reason', '')}"
-            )
-        else:
-            st.info(
-                "Lead/Rhythm guitar split: "
-                f"{guitar_split.get('reason', 'split applied')}"
-            )
-    elif guitar_split.get("outcome") == "ambiguous":
-        st.info(
-            "Lead/Rhythm not separated (parts too similar or centered). "
-            "Combined Guitar is available."
-        )
-
-    with _stateful_expander(
-        "Choose tracks for the mixer and downloads",
-        key="isolate_track_picker_expanded",
-        default=True,
-    ):
-        _render_stem_presence_selector(
-            stem_paths, presence, _artifact_fingerprint(stem_paths)
-        )
-
-    selected_stems = st.session_state.get("isolate_selected_stems", {})
-    selected_stem_paths = {
-        name: path for name, path in stem_paths.items() if selected_stems.get(name, True)
-    }
-
-    run_dir = Path(st.session_state.get("isolate_run_dir", next(iter(stem_paths.values())).parent))
-
-    st.subheader("Live mixer")
-    region_caption = st.session_state.get("isolate_region_label")
-    source_audio_path = st.session_state.get("isolate_source_audio_path")
-    clip_length = st.session_state.get("isolate_clip_length")
-    source_note = (
-        f" from `{Path(source_audio_path).name}`" if source_audio_path else ""
-    )
-    if region_caption:
-        length_note = f" ({clip_length:.0f} s)" if clip_length else ""
-        st.caption(f"**{base_name}** — {region_caption}{length_note}{source_note}")
+@st.fragment(run_every=2.0)
+def _poll_running_jobs() -> None:
+    """Keep progress visible across page switches; apply finished jobs when unpinned."""
+    ensure_worker_started()
+    jobs = list_jobs(limit=15)
+    if "isolate_consumed_job_ids" not in st.session_state:
+        consumed_ids = None
     else:
-        st.caption(f"**{base_name}**{source_note}")
+        consumed_ids = list(st.session_state.get("isolate_consumed_job_ids") or [])
+    viewing = st.session_state.get("isolate_viewing_job_id")
+    plan = plan_isolate_job_poll(
+        jobs,
+        consumed_ids=consumed_ids,
+        viewing_id=viewing if isinstance(viewing, str) else None,
+        form_drawn=bool(st.session_state.get("_isolate_form_drawn")),
+    )
+    st.session_state["isolate_consumed_job_ids"] = plan["consumed_ids"]
+
+    job = plan["apply_job"]
+    applied = False
+    if job:
+        jid = str(job.get("id") or "")
+        fresh = read_status(jid) or job
+        st.session_state["isolate_consumed_job_id"] = jid
+        if plan["notify_only"]:
+            title = fresh.get("title") or "track"
+            st.session_state["isolate_flash"] = (
+                f"**{title}** finished — choose it under Listening to…"
+            )
+            _open_mixer_workspace()
+            applied = True
+        elif apply_succeeded_job_to_session(st.session_state, fresh, viewing_mode="latest"):
+            produced = [
+                n
+                for n, path in (fresh.get("artifacts") or {}).items()
+                if Path(path).suffix.lower() == ".wav"
+                and not str(n).endswith("_diagnostics")
+            ]
+            st.session_state["isolate_flash"] = (
+                f"Separated {len(produced)} tracks. Live mixer and downloads are on Mixer."
+            )
+            st.session_state["isolate_listen_applied_dir"] = fresh.get("run_dir")
+            _open_mixer_workspace()
+            applied = True
+        if plan["rerun"] and applied:
+            _persist_isolate_ui_state()
+            st.rerun()
+
+    _render_status_strip(jobs)
+
+
+@st.fragment(run_every=2.0)
+def _queue_tab_fragment() -> None:
+    _render_job_queue_panel()
+
+
+@st.fragment
+def _mixer_and_downloads_fragment(
+    selected_stem_paths: dict[str, Path],
+    *,
+    base_name: str,
+    run_dir: Path,
+) -> None:
+    """Isolate mute/solo/volume reruns to this fragment (not the whole page)."""
     mixer_state = _render_live_mixer(
         selected_stem_paths, track_title=base_name, base_name=base_name
     )
@@ -1279,8 +1139,6 @@ def main() -> None:
         )
         return
 
-    # Prepare zip + mix before the Downloads heading so Streamlit does not paint a
-    # ghost second "Downloads" while blocking on mix export.
     zip_bytes = _cached_zip_bytes(selected_stem_paths, base_name, run_dir)
     stem_names = sort_stem_names(selected_stem_paths.keys())
     state = st.session_state.get("isolate_mixer_state") or {}
@@ -1338,12 +1196,503 @@ def main() -> None:
             help="Uses the live mixer's current volume / mute / solo settings.",
         )
 
+
+def _resolve_audio_for_job(choice: dict) -> tuple[Path | None, str | None]:
+    """Return (audio path, error). Error is None when a path is ready or there is no source."""
+    uploaded = choice.get("uploaded")
+    youtube_url = (choice.get("youtube_url") or "").strip()
+    pending = st.session_state.get("isolate_pending_audio_path")
+    carry_over_path = st.session_state.get("carry_over_audio_path")
+
+    if youtube_url:
+        if not is_youtube_url(youtube_url):
+            return None, "Only YouTube URLs are allowed."
+        already = (
+            pending
+            and Path(pending).exists()
+            and st.session_state.get("isolate_pending_fp") == f"youtube:{youtube_url}"
+        )
+        if already:
+            return Path(pending), None
+        out = run_output_dir()
+        try:
+            with st.spinner("Downloading YouTube audio…"):
+                path = download_youtube_audio(youtube_url, out)
+            st.session_state["isolate_pending_audio_path"] = str(path)
+            st.session_state["isolate_pending_fp"] = f"youtube:{youtube_url}"
+            st.session_state["isolate_upload_fp"] = f"youtube:{youtube_url}"
+            if not st.session_state.get("isolate_output_name"):
+                st.session_state["isolate_output_name"] = path.stem
+            return path, None
+        except YouTubeDownloadError as exc:
+            return None, str(exc)
+        except Exception as exc:
+            return None, f"YouTube download failed: {exc}"
+
+    if uploaded and pending and Path(pending).exists():
+        return Path(pending), None
+    if uploaded:
+        path = save_upload(uploaded)
+        st.session_state["isolate_pending_audio_path"] = str(path)
+        fp = upload_fingerprint(uploaded)
+        if fp:
+            st.session_state["isolate_pending_fp"] = fp
+        return path, None
+    if carry_over_path and Path(carry_over_path).exists():
+        return Path(carry_over_path), None
+    if choice.get("audio_path") and Path(choice["audio_path"]).exists():
+        return Path(choice["audio_path"]), None
+    return None, None
+
+
+def _enqueue_confirmed_job(choice: dict, audio_path: Path) -> None:
+    start_sec = float(choice.get("start_sec") or 0.0)
+    max_duration_sec = choice.get("max_duration_sec")
+    region_label = choice.get("region_label")
+    output_name = (choice.get("output_name") or "").strip() or audio_path.stem
+
+    try:
+        file_dur = probe_duration_sec(audio_path)
+        if max_duration_sec is not None:
+            _, validated_length, _ = resolve_region(
+                file_dur,
+                start_sec,
+                start_sec + float(max_duration_sec),
+            )
+            max_duration_sec = float(validated_length)
+        job_audio_sec = (
+            float(max_duration_sec)
+            if max_duration_sec is not None
+            else max(0.0, float(file_dur or 0.0) - start_sec)
+        )
+    except RegionError as exc:
+        st.error(str(exc))
+        return
+    except Exception:
+        job_audio_sec = float(max_duration_sec) if max_duration_sec is not None else None
+
+    try:
+        ensure_cuda_available(choice["device"], get_desktop_probe())
+    except RuntimeError:
+        st.error(CUDA_UNAVAILABLE_MESSAGE)
+        return
+
+    resolved_name = output_name
+    if region_label and max_duration_sec is not None:
+        clip_suffix = format_region_label_filename(start_sec, float(max_duration_sec))
+        resolved_name = f"{resolved_name}_{clip_suffix}"
+        st.session_state["isolate_region_label"] = region_label
+        st.session_state["isolate_clip_length"] = max_duration_sec
+    else:
+        st.session_state.pop("isolate_region_label", None)
+        st.session_state.pop("isolate_clip_length", None)
+
+    output_dir = run_output_dir()
+    source_fp = st.session_state.get("isolate_pending_fp") or st.session_state.get("isolate_upload_fp")
+    browser_id = st.session_state.get("isolate_user_id")
+    source_kind = infer_source_kind(
+        source_fingerprint=str(source_fp) if source_fp else None,
+        youtube_url=choice.get("youtube_url"),
+    )
+    spec = IsolateJobSpec(
+        id=uuid.uuid4().hex,
+        audio_path=str(audio_path),
+        output_dir=str(output_dir),
+        title=resolved_name,
+        model=choice["model"],
+        quality=choice["quality"],
+        device=choice["device"],
+        start_sec=start_sec,
+        max_duration_sec=max_duration_sec,
+        two_stems=choice.get("two_stems"),
+        guitar_checkpoint=choice.get("guitar_checkpoint"),
+        custom_stems=list(choice.get("custom_stems") or []),
+        source_fingerprint=str(source_fp) if source_fp else None,
+        source_kind=source_kind,
+        region_label=region_label,
+        owner=browser_id if isinstance(browser_id, str) else None,
+        created_at=time.time(),
+        audio_duration_sec=job_audio_sec,
+        prior_timing=st.session_state.get("isolate_last_job_timing"),
+    )
+    st.session_state["isolate_last_custom_stems"] = list(choice.get("custom_stems") or [])
+    st.session_state["isolate_results_source_fp"] = source_fp
+    # Clear carry-over once queued so it doesn't linger.
+    st.session_state.pop("carry_over_audio_path", None)
+    st.session_state.pop("carry_over_audio_name", None)
+    enqueue_job(spec)
+    queue_clear_youtube_url(st.session_state)
+    st.session_state["isolate_flash"] = f"Queued **{resolved_name}**."
+    if job_audio_sec:
+        st.session_state["isolate_last_job_timing"] = {
+            "audio_sec": job_audio_sec,
+            "quality": choice["quality"],
+            "device": choice["device"],
+            "model": choice["model"],
+        }
+    _open_queue_workspace()
+    st.rerun()
+
+
+def _library_status_row(row: dict) -> dict:
+    return {
+        "id": row.get("id") or row.get("run_dir"),
+        "status": "succeeded",
+        "title": row.get("title") or "tracks",
+        "run_dir": row.get("run_dir"),
+        "artifacts": row.get("artifacts") or {},
+        "source_audio_path": row.get("source_audio_path"),
+        "source_fingerprint": row.get("source_fingerprint"),
+        "source_kind": row.get("source_kind"),
+        "region_label": row.get("region_label"),
+        "clip_length": row.get("clip_length"),
+        "custom_stems": row.get("custom_stems") or [],
+        "created_at": row.get("created_at"),
+    }
+
+
+def _apply_library_row(row: dict, *, viewing_mode: str, reopen_name: bool) -> bool:
+    status = _library_status_row(row)
+    if not apply_succeeded_job_to_session(
+        st.session_state,
+        status,
+        viewing_mode=viewing_mode,
+    ):
+        return False
+    run_dir = status.get("run_dir")
+    if run_dir:
+        st.session_state["isolate_listen_applied_dir"] = str(run_dir)
+    if reopen_name:
+        queue_reopen_output_name(st.session_state, status.get("title") or "tracks")
+    _persist_isolate_ui_state()
+    return True
+
+
+def _library_rows_available(browser_id: str | None) -> list[dict]:
+    owner = browser_id if isinstance(browser_id, str) else None
+    owned = list_recent_runs("isolate", owner=owner)
+    unfiltered = owned if owned else list_recent_runs("isolate")
+    recent = recent_runs_with_owner_fallback(owned, unfiltered)
+    merged = merge_library_runs(recent, list_jobs(limit=30))
+    usable: list[dict] = []
+    for row in merged:
+        paths = _stem_paths_from_artifacts(row.get("artifacts") or {})
+        if paths:
+            usable.append(row)
+    return usable
+
+
+def _clear_loaded_mixer() -> None:
+    for key in (
+        "isolate_artifacts",
+        "isolate_base_name",
+        "isolate_run_dir",
+        "isolate_volumes_db",
+        "isolate_master_volume_db",
+        "isolate_mixer_state",
+        "isolate_mix_ready",
+        "isolate_mix_fp",
+        "isolate_zip_fp",
+        "isolate_selected_stems",
+        "isolate_results_fp",
+        "isolate_source_audio_path",
+        "isolate_source_kind",
+        "isolate_region_label",
+        "isolate_clip_length",
+        "isolate_viewing_run_dir",
+        "isolate_listen_applied_dir",
+        LISTEN_PICKER_KEY,
+        LISTEN_PICKER_NEXT_KEY,
+        "isolate_flash",
+    ):
+        st.session_state.pop(key, None)
+
+
+def _render_listening_switcher(browser_id: str | None, rows: list[dict] | None = None) -> None:
+    """Mixer library: selectbox of finished runs + delete current."""
+    if rows is None:
+        rows = _library_rows_available(browser_id)
+    if not rows:
+        return
+    labels = {
+        str(r["run_dir"]): format_source_title(
+            r.get("title") or "tracks",
+            infer_source_kind(
+                source_kind=r.get("source_kind"),
+                source_fingerprint=r.get("source_fingerprint"),
+            ),
+        )
+        for r in rows
+    }
+    options = [str(r["run_dir"]) for r in rows]
+    apply_listen_picker_pending(st.session_state)
+    loaded = st.session_state.get("isolate_run_dir") or st.session_state.get(
+        "isolate_listen_applied_dir"
+    )
+    current = st.session_state.get(LISTEN_PICKER_KEY)
+    if current not in options:
+        default = listen_picker_default(
+            options,
+            str(loaded) if loaded else None,
+            None,
+        )
+        if default:
+            st.session_state[LISTEN_PICKER_KEY] = default
+    cols = st.columns([4, 1], vertical_alignment="bottom")
+    with cols[0]:
+        chosen = st.selectbox(
+            "Listening to",
+            options=options,
+            format_func=lambda d: labels.get(d, d),
+            key=LISTEN_PICKER_KEY,
+        )
+    with cols[1]:
+        delete_clicked = st.button(
+            "Delete this run",
+            key="isolate_delete_listening",
+            use_container_width=True,
+        )
+    if delete_clicked and chosen:
+        deleted = delete_library_run(chosen)
+        if deleted:
+            if st.session_state.get("isolate_run_dir") == chosen:
+                _clear_loaded_mixer()
+            st.session_state.pop("isolate_listen_applied_dir", None)
+            st.session_state.pop(LISTEN_PICKER_KEY, None)
+            st.session_state.pop(LISTEN_PICKER_NEXT_KEY, None)
+            _persist_isolate_ui_state()
+            st.rerun()
+        else:
+            st.error("Could not delete that separation.")
+            return
+    applied = st.session_state.get("isolate_listen_applied_dir")
+    if chosen and chosen != applied:
+        row = next((r for r in rows if str(r.get("run_dir")) == chosen), None)
+        loaded_dir = st.session_state.get("isolate_run_dir")
+        if row is None:
+            st.caption("Those files are no longer available.")
+            if loaded_dir:
+                st.session_state[LISTEN_PICKER_NEXT_KEY] = str(loaded_dir)
+            st.rerun()
+            return
+        viewing_id = str(row.get("id") or chosen)
+        if _apply_library_row(row, viewing_mode=viewing_id, reopen_name=True):
+            st.rerun()
+        else:
+            st.caption("Those files are no longer available.")
+            if loaded_dir and str(loaded_dir) != str(chosen):
+                st.session_state[LISTEN_PICKER_NEXT_KEY] = str(loaded_dir)
+                st.rerun()
+
+
+def _has_source_for_job(choice: dict) -> bool:
+    uploaded = choice.get("uploaded")
+    return bool(
+        uploaded
+        or choice.get("youtube_url")
+        or (
+            st.session_state.get("carry_over_audio_path")
+            and Path(st.session_state["carry_over_audio_path"]).exists()
+        )
+        or (
+            st.session_state.get("isolate_pending_audio_path")
+            and Path(st.session_state["isolate_pending_audio_path"]).exists()
+        )
+    )
+
+
+def _render_new_workspace(demucs_ok: bool) -> None:
+    choice = _render_separation_controls()
+    if st.button(
+        "Separate tracks",
+        type="primary",
+        disabled=not demucs_ok,
+        key="isolate_separate",
+    ):
+        if choice.get("error"):
+            st.error(choice["error"])
+        elif choice.get("max_duration_sec") is not None and choice["max_duration_sec"] < MIN_REGION_SEC:
+            st.error(f"Section must be at least {MIN_REGION_SEC:.0f} seconds.")
+        elif not _has_source_for_job(choice):
+            st.error("Upload an audio file or enter a YouTube URL.")
+        else:
+            audio_path, resolve_error = _resolve_audio_for_job(choice)
+            if resolve_error:
+                st.error(resolve_error)
+            elif audio_path is None:
+                st.error("Upload an audio file or enter a YouTube URL.")
+            else:
+                _enqueue_confirmed_job(choice, audio_path)
+
+
+def _render_mixer_region_caption(base_name: str) -> None:
+    region_caption = st.session_state.get("isolate_region_label")
+    source_audio_path = st.session_state.get("isolate_source_audio_path")
+    clip_length = st.session_state.get("isolate_clip_length")
+    filename = Path(source_audio_path).name if source_audio_path else None
+    kind = infer_source_kind(
+        source_kind=st.session_state.get("isolate_source_kind"),
+        source_fingerprint=st.session_state.get("isolate_results_source_fp"),
+    )
+    st.caption(
+        format_source_caption(
+            base_name,
+            kind,
+            filename=filename,
+            region_label=region_caption if isinstance(region_caption, str) else None,
+            clip_length=float(clip_length) if clip_length is not None else None,
+        )
+    )
+
+
+def _render_mixer_workspace(browser_id: str | None) -> None:
+    owner = browser_id if isinstance(browser_id, str) else None
+    rows = _library_rows_available(owner)
+    if not _session_has_mixer_wavs():
+        row = select_rehydrate_row(st.session_state, rows, wav_exists=_wav_exists)
+        if row is not None and _apply_library_row(
+            row, viewing_mode="latest", reopen_name=False
+        ):
+            st.rerun()
+
+    if rows:
+        _render_listening_switcher(owner, rows)
+
+    artifacts_map = st.session_state.get("isolate_artifacts")
+    stem_paths = _stem_paths_from_artifacts(artifacts_map or {})
+    if not stem_paths:
+        if not rows:
+            st.caption("No tracks yet.")
+        else:
+            st.caption("Pick a run above.")
+        return
+
+    pending_fp = pending_upload_fp_for_stale(st.session_state)
+    if should_hide_stale_results(
+        pending_upload_fp=pending_fp,
+        has_artifacts=True,
+        results_source_fp=st.session_state.get("isolate_results_source_fp"),
+    ):
+        st.caption(
+            "New file selected — mixer is still the chosen run until you separate again."
+        )
+
+    base_name = st.session_state.get("isolate_base_name", "stems")
+    st.session_state["isolate_results_fp"] = _artifact_fingerprint(stem_paths)
+
+    presence = _load_stem_presence(artifacts_map)
+    bass_bleed = _load_bass_bleed_diagnostics(artifacts_map)
+    if bass_bleed.get("flagged"):
+        st.warning(
+            "Guitar check: "
+            f"{bass_bleed.get('reason', 'this track may contain extra bass bleed')}"
+        )
+
+    _render_mixer_region_caption(base_name)
+
+    with _stateful_expander(
+        "Choose tracks for the mixer and downloads",
+        key="isolate_track_picker_expanded",
+        default=False,
+    ):
+        _render_stem_presence_selector(
+            stem_paths, presence, _artifact_fingerprint(stem_paths)
+        )
+
+    selected_stems = st.session_state.get("isolate_selected_stems", {})
+    selected_stem_paths = {
+        name: path for name, path in stem_paths.items() if selected_stems.get(name, True)
+    }
+    run_dir = Path(
+        st.session_state.get("isolate_run_dir", next(iter(stem_paths.values())).parent)
+    )
+    _mixer_and_downloads_fragment(
+        selected_stem_paths, base_name=base_name, run_dir=run_dir
+    )
+
     source_audio_path = st.session_state.get("isolate_source_audio_path")
     if source_audio_path and Path(source_audio_path).exists():
         if st.button("Make a tab PDF from this →"):
             st.session_state["carry_over_audio_path"] = source_audio_path
             st.session_state["carry_over_audio_name"] = Path(source_audio_path).name
             st.switch_page(str(Path(__file__).with_name("tab_pdf.py")))
+
+
+def _render_file_ready_banner() -> None:
+    pending_fp = pending_upload_fp_for_stale(st.session_state)
+    if not should_hide_stale_results(
+        pending_upload_fp=pending_fp,
+        has_artifacts=bool(st.session_state.get("isolate_artifacts")),
+        results_source_fp=st.session_state.get("isolate_results_source_fp"),
+    ):
+        return
+    st.info(
+        f"**{_staged_source_name()}** is ready — click **Separate tracks** on New to "
+        "replace the current results. Existing stems stay on disk until the new job finishes."
+    )
+
+
+def main() -> None:
+    title_col, refresh_col = st.columns([6, 1], vertical_alignment="center")
+    with title_col:
+        st.title("Audio Isolation")
+    with refresh_col:
+        refresh_clicked = st.button("Refresh", key="isolate_refresh", use_container_width=True)
+
+    if not shutil.which("ffmpeg"):
+        st.error(
+            "ffmpeg is required for audio conversion but was not found on PATH. "
+            f"{_ffmpeg_install_hint()}"
+        )
+        return
+
+    demucs_ok = is_demucs_available()
+    if not demucs_ok:
+        st.error(
+            "Audio separation requires Demucs, which is not installed. "
+            f"{DEMUCS_INSTALL_HINT}"
+        )
+        return
+
+    logger.debug("isolate paint demucs=%s", demucs_ok)
+    ensure_worker_started()
+    browser_id = _get_browser_user_id()
+    _restore_isolate_ui_state()
+    if refresh_clicked:
+        _refresh_isolate_from_disk(browser_id)
+    _rehydrate_artifacts_from_disk(browser_id)
+    _ensure_workspace_tab(has_artifacts=bool(st.session_state.get("isolate_artifacts")))
+
+    _poll_running_jobs()
+    if flash := st.session_state.pop("isolate_flash", None):
+        st.success(flash)
+    _render_file_ready_banner()
+
+    selected = st.session_state.get(WORKSPACE_KEY, "New")
+    if selected not in WORKSPACE_TABS:
+        selected = "New"
+    tab_new, tab_mixer, tab_queue = st.tabs(
+        list(WORKSPACE_TABS),
+        key=WORKSPACE_KEY,
+        on_change="rerun",
+    )
+    show_new = selected == "New"
+    show_mixer = selected == "Mixer"
+    show_queue = selected == "Queue"
+    if not (show_new or show_mixer or show_queue):
+        show_new = True
+    with tab_new:
+        if show_new:
+            _render_new_workspace(demucs_ok)
+    with tab_mixer:
+        if show_mixer:
+            _render_mixer_workspace(browser_id if isinstance(browser_id, str) else None)
+    with tab_queue:
+        if show_queue:
+            _queue_tab_fragment()
+
+    st.session_state["_isolate_form_drawn"] = True
+    _persist_isolate_ui_state()
 
 
 main()

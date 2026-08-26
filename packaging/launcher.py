@@ -73,8 +73,14 @@ def app_name() -> str:
 
 
 def window_title() -> str:
-    """Native window title — CPU and NVIDIA editions must not share an HWND title."""
-    return edition_window_title(desktop_edition(bundle=_bundle_root()))
+    """Native window title — CPU and NVIDIA editions must not share an HWND title.
+
+    Unfrozen (repo) launches append Demo so they are obvious vs the installed .app.
+    """
+    title = edition_window_title(desktop_edition(bundle=_bundle_root()))
+    if not _is_frozen():
+        return f"{title} Demo"
+    return title
 
 
 def _windows_local_appdata() -> Path:

@@ -14,6 +14,7 @@ from audio_to_tab.hardware import (
     desktop_recommend_caption,
     desktop_system_summary,
     ensure_cuda_available,
+    get_desktop_probe_without_torch,
     resolve_desktop_speed,
     separate_progress_message,
 )
@@ -126,3 +127,15 @@ def test_separate_progress_mentions_device():
     assert "CPU" in separate_progress_message("cpu")
     assert "NVIDIA GPU" in separate_progress_message("cuda")
     assert "CPU" not in separate_progress_message("cuda")
+
+
+def test_get_desktop_probe_without_torch_does_not_import_torch(monkeypatch):
+    import inspect
+
+    src = inspect.getsource(get_desktop_probe_without_torch)
+    assert "probe_torch" not in src
+    assert "import torch" not in src.split('"""')[-1]
+    probe = get_desktop_probe_without_torch()
+    assert probe.cuda is False
+    assert probe.mps is False
+    assert probe.ram_gb is None or probe.ram_gb > 0

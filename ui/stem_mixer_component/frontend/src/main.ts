@@ -56,6 +56,8 @@ class StemMixerEngine {
   private buffers = new Map<string, AudioBuffer>();
   private gains = new Map<string, GainNode>();
   private sources = new Map<string, AudioBufferSourceNode>();
+  private masterGain: GainNode | null = null;
+  private limiter: DynamicsCompressorNode | null = null;
   private stemIds: string[] = [];
   private playing = false;
   private startedAt = 0;
@@ -95,7 +97,25 @@ class StemMixerEngine {
     if (this.ctx.state === "suspended") {
       await this.ctx.resume();
     }
+    this.ensureMasterBus();
     return this.ctx;
+  }
+
+  /** Master gain → DynamicsCompressor (−1 dBTP-ish) → destination. */
+  private ensureMasterBus(): void {
+    if (!this.ctx) return;
+    if (this.masterGain && this.limiter) return;
+    this.masterGain = this.ctx.createGain();
+    this.masterGain.gain.value = 1;
+    this.limiter = this.ctx.createDynamicsCompressor();
+    // Soft ceiling near −1 dBFS true-peak proxy (matches mixer.py TRUE_PEAK_CEILING).
+    this.limiter.threshold.value = -1;
+    this.limiter.knee.value = 0;
+    this.limiter.ratio.value = 20;
+    this.limiter.attack.value = 0.003;
+    this.limiter.release.value = 0.1;
+    this.masterGain.connect(this.limiter);
+    this.limiter.connect(this.ctx.destination);
   }
 
   async loadStems(
@@ -112,6 +132,7 @@ class StemMixerEngine {
     this.duration = 0;
 
     const ctx = await this.ensureContext();
+    this.ensureMasterBus();
     const errors: string[] = [];
     let loaded = 0;
     const total = stems.length;
@@ -126,7 +147,7 @@ class StemMixerEngine {
         this.buffers.set(stem.id, buf);
         this.duration = Math.max(this.duration, buf.duration);
         const gain = ctx.createGain();
-        gain.connect(ctx.destination);
+        gain.connect(this.masterGain!);
         this.gains.set(stem.id, gain);
       } catch (e) {
         errors.push(`${stem.label}: ${e instanceof Error ? e.message : String(e)}`);
@@ -231,6 +252,11 @@ class StemMixerEngine {
     await this.play();
   }
 
+  async stop(): Promise<void> {
+    await this.pause();
+    await this.seek(0);
+  }
+
   private tick = (): void => {
     const t = this.currentTime();
     if (this.playing && t >= this.duration - 0.02) {
@@ -255,8 +281,53 @@ let state: MixerState = {
 let stemInfos: StemInfo[] = [];
 let trackTitle = "";
 
+let wantPlaying = false;
+let transportBusy = false;
+let transportPending: "play" | "pause" | "stop" | null = null;
+
 let reportTimer: number | null = null;
 let lastPublished = "";
+
+const TRANSPORT_STORAGE_KEY = "audiotools_stem_mixer_transport";
+
+function saveTransport(): void {
+  try {
+    sessionStorage.setItem(
+      TRANSPORT_STORAGE_KEY,
+      JSON.stringify({
+        stemKey: lastStemKey,
+        offset: engine.currentTime(),
+        playing: engine.isPlaying(),
+      })
+    );
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
+
+function restoreTransport(): void {
+  try {
+    const raw = sessionStorage.getItem(TRANSPORT_STORAGE_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw) as {
+      stemKey?: string;
+      offset?: number;
+      playing?: boolean;
+    };
+    if (data.stemKey !== lastStemKey) return;
+    const offset = Number(data.offset) || 0;
+    wantPlaying = !!data.playing;
+    setPlayPauseLabel(wantPlaying);
+    void engine.seek(offset).then(() => {
+      if (data.playing) {
+        transportPending = "play";
+        applyTransport();
+      }
+    });
+  } catch {
+    /* ignore */
+  }
+}
 
 function statePayload(): string {
   return JSON.stringify({
@@ -297,6 +368,63 @@ function reportState(immediate = false): void {
   reportTimer = window.setTimeout(publish, 400);
 }
 
+function setPlayPauseLabel(playing: boolean): void {
+  const playBtn = document.getElementById("btn-playpause");
+  if (playBtn) playBtn.textContent = playing ? "Pause" : "Play";
+}
+
+function applyTransport(): void {
+  if (transportBusy) return;
+  const pending = transportPending;
+  transportPending = null;
+  if (pending === "stop") {
+    wantPlaying = false;
+    setPlayPauseLabel(false);
+    transportBusy = true;
+    void engine
+      .stop()
+      .finally(() => {
+        transportBusy = false;
+        if (transportPending) applyTransport();
+        else saveTransport();
+      });
+    return;
+  }
+  if (wantPlaying === engine.isPlaying()) {
+    saveTransport();
+    return;
+  }
+  transportBusy = true;
+  const op = wantPlaying ? engine.play() : engine.pause();
+  void op
+    .catch(() => {
+      wantPlaying = engine.isPlaying();
+      setPlayPauseLabel(wantPlaying);
+    })
+    .finally(() => {
+      transportBusy = false;
+      if (transportPending) {
+        applyTransport();
+        return;
+      }
+      saveTransport();
+    });
+}
+
+function togglePlayPause(): void {
+  wantPlaying = !wantPlaying;
+  setPlayPauseLabel(wantPlaying);
+  transportPending = wantPlaying ? "play" : "pause";
+  applyTransport();
+}
+
+function stopPlayback(): void {
+  wantPlaying = false;
+  setPlayPauseLabel(false);
+  transportPending = "stop";
+  applyTransport();
+}
+
 function applyStateGains(): void {
   engine.applyGains(effectiveGains(stemInfos.map((s) => s.id), state));
 }
@@ -323,6 +451,7 @@ function renderUI(theme?: Theme): void {
       <div class="status" id="status">Ready</div>
       <div class="transport">
         <button type="button" class="primary" id="btn-playpause">Play</button>
+        <button type="button" class="secondary" id="btn-stop">Stop</button>
         <button type="button" class="secondary" id="btn-restart">Restart</button>
         <button type="button" class="secondary" id="btn-muteall">Mute All</button>
         <button type="button" class="secondary" id="btn-reset">Reset</button>
@@ -377,9 +506,19 @@ function renderUI(theme?: Theme): void {
     })
     .join("");
 
-  document.getElementById("btn-playpause")!.onclick = () =>
-    void (engine.isPlaying() ? engine.pause() : engine.play());
-  document.getElementById("btn-restart")!.onclick = () => void engine.restart();
+  document.getElementById("btn-playpause")!.onpointerdown = (event) => {
+    event.preventDefault();
+    togglePlayPause();
+  };
+  document.getElementById("btn-stop")!.onpointerdown = (event) => {
+    event.preventDefault();
+    stopPlayback();
+  };
+  document.getElementById("btn-restart")!.onclick = () => {
+    wantPlaying = true;
+    setPlayPauseLabel(true);
+    void engine.restart().then(() => saveTransport());
+  };
 
   document.getElementById("btn-muteall")!.onclick = () => {
     // If every stem is already muted, Unmute All; otherwise Mute All.
@@ -504,7 +643,11 @@ function renderUI(theme?: Theme): void {
       seekEl.value = String(dur > 0 ? Math.round((t / dur) * 1000) : 0);
     }
     const playBtn = document.getElementById("btn-playpause");
-    if (playBtn) playBtn.textContent = playing ? "Pause" : "Play";
+    if (playBtn && !transportBusy && transportPending === null) {
+      wantPlaying = playing;
+      playBtn.textContent = playing ? "Pause" : "Play";
+    }
+    saveTransport();
   });
 
   updateTrackTitleDisplay();
@@ -600,6 +743,9 @@ async function onRender(event: Event): Promise<void> {
 
   if (key !== lastStemKey) {
     lastStemKey = key;
+    wantPlaying = false;
+    transportBusy = false;
+    transportPending = null;
     stemInfos = stems;
     const masterInit = Number(args.initialMasterVolumeDb);
     state = {
@@ -622,8 +768,9 @@ async function onRender(event: Event): Promise<void> {
       scheduleFrameHeight();
     });
     applyStateGains();
-    lastPublished = "";
-    reportState(true);
+    // Do not reportState(true) on load — that remounts the iframe via a parent
+    // Streamlit rerun. Only publish when the user changes mute/solo/volume.
+    lastPublished = statePayload();
     const el = status();
     if (el) {
       el.textContent = errors.length
@@ -632,6 +779,7 @@ async function onRender(event: Event): Promise<void> {
     }
     renderUI(data.theme);
     applyStateGains();
+    restoreTransport();
   }
 
   scheduleFrameHeight();

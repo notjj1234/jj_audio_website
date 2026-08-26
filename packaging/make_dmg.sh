@@ -11,7 +11,7 @@ chmod +x packaging/make_app.sh
 ./packaging/make_app.sh
 python3 packaging/macos_signing.py sign-app dist/AudioTools.app
 
-APP_VERSION="${AUDIO_TOOLS_VERSION:-0.1.0}"
+APP_VERSION="${AUDIO_TOOLS_VERSION:-0.1.1}"
 BIN_ARCHS="$(lipo -archs dist/AudioTools/AudioTools 2>/dev/null || true)"
 if grep -qw arm64 <<<"$BIN_ARCHS"; then
   DMG_NAME="AudioTools-${APP_VERSION}-macos-arm64-silicon.dmg"

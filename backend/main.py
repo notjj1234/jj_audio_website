@@ -192,6 +192,14 @@ async def _enqueue_or_run(background_tasks: BackgroundTasks, kind: str, job_id: 
             background_tasks.add_task(run_job_async, job_manager, job_id)
 
 
+def _isolate_single_flight_enabled() -> bool:
+    """Serialize Demucs: arq max_jobs=1, or in-process single-flight when no worker."""
+    return bool(settings.single_flight_jobs or not settings.use_worker)
+
+
+# Kept for capabilities/diagnostics; isolate create no longer 503s on busy.
+
+
 @app.get("/v1/health")
 def health() -> dict:
     return {"status": "ok", "env": settings.env, "auth": settings.require_auth}
@@ -393,7 +401,8 @@ async def create_isolate_job(
         else:
             max_dur = min(max_dur, settings.max_job_duration_sec)
 
-    single_flight.acquire_or_503(enabled=settings.single_flight_jobs)
+    # Serialize Demucs in the runner (wait for slot), not at create — so clients
+    # can enqueue several songs. arq max_jobs=1 covers the worker path.
     try:
         job = job_manager.create_isolate_job(
             user_id=user.id,
@@ -410,16 +419,29 @@ async def create_isolate_job(
             dual_guitar=body.dual_guitar,
         )
     except FileNotFoundError as exc:
-        if settings.single_flight_jobs:
-            single_flight.release()
         raise HTTPException(404, str(exc)) from None
-    except Exception:
-        if settings.single_flight_jobs:
-            single_flight.release()
-        raise
 
     await _enqueue_or_run(background_tasks, "isolate", job.id)
     return _job_response(job, user.id)
+
+
+@app.get("/v1/jobs", response_model=list[JobResponse])
+def list_jobs(
+    kind: str | None = None,
+    limit: int = 20,
+    user=Depends(get_current_user),
+) -> list[JobResponse]:
+    """Newest-first job list for the serial queue UI."""
+    from backend.contracts import JobKind
+
+    parsed_kind: JobKind | None = None
+    if kind:
+        try:
+            parsed_kind = JobKind(kind)
+        except ValueError as exc:
+            raise HTTPException(400, "kind must be tab or isolate") from exc
+    rows = job_manager.list_owned(user.id, kind=parsed_kind, limit=min(50, max(1, limit)))
+    return [_job_response(j, user.id) for j in rows]
 
 
 @app.get("/v1/jobs/{job_id}", response_model=JobResponse)

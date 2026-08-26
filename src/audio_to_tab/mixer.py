@@ -44,6 +44,22 @@ STEM_LABELS = {
 DB_MIN = -60.0
 DB_MAX = 24.0
 DB_DEFAULT = 0.0
+# Master-bus ceiling shared with the live Web Audio mixer (~−1 dBTP).
+TRUE_PEAK_CEILING = 10.0 ** (-1.0 / 20.0)  # ≈ 0.89125 linear
+
+
+def apply_true_peak_ceiling(
+    mixed: np.ndarray,
+    *,
+    ceiling: float = TRUE_PEAK_CEILING,
+) -> np.ndarray:
+    """Scale a mix so sample peak does not exceed ``ceiling`` (true-peak proxy)."""
+    if mixed.size == 0:
+        return mixed
+    peak = float(np.max(np.abs(mixed)))
+    if peak <= ceiling or peak <= 0.0:
+        return mixed
+    return (mixed * (ceiling / peak)).astype(np.float32, copy=False)
 
 
 def stem_display_name(stem_id: str) -> str:
@@ -225,9 +241,7 @@ def mix_stems_to_wav(
     else:
         mixed = _pad_or_trim(mixed, max_len)
 
-    peak = float(np.max(np.abs(mixed))) if mixed.size else 0.0
-    if peak > 1.0:
-        mixed = mixed / peak
+    mixed = apply_true_peak_ceiling(mixed)
 
     sf.write(str(out), mixed, sample_rate, subtype="PCM_16")
     return out

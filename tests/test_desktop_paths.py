@@ -391,7 +391,7 @@ def test_native_window_creates_with_url_after_health(tmp_path, monkeypatch):
     assert polls["count"] == 3
     # First navigation is the Streamlit URL on the GUI thread — not splash + load_url.
     assert window.loaded == []
-    assert calls["create"][0][0] == "Audio Tools (CPU)"
+    assert calls["create"][0][0] == launcher.window_title()
     assert calls["create"][0][1].get("url") == "http://127.0.0.1:8501"
     assert "html" not in calls["create"][0][1]
     assert calls["start"][0]["private_mode"] is False
@@ -912,20 +912,20 @@ def test_native_window_windows_webview_failure_hints_webview2(tmp_path, monkeypa
     assert dialogs and "WebView2" in dialogs[0]
 
 
-def test_desktop_app_version_is_0_1_0_not_website_package(monkeypatch):
+def test_desktop_app_version_is_0_1_1_not_website_package(monkeypatch):
     from audio_to_tab import __version__
 
     monkeypatch.delenv("AUDIO_TOOLS_EDITION", raising=False)
-    assert __version__ == "0.1.0"
-    assert common.desktop_app_version() == "0.1.0"
+    assert __version__ == "0.1.1"
+    assert common.desktop_app_version() == "0.1.1"
     pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
     assert 'version = "1.0.0"' in pyproject
     blurb = common.desktop_demo_blurb()
-    assert "Demo 0.1.0 (CPU)" in blurb
+    assert "Demo 0.1.1 (CPU)" in blurb
     assert "this PC" in blurb
     assert "github" not in blurb.lower()
     assert "ATT_SECRET" not in blurb
-    cuda_blurb = common.desktop_demo_blurb("0.1.0", "cuda")
+    cuda_blurb = common.desktop_demo_blurb("0.1.1", "cuda")
     assert "NVIDIA CUDA" in cuda_blurb
 
 
@@ -933,7 +933,7 @@ def test_inno_and_installer_script_use_versioned_filename():
     root = Path(__file__).resolve().parents[1]
     iss = (root / "packaging" / "AudioTools.iss").read_text(encoding="utf-8")
     assert "OutputBaseFilename=AudioTools-{#AppVersion}-windows-x64-{#Flavor}-setup" in iss
-    assert '#define AppVersion "0.1.0"' in iss
+    assert '#define AppVersion "0.1.1"' in iss
     assert "VersionInfoVersion={#AppVersion}" in iss
     assert "VersionInfoProductVersion={#AppVersion}" in iss
     assert "{A7C3E8F1-4B2D-4E9A-9C1F-8D6B5A2E0F73}" in iss
@@ -943,7 +943,7 @@ def test_inno_and_installer_script_use_versioned_filename():
     assert "ArchitecturesAllowed=x64compatible" in iss
     assert "MinVersion=10.0" in iss
     ps1 = (root / "packaging" / "make_windows_installer.ps1").read_text(encoding="utf-8")
-    assert 'AppVersion = "0.1.0"' in ps1
+    assert 'AppVersion = "0.1.1"' in ps1
     assert 'Flavor = "cpu"' in ps1
     assert "AudioTools-$AppVersion-windows-x64-$Flavor-setup.exe" in ps1
 
@@ -966,7 +966,7 @@ def test_cuda_edition_uses_separate_windows_data_dir(tmp_path, monkeypatch):
     launcher = _load_launcher()
     monkeypatch.setattr(launcher.sys, "platform", "win32")
 
-    assert launcher.window_title() == "Audio Tools (NVIDIA)"
+    assert launcher.window_title() == "Audio Tools (NVIDIA) Demo"
     assert launcher.app_name() == "AudioToolsNVIDIA"
     assert launcher._user_data_root() == tmp_path / "AudioToolsNVIDIA"
     assert launcher._user_cache_root() == tmp_path / "AudioTools" / "models"
@@ -978,7 +978,7 @@ def test_cpu_edition_windows_data_dir(tmp_path, monkeypatch):
     launcher = _load_launcher()
     monkeypatch.setattr(launcher.sys, "platform", "win32")
 
-    assert launcher.window_title() == "Audio Tools (CPU)"
+    assert launcher.window_title() == "Audio Tools (CPU) Demo"
     assert launcher.app_name() == "AudioTools"
     assert launcher._user_data_root() == tmp_path / "AudioTools"
     assert launcher._user_cache_root() == tmp_path / "AudioTools" / "models"

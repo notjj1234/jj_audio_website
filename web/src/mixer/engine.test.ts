@@ -9,6 +9,7 @@ import {
   isAudible,
   resetMuteSolo,
   setAllMuted,
+  StemMixerEngine,
   DB_MIN,
 } from "./engine";
 
@@ -87,5 +88,60 @@ describe("mixer helpers", () => {
     }
     const ctx = (await ensureAudioContext(new FakeCtx() as unknown as AudioContext)) as unknown as FakeCtx;
     expect(ctx.state).toBe("running");
+  });
+
+  it("wires a master DynamicsCompressor near −1 dBTP for solo peaks", async () => {
+    const connected: string[] = [];
+    class FakeParam {
+      value = 0;
+    }
+    class FakeNode {
+      constructor(readonly kind: string) {}
+      connect(dest: FakeNode | string) {
+        connected.push(`${this.kind}->${typeof dest === "string" ? dest : dest.kind}`);
+        return dest;
+      }
+    }
+    class FakeCompressor extends FakeNode {
+      threshold = new FakeParam();
+      knee = new FakeParam();
+      ratio = new FakeParam();
+      attack = new FakeParam();
+      release = new FakeParam();
+      constructor() {
+        super("compressor");
+      }
+    }
+    class FakeGain extends FakeNode {
+      gain = new FakeParam();
+      constructor() {
+        super("gain");
+        this.gain.value = 1;
+      }
+    }
+    class FakeCtx {
+      state: AudioContextState = "running";
+      destination = "destination";
+      resume = async () => {
+        this.state = "running";
+      };
+      createGain = () => new FakeGain();
+      createDynamicsCompressor = () => new FakeCompressor();
+    }
+
+    const engine = new StemMixerEngine();
+    const fake = new FakeCtx();
+    // Inject context the same way ensureContext would after a gesture.
+    (engine as unknown as { ctx: FakeCtx }).ctx = fake;
+    await engine.ensureContext();
+
+    const limiter = (engine as unknown as { limiter: FakeCompressor }).limiter;
+    const master = (engine as unknown as { masterGain: FakeGain }).masterGain;
+    expect(master).toBeTruthy();
+    expect(limiter).toBeTruthy();
+    expect(limiter.threshold.value).toBe(-1);
+    expect(limiter.ratio.value).toBe(20);
+    expect(connected).toContain("gain->compressor");
+    expect(connected).toContain("compressor->destination");
   });
 });
