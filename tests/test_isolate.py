@@ -25,6 +25,7 @@ from audio_to_tab.isolate import (
     apply_bass_bleed_mitigation,
     detect_present_stems,
     effective_demucs_segment,
+    fold_other_into_guitar,
     format_region_label,
     probe_duration_sec,
     resolve_region,
@@ -41,10 +42,37 @@ import librosa  # noqa: E402
 librosa.stft(np.zeros(2048, dtype=np.float32))
 
 
+def _write_silent_wav(path: Path, n: int = 256, sr: int = 44100) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(path), np.zeros((n, 2), dtype=np.float32), sr)
+
+
 def test_supported_models():
     assert "htdemucs_6s" in SUPPORTED_MODELS
     assert "htdemucs" in SUPPORTED_MODELS
     assert "htdemucs_ft" in SUPPORTED_MODELS
+
+
+def test_fold_other_into_guitar_mixes_and_drops_other(tmp_path: Path):
+    guitar = tmp_path / "guitar.wav"
+    other = tmp_path / "other.wav"
+    sf.write(str(guitar), np.ones((256, 2), dtype=np.float32) * 0.1, 44100)
+    sf.write(str(other), np.ones((256, 2), dtype=np.float32) * 0.2, 44100)
+    artifacts = {"guitar": guitar, "other": other, "vocals": tmp_path / "vocals.wav"}
+    fold_other_into_guitar(artifacts)
+    assert "other" not in artifacts
+    assert not other.exists()
+    data, _sr = sf.read(str(guitar))
+    assert float(np.max(np.abs(data))) > 0.2
+
+
+def test_fold_other_into_guitar_keeps_other_without_guitar(tmp_path: Path):
+    other = tmp_path / "other.wav"
+    _write_silent_wav(other)
+    artifacts = {"other": other, "vocals": tmp_path / "vocals.wav"}
+    fold_other_into_guitar(artifacts)
+    assert artifacts["other"] == other
+    assert other.exists()
 
 
 def test_is_demucs_available_does_not_import_torch(monkeypatch):
@@ -147,8 +175,9 @@ def test_separate_stems_collects_wavs(tmp_path: Path):
         demucs_out = Path(cmd[out_flag + 1])
         track_dir = demucs_out / "htdemucs_6s" / "normalized"
         track_dir.mkdir(parents=True, exist_ok=True)
-        for name in ("vocals", "drums", "bass", "other", "piano"):
+        for name in ("vocals", "drums", "bass", "piano"):
             (track_dir / f"{name}.wav").write_bytes(b"stem-" + name.encode())
+        _write_silent_wav(track_dir / "other.wav")
         # Guitar WAV must be loadable for bass-bleed / presence stages.
         sf.write(str(track_dir / "guitar.wav"), np.zeros((256, 2), dtype=np.float32), 44100)
         return MagicMock(returncode=0, stderr="", stdout="")
@@ -165,7 +194,8 @@ def test_separate_stems_collects_wavs(tmp_path: Path):
             IsolateConfig(model="htdemucs_6s", quality="fast", max_duration_sec=15),
         )
 
-    assert {"vocals", "drums", "bass", "other", "guitar", "piano"} <= set(artifacts)
+    assert {"vocals", "drums", "bass", "guitar", "piano"} <= set(artifacts)
+    assert "other" not in artifacts
     assert "guitar_split_diagnostics" not in artifacts
     assert "lead_guitar" not in artifacts
     assert "stem_presence_diagnostics" in artifacts
@@ -219,6 +249,44 @@ def test_separate_stems_passes_two_stems_flag(tmp_path: Path):
     assert set(artifacts) == {"vocals", "no_vocals", "stem_presence_diagnostics"}
 
 
+def test_separate_stems_keeps_other_without_guitar(tmp_path: Path):
+    audio = tmp_path / "song.wav"
+    audio.write_bytes(b"fake-wav")
+    out_dir = tmp_path / "stems"
+
+    def fake_normalize(src, dest=None):
+        dest = Path(dest) if dest else tmp_path / "norm.wav"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"norm")
+        return dest
+
+    def fake_run(cmd, capture_output=True, text=True, **_kwargs):
+        out_flag = cmd.index("-o")
+        demucs_out = Path(cmd[out_flag + 1])
+        track_dir = demucs_out / "htdemucs" / "normalized"
+        track_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("vocals", "drums", "bass"):
+            (track_dir / f"{name}.wav").write_bytes(b"stem-" + name.encode())
+        _write_silent_wav(track_dir / "other.wav")
+        return MagicMock(returncode=0, stderr="", stdout="")
+
+    with (
+        patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
+        patch("audio_to_tab.isolate.normalize_audio", side_effect=fake_normalize),
+        patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
+        patch("audio_to_tab.separate.subprocess.run", side_effect=fake_run),
+    ):
+        artifacts = separate_stems(
+            audio,
+            out_dir,
+            IsolateConfig(model="htdemucs", quality="fast", max_duration_sec=15),
+        )
+
+    assert "other" in artifacts
+    assert artifacts["other"].exists()
+    assert "guitar" not in artifacts
+
+
 def _fake_normalize_factory(tmp_path: Path):
     def fake_normalize(src, dest=None):
         dest = Path(dest) if dest else tmp_path / "norm.wav"
@@ -235,8 +303,9 @@ def _fake_demucs_with_guitar(stereo_left, stereo_right, sr: int = 44100):
         demucs_out = Path(cmd[out_flag + 1])
         track_dir = demucs_out / "htdemucs_6s" / "normalized"
         track_dir.mkdir(parents=True, exist_ok=True)
-        for name in ("vocals", "drums", "bass", "other", "piano"):
+        for name in ("vocals", "drums", "bass", "piano"):
             (track_dir / f"{name}.wav").write_bytes(b"stem-" + name.encode())
+        _write_silent_wav(track_dir / "other.wav")
         stereo = np.column_stack([stereo_left, stereo_right])
         sf.write(str(track_dir / "guitar.wav"), stereo.astype(np.float32), sr)
         return MagicMock(returncode=0, stderr="", stdout="")
@@ -569,8 +638,9 @@ def _fake_demucs_with_guitar_mono(mono: np.ndarray, sr: int = 44100):
         demucs_out = Path(cmd[out_flag + 1])
         track_dir = demucs_out / "htdemucs_6s" / "normalized"
         track_dir.mkdir(parents=True, exist_ok=True)
-        for name in ("vocals", "drums", "bass", "other", "piano"):
+        for name in ("vocals", "drums", "bass", "piano"):
             (track_dir / f"{name}.wav").write_bytes(b"stem-" + name.encode())
+        _write_silent_wav(track_dir / "other.wav")
         stereo = np.column_stack([mono, mono])
         sf.write(str(track_dir / "guitar.wav"), stereo.astype(np.float32), sr)
         return MagicMock(returncode=0, stderr="", stdout="")

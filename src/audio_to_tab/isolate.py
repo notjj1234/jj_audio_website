@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 from audio_to_tab.ingest import normalize_audio
 from audio_to_tab.lead_rhythm import LeadRhythmThresholds, resolve_lead_rhythm_mode
 from audio_to_tab.hardware import ensure_cuda_available, separate_progress_message
+from audio_to_tab.mixer import mix_stems_to_wav
 from audio_to_tab.separate import (
     GUITAR_FT_CHECKPOINT_ID,
     SUPPORTED_GUITAR_CHECKPOINTS,
@@ -268,6 +269,31 @@ class DualGuitarDiagnostics:
     reason: str
     correlation: float | None = None
     balance_ratio: float | None = None
+
+
+def fold_other_into_guitar(artifacts: dict[str, Path]) -> dict[str, Path]:
+    """Mix Demucs Other into Guitar and drop Other from 6-stem artifacts.
+
+    Essential 4-stem runs have no guitar stem; Other stays (it is the rest of
+    the mix). Mutates ``artifacts`` in place and returns it.
+    """
+    other = artifacts.get("other")
+    guitar = artifacts.get("guitar")
+    if other is None or guitar is None:
+        return artifacts
+    if not other.is_file() or not guitar.is_file():
+        return artifacts
+    mix_stems_to_wav(
+        {"guitar": guitar, "other": other},
+        audible=["guitar", "other"],
+        output_path=guitar,
+    )
+    try:
+        other.unlink()
+    except OSError:
+        pass
+    artifacts.pop("other", None)
+    return artifacts
 
 
 @dataclass
@@ -784,6 +810,8 @@ def separate_stems(
 
         if not artifacts:
             raise FileNotFoundError("No stems could be collected from Demucs output.")
+
+        fold_other_into_guitar(artifacts)
 
         if "guitar" in artifacts:
             progress("bass_bleed", "Checking guitar stem for likely bass bleed (diagnostic only)")

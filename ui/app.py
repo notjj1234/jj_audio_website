@@ -185,6 +185,13 @@ st.markdown(
         background: var(--background-color, inherit);
       }
 
+      /* YouTube search dialog: blur + dim the page behind the centered modal */
+      [data-testid="stDialog"] {
+        backdrop-filter: blur(6px) !important;
+        -webkit-backdrop-filter: blur(6px) !important;
+        background-color: rgba(15, 23, 42, 0.42) !important;
+      }
+
       /* Refresh sits level with the Isolate title, right of the header row */
       [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) {
         align-items: center !important;

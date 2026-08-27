@@ -23,7 +23,7 @@ const STEM_LABELS: Record<string, string> = {
 
 const SEPARATION_PRESETS = {
   full_band: {
-    label: "Full band — Vocals, Drums, Bass, Guitar, Piano, Other (6 tracks)",
+    label: "Full band — Vocals, Drums, Bass, Guitar, Piano (5 tracks)",
     model: "htdemucs_6s",
     two_stems: null as string | null,
   },

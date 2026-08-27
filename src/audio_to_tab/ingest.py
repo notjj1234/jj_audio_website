@@ -7,8 +7,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from audio_to_tab.subprocess_util import subprocess_run_kwargs
 
@@ -33,6 +34,22 @@ _YOUTUBE_PLAYER_CLIENTS = (
 
 class YouTubeDownloadError(RuntimeError):
     """User-facing failure downloading public YouTube audio."""
+
+
+class YouTubeSearchError(RuntimeError):
+    """User-facing failure searching public YouTube videos (no API key)."""
+
+
+@dataclass(frozen=True)
+class YouTubeSearchHit:
+    """One public video from a no-API yt-dlp search."""
+
+    video_id: str
+    title: str
+    channel: str
+    duration_sec: int | None
+    url: str
+    thumbnail_url: str
 
 
 def is_youtube_url(url: str) -> bool:
@@ -146,6 +163,128 @@ def _resolve_downloaded_wav(out_dir: Path, title: str, url: str) -> Path:
         if safe[:20] in p.stem:
             return normalize_audio(p)
     raise FileNotFoundError(f"Downloaded audio not found for: {url}")
+
+
+def format_youtube_duration(seconds: int | None) -> str:
+    """Compact ``m:ss`` / ``h:mm:ss`` label; empty when duration is unknown."""
+    if seconds is None:
+        return ""
+    try:
+        total = int(seconds)
+    except (TypeError, ValueError):
+        return ""
+    if total < 0:
+        return ""
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def _watch_url_from_entry(entry: dict) -> str | None:
+    """Build a normal watch URL from a yt-dlp flat or full search entry."""
+    webpage = (entry.get("webpage_url") or entry.get("original_url") or "").strip()
+    if is_youtube_url(webpage):
+        return webpage
+    raw_url = (entry.get("url") or "").strip()
+    if is_youtube_url(raw_url):
+        return raw_url
+    video_id = (entry.get("id") or "").strip()
+    if not video_id and raw_url and not raw_url.startswith("http"):
+        video_id = raw_url
+    if video_id and all(c.isalnum() or c in "-_" for c in video_id):
+        return f"https://www.youtube.com/watch?v={video_id}"
+    return None
+
+
+def _thumbnail_url_for_entry(entry: dict, video_id: str) -> str:
+    """Prefer yt-dlp thumbnail fields; else public CDN hqdefault for the id."""
+    direct = (entry.get("thumbnail") or "").strip()
+    if direct.startswith(("http://", "https://")):
+        return direct
+    thumbs = entry.get("thumbnails")
+    if isinstance(thumbs, list):
+        for thumb in reversed(thumbs):
+            if not isinstance(thumb, dict):
+                continue
+            url = (thumb.get("url") or "").strip()
+            if url.startswith(("http://", "https://")):
+                return url
+    vid = (video_id or "").strip()
+    if vid and all(c.isalnum() or c in "-_" for c in vid):
+        return f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+    return ""
+
+
+def search_youtube_videos(query: str, *, max_results: int = 5) -> list[YouTubeSearchHit]:
+    """Search public YouTube videos via yt-dlp (no API key).
+
+    Uses ``ytsearchN:query``. Returns watch URLs compatible with
+    ``download_youtube_audio``.
+    """
+    q = (query or "").strip()
+    if not q:
+        raise ValueError("Enter a search query")
+    limit = max(1, min(int(max_results), 10))
+    import yt_dlp
+
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "extract_flat": "in_playlist",
+        "noplaylist": True,
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(f"ytsearch{limit}:{q}", download=False)
+    except Exception as exc:
+        detail = str(exc).strip() or "unknown error"
+        raise YouTubeSearchError(
+            "Could not search YouTube. Check your connection and try again. "
+            f"Details: {detail}"
+        ) from exc
+
+    entries = (info or {}).get("entries") or []
+    hits: list[YouTubeSearchHit] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        url = _watch_url_from_entry(entry)
+        if not url:
+            continue
+        video_id = (entry.get("id") or "").strip()
+        if not video_id:
+            video_id = (parse_qs(urlparse(url).query).get("v") or [""])[0].strip()
+        if not video_id:
+            continue
+        title = (entry.get("title") or "Untitled").strip() or "Untitled"
+        channel = (
+            entry.get("channel")
+            or entry.get("uploader")
+            or entry.get("creator")
+            or ""
+        )
+        channel = str(channel).strip()
+        duration_raw = entry.get("duration")
+        try:
+            duration_sec = int(duration_raw) if duration_raw is not None else None
+        except (TypeError, ValueError):
+            duration_sec = None
+        hits.append(
+            YouTubeSearchHit(
+                video_id=video_id,
+                title=title,
+                channel=channel,
+                duration_sec=duration_sec,
+                url=url,
+                thumbnail_url=_thumbnail_url_for_entry(entry, video_id),
+            )
+        )
+        if len(hits) >= limit:
+            break
+    return hits
 
 
 def download_youtube_audio(url: str, output_dir: str | Path) -> Path:

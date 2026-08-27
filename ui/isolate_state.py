@@ -6,6 +6,7 @@ import json
 from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 from audio_to_tab.hardware import HostProbe, resolve_desktop_speed
@@ -56,8 +57,8 @@ SEPARATION_PRESETS: dict[str, dict[str, Any]] = {
     # eval/lead_rhythm/RESEARCH.md.
     "full_band": {
         "label": "Full band",
-        "tracks": "Vocals, Drums, Bass, Guitar, Piano, Other",
-        "track_count": 6,
+        "tracks": "Vocals, Drums, Bass, Guitar, Piano",
+        "track_count": 5,
         "model": "htdemucs_6s",
         "two_stems": None,
         "caveat": "Guitar/piano less accurate.",
@@ -97,7 +98,6 @@ CUSTOM_STEM_CHOICES: dict[str, str] = {
     "bass": "Bass",
     "guitar": "Guitar",
     "piano": "Piano",
-    "other": "Other",
 }
 
 CUSTOM_STEM_OUTPUTS: dict[str, tuple[str, ...]] = {
@@ -106,7 +106,6 @@ CUSTOM_STEM_OUTPUTS: dict[str, tuple[str, ...]] = {
     "bass": ("bass",),
     "guitar": ("guitar",),
     "piano": ("piano",),
-    "other": ("other",),
 }
 
 DEFAULT_CUSTOM_STEMS = ("vocals", "guitar")
@@ -304,11 +303,105 @@ ISOLATE_OUTPUT_NAME_KEY = "isolate_output_name"
 ISOLATE_OUTPUT_NAME_PENDING_KEY = "isolate_output_name_pending"
 ISOLATE_YOUTUBE_URL_KEY = "isolate_youtube_url"
 ISOLATE_YOUTUBE_URL_PENDING_KEY = "isolate_youtube_url_pending"
+ISOLATE_NAMED_YOUTUBE_URL_KEY = "isolate_named_youtube_url"
+ISOLATE_AUTO_OUTPUT_NAME_KEY = "isolate_auto_output_name"
+
+
+def youtube_video_id(url: str) -> str | None:
+    """Video id from a watch / youtu.be / shorts / embed URL, else None."""
+    parsed = urlparse((url or "").strip())
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if host in {"youtu.be", "www.youtu.be"}:
+        vid = parsed.path.lstrip("/").split("/")[0]
+        return vid or None
+    if host == "youtube.com" or host.endswith(".youtube.com"):
+        qs = parse_qs(parsed.query)
+        if qs.get("v") and qs["v"][0]:
+            return qs["v"][0]
+        parts = [p for p in parsed.path.split("/") if p]
+        if len(parts) >= 2 and parts[0] in {"shorts", "embed", "live"}:
+            return parts[1]
+    return None
+
+
+def youtube_label_from_url(url: str) -> str:
+    """Default Output name from a pasted URL (id until the file is downloaded)."""
+    return youtube_video_id(url) or "youtube_audio"
+
+
+def sync_output_name_on_youtube(
+    *,
+    youtube_url: str,
+    last_named_url: str | None,
+    output_name: str,
+    auto_output_name: str | None,
+    downloaded_stem: str | None = None,
+) -> tuple[str, str, str, bool]:
+    """When the YouTube URL changes, replace an auto Output name.
+
+    Returns ``(name, named_url, auto_name, changed)``. A user-edited name is
+    kept for the same URL; a new URL always takes the new label.
+    """
+    url = (youtube_url or "").strip()
+    if not url:
+        return output_name, last_named_url or "", auto_output_name or "", False
+    label = (downloaded_stem or "").strip() or youtube_label_from_url(url)
+    last = (last_named_url or "").strip()
+    current = (output_name or "").strip()
+    auto = (auto_output_name or "").strip()
+    if last != url:
+        return label, url, label, True
+    if downloaded_stem and (not current or current == auto):
+        stem = downloaded_stem.strip()
+        return stem, url, stem, stem != current
+    return output_name, last or url, auto, False
+
+
+def apply_youtube_output_name_sync(
+    session: MutableMapping[str, object],
+    *,
+    downloaded_stem: str | None = None,
+    apply_now: bool = True,
+) -> str | None:
+    """Queue (and optionally apply) a YouTube Output name before the text_input."""
+    if not session.get("isolate_youtube_enabled"):
+        return None
+    url = str(session.get(ISOLATE_YOUTUBE_URL_KEY) or "").strip()
+    name, named_url, auto, changed = sync_output_name_on_youtube(
+        youtube_url=url,
+        last_named_url=(
+            str(session.get(ISOLATE_NAMED_YOUTUBE_URL_KEY) or "")
+            or None
+        ),
+        output_name=str(session.get(ISOLATE_OUTPUT_NAME_KEY) or ""),
+        auto_output_name=(
+            str(session.get(ISOLATE_AUTO_OUTPUT_NAME_KEY) or "") or None
+        ),
+        downloaded_stem=downloaded_stem,
+    )
+    session[ISOLATE_NAMED_YOUTUBE_URL_KEY] = named_url
+    session[ISOLATE_AUTO_OUTPUT_NAME_KEY] = auto
+    if not changed:
+        return None
+    queue_reopen_output_name(session, name)
+    if apply_now:
+        apply_pending_output_name(session)
+    return name
 
 
 def queue_reopen_output_name(session: MutableMapping[str, object], title: str) -> None:
     """Stash a Reopen title for the next run. MUST NOT write the widget-bound key."""
     session[ISOLATE_OUTPUT_NAME_PENDING_KEY] = title
+
+
+def queue_output_name_if_empty(session: MutableMapping[str, object], title: str) -> None:
+    """Queue a default name only when the Output name field is blank."""
+    current = str(session.get(ISOLATE_OUTPUT_NAME_KEY) or "").strip()
+    if current:
+        return
+    queue_reopen_output_name(session, title)
 
 
 def apply_pending_output_name(session: MutableMapping[str, object]) -> str | None:
@@ -324,6 +417,11 @@ def apply_pending_output_name(session: MutableMapping[str, object]) -> str | Non
 def queue_clear_youtube_url(session: MutableMapping[str, object]) -> None:
     """Clear the YouTube field on the next run. MUST NOT write the widget-bound key."""
     session[ISOLATE_YOUTUBE_URL_PENDING_KEY] = ""
+
+
+def queue_youtube_url(session: MutableMapping[str, object], url: str) -> None:
+    """Set the YouTube URL on the next run (e.g. after picking a search hit)."""
+    session[ISOLATE_YOUTUBE_URL_PENDING_KEY] = (url or "").strip()
 
 
 def apply_pending_youtube_url(session: MutableMapping[str, object]) -> str | None:
@@ -662,6 +760,34 @@ def load_persist_isolate_user_id(session: MutableMapping[str, Any], path: Path) 
     if stored != user_id:
         write_stored_user_id(path, user_id)
     return user_id
+
+
+def staged_audio_for_new_tab(
+    *,
+    uploaded: bool,
+    youtube_url: str,
+    pending_path: str | None,
+    pending_fp: str | None,
+    pending_exists: bool,
+    carry_path: str | None,
+    carry_exists: bool,
+) -> str | None:
+    """Path to preview on New, or None when there is nothing ready to play.
+
+    A pasted YouTube URL does not preview until that URL has been downloaded
+    (pending fingerprint ``youtube:{url}``). Uploads and Tab PDF carry-over
+    preview immediately because the file is already on disk.
+    """
+    url = (youtube_url or "").strip()
+    if url:
+        if pending_exists and pending_fp == f"youtube:{url}":
+            return pending_path
+        return None
+    if pending_exists:
+        return pending_path
+    if not uploaded and carry_exists:
+        return carry_path
+    return None
 
 
 def pending_upload_fp_for_stale(session: MutableMapping[str, Any]) -> str | None:

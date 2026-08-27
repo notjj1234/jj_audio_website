@@ -48,6 +48,8 @@ SERVER_PORT_ENV = "AUDIO_TOOLS_SERVER_PORT"
 # Windows and macOS always ship the native window. Only an explicit opt-in (or a
 # platform with no supported webview, e.g. a headless Linux box) may use a browser.
 BROWSER_FALLBACK_ENV = "AUDIO_TOOLS_ALLOW_BROWSER"
+# Unfrozen only: watch ui/ and rerun in the native window. Frozen installers stay off.
+DEV_RELOAD_ENV = "AUDIO_TOOLS_DEV"
 
 # Native open-panel filter when HTML accept MIME types fail to map (common on macOS).
 _AUDIO_OPEN_EXTENSIONS = (
@@ -65,6 +67,13 @@ _AUDIO_OPEN_EXTENSIONS = (
 
 def _is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
+
+
+def _dev_reload_enabled() -> bool:
+    """Live Streamlit reruns in the native window. Never on in a frozen .app / Setup."""
+    if _is_frozen():
+        return False
+    return os.environ.get(DEV_RELOAD_ENV, "").strip() == "1"
 
 
 def app_name() -> str:
@@ -586,8 +595,12 @@ def configure_environment(bundle: Path) -> Path:
     os.environ.setdefault("STREAMLIT_GLOBAL_DEVELOPMENT_MODE", "false")
     os.environ.setdefault("STREAMLIT_BROWSER_SERVER_ADDRESS", "127.0.0.1")
     os.environ.setdefault("STREAMLIT_SERVER_ADDRESS", "127.0.0.1")
-    os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "none")
-    os.environ.setdefault("STREAMLIT_SERVER_RUN_ON_SAVE", "false")
+    if _dev_reload_enabled():
+        os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "auto"
+        os.environ["STREAMLIT_SERVER_RUN_ON_SAVE"] = "true"
+    else:
+        os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "none")
+        os.environ.setdefault("STREAMLIT_SERVER_RUN_ON_SAVE", "false")
 
     for cand in _ffmpeg_dir_candidates(bundle):
         _prepend_path(cand)
@@ -785,12 +798,10 @@ def _stop_server(server: subprocess.Popen | None) -> None:
         pass
 
 
-def run_streamlit_server(workdir: Path, port: int) -> int:
-    """Server role: hand the main thread to Streamlit (it installs signal handlers)."""
-    _log(f"Server process {os.getpid()} running Streamlit on 127.0.0.1:{port}")
-    from streamlit.web import cli as stcli
-
-    sys.argv = [
+def _streamlit_server_argv(workdir: Path, port: int) -> list[str]:
+    watch = "auto" if _dev_reload_enabled() else "none"
+    run_on_save = "true" if _dev_reload_enabled() else "false"
+    return [
         "streamlit",
         "run",
         str(workdir / "ui" / "app.py"),
@@ -799,12 +810,20 @@ def run_streamlit_server(workdir: Path, port: int) -> int:
         "--server.headless=true",
         "--browser.gatherUsageStats=false",
         "--browser.serverAddress=127.0.0.1",
-        "--server.fileWatcherType=none",
-        "--server.runOnSave=false",
+        f"--server.fileWatcherType={watch}",
+        f"--server.runOnSave={run_on_save}",
         "--server.enableCORS=true",
         "--server.enableXsrfProtection=true",
         "--client.toolbarMode=viewer",
     ]
+
+
+def run_streamlit_server(workdir: Path, port: int) -> int:
+    """Server role: hand the main thread to Streamlit (it installs signal handlers)."""
+    _log(f"Server process {os.getpid()} running Streamlit on 127.0.0.1:{port}")
+    from streamlit.web import cli as stcli
+
+    sys.argv = _streamlit_server_argv(workdir, port)
     return int(stcli.main() or 0)
 
 

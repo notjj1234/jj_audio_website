@@ -10,8 +10,11 @@ import pytest
 from ui.isolate_state import (
     DEFAULT_SEPARATION_PRESET,
     DEFAULT_SPEED_PRESET,
+    CUSTOM_STEM_CHOICES,
     ISOLATE_OUTPUT_NAME_KEY,
     ISOLATE_OUTPUT_NAME_PENDING_KEY,
+    ISOLATE_AUTO_OUTPUT_NAME_KEY,
+    ISOLATE_NAMED_YOUTUBE_URL_KEY,
     ISOLATE_YOUTUBE_URL_KEY,
     ISOLATE_YOUTUBE_URL_PENDING_KEY,
     SPEED_PRESETS,
@@ -19,6 +22,7 @@ from ui.isolate_state import (
     apply_pending_output_name,
     apply_pending_youtube_url,
     apply_stored_isolate_ui_state,
+    apply_youtube_output_name_sync,
     checklist_items,
     clamp_region_bounds,
     custom_selected_stems,
@@ -44,7 +48,9 @@ from ui.isolate_state import (
     pick_library_row,
     plan_isolate_job_poll,
     queue_clear_youtube_url,
+    queue_output_name_if_empty,
     queue_reopen_output_name,
+    queue_youtube_url,
     read_isolate_ui_state,
     recent_runs_with_owner_fallback,
     resolve_custom_separation,
@@ -56,9 +62,13 @@ from ui.isolate_state import (
     select_rehydrate_row,
     session_mixer_artifacts_ok,
     should_auto_apply_job,
+    staged_audio_for_new_tab,
     should_hide_stale_results,
     stage_progress_percent,
+    youtube_label_from_url,
+    youtube_video_id,
     sync_output_name_on_upload,
+    sync_output_name_on_youtube,
     upload_fingerprint,
     write_isolate_ui_state,
     WORKSPACE_KEY,
@@ -106,6 +116,23 @@ def test_reopen_queues_output_name_without_touching_widget_key():
     assert ISOLATE_OUTPUT_NAME_PENDING_KEY not in session
 
 
+def test_queue_output_name_if_empty_skips_when_name_set():
+    session: dict[str, object] = {ISOLATE_OUTPUT_NAME_KEY: "keep-me"}
+    queue_output_name_if_empty(session, "from-youtube")
+    assert session[ISOLATE_OUTPUT_NAME_KEY] == "keep-me"
+    assert ISOLATE_OUTPUT_NAME_PENDING_KEY not in session
+
+
+def test_queue_output_name_if_empty_queues_pending_when_blank():
+    session: dict[str, object] = {ISOLATE_OUTPUT_NAME_KEY: "  "}
+    queue_output_name_if_empty(session, "yt-stem")
+    assert session[ISOLATE_OUTPUT_NAME_KEY] == "  "
+    assert session[ISOLATE_OUTPUT_NAME_PENDING_KEY] == "yt-stem"
+    applied = apply_pending_output_name(session)
+    assert applied == "yt-stem"
+    assert session[ISOLATE_OUTPUT_NAME_KEY] == "yt-stem"
+
+
 def test_apply_pending_output_name_noop_without_pending():
     session: dict[str, object] = {ISOLATE_OUTPUT_NAME_KEY: "keep"}
     assert apply_pending_output_name(session) is None
@@ -123,20 +150,106 @@ def test_queue_clear_youtube_url_does_not_write_widget_key():
     assert ISOLATE_YOUTUBE_URL_PENDING_KEY not in session
 
 
+def test_queue_youtube_url_fills_widget_on_apply():
+    session: dict[str, object] = {}
+    queue_youtube_url(session, "https://www.youtube.com/watch?v=BaW_jenozKc")
+    assert ISOLATE_YOUTUBE_URL_KEY not in session
+    applied = apply_pending_youtube_url(session)
+    assert applied == "https://www.youtube.com/watch?v=BaW_jenozKc"
+    assert session[ISOLATE_YOUTUBE_URL_KEY] == applied
+    assert ISOLATE_YOUTUBE_URL_PENDING_KEY not in session
+
+
 def test_apply_pending_youtube_url_noop_without_pending():
     session: dict[str, object] = {ISOLATE_YOUTUBE_URL_KEY: "keep"}
     assert apply_pending_youtube_url(session) is None
     assert session[ISOLATE_YOUTUBE_URL_KEY] == "keep"
 
 
+def test_youtube_video_id_from_common_urls():
+    assert youtube_video_id("https://www.youtube.com/watch?v=BaW_jenozKc") == "BaW_jenozKc"
+    assert youtube_video_id("https://youtu.be/abc123XYZ_-") == "abc123XYZ_-"
+    assert youtube_video_id("https://www.youtube.com/shorts/shortId99") == "shortId99"
+    assert youtube_video_id("https://example.com/watch?v=abc") is None
+    assert youtube_label_from_url("https://youtu.be/abc") == "abc"
+    assert youtube_label_from_url("not-a-url") == "youtube_audio"
+
+
+def test_sync_output_name_on_youtube_new_url_replaces_old_title():
+    name, named, auto, changed = sync_output_name_on_youtube(
+        youtube_url="https://youtu.be/newvid",
+        last_named_url="https://youtu.be/oldvid",
+        output_name="Megadeth - Holy Wars",
+        auto_output_name="Megadeth - Holy Wars",
+    )
+    assert changed is True
+    assert name == "newvid"
+    assert named == "https://youtu.be/newvid"
+    assert auto == "newvid"
+
+
+def test_sync_output_name_on_youtube_download_upgrades_auto_label():
+    url = "https://youtu.be/newvid"
+    name, named, auto, changed = sync_output_name_on_youtube(
+        youtube_url=url,
+        last_named_url=url,
+        output_name="newvid",
+        auto_output_name="newvid",
+        downloaded_stem="Other Band - Other Song",
+    )
+    assert changed is True
+    assert name == "Other Band - Other Song"
+    assert named == url
+    assert auto == "Other Band - Other Song"
+
+
+def test_sync_output_name_on_youtube_keeps_user_edit_on_same_url():
+    url = "https://youtu.be/newvid"
+    name, named, auto, changed = sync_output_name_on_youtube(
+        youtube_url=url,
+        last_named_url=url,
+        output_name="My custom mix",
+        auto_output_name="newvid",
+        downloaded_stem="Other Band - Other Song",
+    )
+    assert changed is False
+    assert name == "My custom mix"
+    assert named == url
+    assert auto == "newvid"
+
+
+def test_apply_youtube_output_name_sync_queues_before_widget():
+    session: dict[str, object] = {
+        "isolate_youtube_enabled": True,
+        ISOLATE_YOUTUBE_URL_KEY: "https://youtu.be/newvid",
+        ISOLATE_OUTPUT_NAME_KEY: "Megadeth - Holy Wars",
+        ISOLATE_NAMED_YOUTUBE_URL_KEY: "https://youtu.be/oldvid",
+        ISOLATE_AUTO_OUTPUT_NAME_KEY: "Megadeth - Holy Wars",
+    }
+    applied = apply_youtube_output_name_sync(session)
+    assert applied == "newvid"
+    assert session[ISOLATE_OUTPUT_NAME_KEY] == "newvid"
+    assert ISOLATE_OUTPUT_NAME_PENDING_KEY not in session
+
+
 def test_isolate_reopen_handler_uses_pending_not_direct_widget_write():
     page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
     source = page.read_text(encoding="utf-8")
     assert "queue_reopen_output_name(st.session_state" in source
+    assert "apply_youtube_output_name_sync(st.session_state)" in source
+    assert "queue_output_name_if_empty(st.session_state" not in source
     assert 'st.session_state["isolate_output_name"] = title' not in source
+    assert 'st.session_state["isolate_output_name"] = path.stem' not in source
     assert "apply_pending_output_name(st.session_state)" in source
     assert "apply_pending_youtube_url(st.session_state)" in source
     assert "queue_clear_youtube_url(st.session_state)" in source
+    assert "queue_youtube_url(st.session_state" in source
+    assert '@st.dialog("Search YouTube"' in source
+    assert "st.popover(" not in source
+    assert "search_youtube_videos" in source
+    assert "thumbnail_url" in source
+    assert "st.image(" in source
+    assert "ISOLATE_YOUTUBE_SEARCH_OPEN_KEY" in source
     assert "this is not parallel" not in source
     assert "isolate_queue_expanded" not in source
     assert "_open_mixer_workspace()" in source
@@ -162,14 +275,37 @@ def test_isolate_reopen_handler_uses_pending_not_direct_widget_write():
     assert 'key="isolate_viewing_run_dir"' not in source
     assert 'vertical_alignment="bottom"' in source
     assert "LISTEN_PICKER_NEXT_KEY" in source
+    assert 'key="isolate_custom_other"' not in source
     sep_src = source[source.find("def _render_separation_controls") : source.find("def _ffmpeg_install_hint")]
     yt_apply_at = sep_src.find("apply_pending_youtube_url(st.session_state)")
+    yt_name_at = sep_src.find("apply_youtube_output_name_sync(st.session_state)")
     yt_input_at = sep_src.find('key="isolate_youtube_url"')
-    assert yt_apply_at != -1 and yt_input_at != -1 and yt_apply_at < yt_input_at
+    assert yt_apply_at != -1 and yt_name_at != -1 and yt_input_at != -1
+    assert yt_apply_at < yt_name_at < yt_input_at
+    assert "queue_output_name_if_empty" not in sep_src
+    resolve_src = source[
+        source.find("def _resolve_audio_for_job") : source.find("def _enqueue_confirmed_job")
+    ]
+    assert "apply_now=False" in resolve_src
+    assert "choice[\"output_name\"]" in resolve_src or "choice['output_name']" in resolve_src
+    assert "queue_output_name_if_empty" not in resolve_src
     main_src = source[source.find("def main()") :]
     uid_at = main_src.find("browser_id = _get_browser_user_id()")
     rehydrate_at = main_src.find("_rehydrate_artifacts_from_disk(browser_id)")
     assert uid_at != -1 and rehydrate_at != -1 and uid_at < rehydrate_at
+    tabs_at = main_src.find("st.tabs(")
+    selected_at = main_src.find("selected = st.session_state.get(WORKSPACE_KEY")
+    assert tabs_at != -1 and selected_at != -1 and tabs_at < selected_at
+    tab_new_src = main_src[main_src.find("with tab_new:") : main_src.find("with tab_mixer:")]
+    assert "_render_new_workspace(demucs_ok)" in tab_new_src
+    assert "if show_new" not in tab_new_src
+    assert "Could not draw New. Click Refresh." in tab_new_src
+    mixer_src = main_src[main_src.find("with tab_mixer:") : main_src.find("with tab_queue:")]
+    assert 'if selected == "Mixer"' in mixer_src
+    assert "_render_mixer_workspace(" in mixer_src
+    queue_src = main_src[main_src.find("with tab_queue:") :]
+    assert "_queue_tab_fragment()" in queue_src
+    assert "if show_queue" not in queue_src
 
 
 def test_resolve_isolate_user_id_mints_without_stored():
@@ -184,6 +320,81 @@ def test_resolve_isolate_user_id_uses_stored_when_session_empty():
     session: dict = {}
     assert resolve_isolate_user_id(session, "  abc123  ") == "abc123"
     assert session["isolate_user_id"] == "abc123"
+
+
+def test_staged_audio_for_new_tab_hides_preview_until_youtube_download(tmp_path):
+    leftover = tmp_path / "old.wav"
+    leftover.write_bytes(b"x")
+    downloaded = tmp_path / "yt.wav"
+    downloaded.write_bytes(b"y")
+    url = "https://youtu.be/abc"
+    assert (
+        staged_audio_for_new_tab(
+            uploaded=False,
+            youtube_url=url,
+            pending_path=None,
+            pending_fp=None,
+            pending_exists=False,
+            carry_path=None,
+            carry_exists=False,
+        )
+        is None
+    )
+    assert (
+        staged_audio_for_new_tab(
+            uploaded=False,
+            youtube_url=url,
+            pending_path=str(downloaded),
+            pending_fp=f"youtube:{url}",
+            pending_exists=True,
+            carry_path=None,
+            carry_exists=False,
+        )
+        == str(downloaded)
+    )
+    assert (
+        staged_audio_for_new_tab(
+            uploaded=False,
+            youtube_url=url,
+            pending_path=str(leftover),
+            pending_fp="old.wav:1",
+            pending_exists=True,
+            carry_path=None,
+            carry_exists=False,
+        )
+        is None
+    )
+
+
+def test_staged_audio_for_new_tab_previews_upload_and_carry_over(tmp_path):
+    uploaded = tmp_path / "song.wav"
+    uploaded.write_bytes(b"x")
+    carry = tmp_path / "from_tab.wav"
+    carry.write_bytes(b"z")
+    assert (
+        staged_audio_for_new_tab(
+            uploaded=True,
+            youtube_url="",
+            pending_path=str(uploaded),
+            pending_fp="song.wav:1",
+            pending_exists=True,
+            carry_path=None,
+            carry_exists=False,
+        )
+        == str(uploaded)
+    )
+    assert (
+        staged_audio_for_new_tab(
+            uploaded=False,
+            youtube_url="",
+            pending_path=None,
+            pending_fp=None,
+            pending_exists=False,
+            carry_path=str(carry),
+            carry_exists=True,
+        )
+        == str(carry)
+    )
 
 
 def test_pending_upload_fp_for_stale_uses_disk_not_uploader(tmp_path):
@@ -663,8 +874,9 @@ def test_resolve_separation_preset_full_band():
     resolved = resolve_separation_preset("full_band")
     assert resolved["model"] == "htdemucs_6s"
     assert resolved["two_stems"] is None
-    assert resolved["track_count"] == 6
+    assert resolved["track_count"] == 5
     assert "Guitar" in resolved["tracks"]
+    assert "Other" not in resolved["tracks"]
 
 
 def test_resolve_separation_preset_essential():
@@ -730,6 +942,11 @@ def test_resolve_custom_separation_requires_a_pick():
 
 def test_resolve_custom_separation_has_no_caveat():
     assert resolve_custom_separation(["vocals"])["caveat"] == ""
+
+
+def test_custom_stem_choices_omit_other():
+    assert "other" not in CUSTOM_STEM_CHOICES
+    assert "guitar" in CUSTOM_STEM_CHOICES
 
 
 def test_custom_selected_stems_only_turns_on_requested_instruments():

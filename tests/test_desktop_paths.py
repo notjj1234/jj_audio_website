@@ -348,6 +348,26 @@ def test_server_role_passes_loopback_flags_to_streamlit(tmp_path, monkeypatch):
     assert "--server.port=8502" in argv
     assert "--server.enableXsrfProtection=true" in argv
     assert "--client.toolbarMode=viewer" in argv
+    assert "--server.fileWatcherType=none" in argv
+    assert "--server.runOnSave=false" in argv
+
+
+def test_dev_reload_enables_streamlit_watch_when_unfrozen(tmp_path, monkeypatch):
+    launcher = _load_launcher()
+    monkeypatch.setenv("AUDIO_TOOLS_DEV", "1")
+    argv = launcher._streamlit_server_argv(tmp_path, 8501)
+    assert "--server.fileWatcherType=auto" in argv
+    assert "--server.runOnSave=true" in argv
+    assert "--client.toolbarMode=viewer" in argv
+
+
+def test_dev_reload_ignored_when_frozen(tmp_path, monkeypatch):
+    launcher = _load_launcher()
+    monkeypatch.setenv("AUDIO_TOOLS_DEV", "1")
+    monkeypatch.setattr(launcher, "_is_frozen", lambda: True)
+    argv = launcher._streamlit_server_argv(tmp_path, 8501)
+    assert "--server.fileWatcherType=none" in argv
+    assert "--server.runOnSave=false" in argv
 
 
 def test_main_dispatches_to_server_role(tmp_path, monkeypatch):
@@ -955,9 +975,23 @@ def test_streamlit_about_is_local_demo_without_hosted_urls():
     assert "processing stays on this computer" in text.lower()
     assert "github.com" not in text.lower()
     assert "ATT_SECRET" not in text
+    assert '[data-testid="stDialog"]' in text
+    assert "backdrop-filter: blur(6px)" in text
     launcher = LAUNCHER_PATH.read_text(encoding="utf-8")
     assert "def window_title()" in launcher
     assert "edition_window_title" in launcher
+
+
+def test_tab_pdf_page_has_explicit_developer_playground_disclaimer():
+    root = Path(__file__).resolve().parents[1]
+    app = (root / "ui" / "app.py").read_text(encoding="utf-8")
+    page = (root / "ui" / "pages" / "tab_pdf.py").read_text(encoding="utf-8")
+    assert 'title="Tab PDF (demo)"' in app
+    assert 'st.title("Tab PDF (demo)")' in page
+    assert "Developer playground" in page
+    assert "barely works" in page
+    assert "st.caption(" not in page.split("def main")[1].split("demucs_ok")[0]
+    assert "Demo only — tabs are rough drafts" not in page
 
 
 def test_cuda_edition_uses_separate_windows_data_dir(tmp_path, monkeypatch):

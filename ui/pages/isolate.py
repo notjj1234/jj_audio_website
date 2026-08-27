@@ -42,6 +42,7 @@ from ui.isolate_state import (
     apply_pending_youtube_url,
     apply_stored_isolate_ui_state,
     apply_workspace_tab,
+    apply_youtube_output_name_sync,
     clamp_region_bounds,
     format_source_caption,
     format_source_title,
@@ -55,6 +56,7 @@ from ui.isolate_state import (
     plan_isolate_job_poll,
     queue_clear_youtube_url,
     queue_reopen_output_name,
+    queue_youtube_url,
     read_isolate_ui_state,
     recent_runs_with_owner_fallback,
     resolve_custom_separation,
@@ -64,6 +66,7 @@ from ui.isolate_state import (
     select_rehydrate_row,
     session_mixer_artifacts_ok,
     should_hide_stale_results,
+    staged_audio_for_new_tab,
     sync_output_name_on_upload,
     upload_fingerprint,
     write_isolate_ui_state,
@@ -111,8 +114,11 @@ from audio_to_tab.hardware import (  # noqa: E402
 )
 from audio_to_tab.ingest import (  # noqa: E402
     YouTubeDownloadError,
+    YouTubeSearchError,
     download_youtube_audio,
+    format_youtube_duration,
     is_youtube_url,
+    search_youtube_videos,
 )
 from audio_to_tab.mixer import (  # noqa: E402
     DB_DEFAULT,
@@ -132,6 +138,115 @@ STEM_HINTS = {
     "guitar1": "Legacy spatial label",
     "guitar2": "Legacy spatial label",
 }
+
+ISOLATE_YOUTUBE_SEARCH_OPEN_KEY = "isolate_youtube_search_open"
+
+
+def _close_youtube_search_dialog() -> None:
+    st.session_state[ISOLATE_YOUTUBE_SEARCH_OPEN_KEY] = False
+
+
+@st.dialog("Search YouTube", width="large", on_dismiss=_close_youtube_search_dialog)
+def _youtube_search_dialog() -> None:
+    """Centered modal: search public videos, pick one to fill the URL field."""
+    st.caption("Find a public video, then use Download audio on the New tab.")
+    search_q = st.text_input(
+        "Song or artist",
+        key="isolate_youtube_search_query",
+        placeholder="e.g. artist — song title",
+    )
+    search_cols = st.columns([1, 1, 1])
+    with search_cols[0]:
+        do_search = st.button(
+            "Search",
+            key="isolate_youtube_search_go",
+            use_container_width=True,
+        )
+    with search_cols[1]:
+        if st.button(
+            "Clear results",
+            key="isolate_youtube_search_clear",
+            use_container_width=True,
+        ):
+            st.session_state.pop("isolate_youtube_search_hits", None)
+            st.session_state.pop("isolate_youtube_search_error", None)
+            st.rerun()
+    with search_cols[2]:
+        if st.button(
+            "Close",
+            key="isolate_youtube_search_close",
+            use_container_width=True,
+        ):
+            _close_youtube_search_dialog()
+            st.rerun()
+    if do_search:
+        try:
+            with st.spinner("Searching YouTube…"):
+                hits = search_youtube_videos(search_q, max_results=5)
+            st.session_state["isolate_youtube_search_hits"] = [
+                {
+                    "video_id": h.video_id,
+                    "title": h.title,
+                    "channel": h.channel,
+                    "duration_sec": h.duration_sec,
+                    "url": h.url,
+                    "thumbnail_url": h.thumbnail_url,
+                }
+                for h in hits
+            ]
+            st.session_state.pop("isolate_youtube_search_error", None)
+            if not hits:
+                st.session_state["isolate_youtube_search_error"] = (
+                    "No public videos matched that search."
+                )
+        except ValueError as exc:
+            st.session_state["isolate_youtube_search_hits"] = []
+            st.session_state["isolate_youtube_search_error"] = str(exc)
+        except YouTubeSearchError as exc:
+            st.session_state["isolate_youtube_search_hits"] = []
+            st.session_state["isolate_youtube_search_error"] = str(exc)
+        except Exception as exc:
+            st.session_state["isolate_youtube_search_hits"] = []
+            st.session_state["isolate_youtube_search_error"] = (
+                f"YouTube search failed: {exc}"
+            )
+    search_error = st.session_state.get("isolate_youtube_search_error")
+    if search_error:
+        st.warning(str(search_error))
+    hits_state = st.session_state.get("isolate_youtube_search_hits") or []
+    if isinstance(hits_state, list) and hits_state:
+        st.caption(f"{len(hits_state)} result(s)")
+        for hit in hits_state:
+            if not isinstance(hit, dict):
+                continue
+            vid = str(hit.get("video_id") or "")
+            title = str(hit.get("title") or "Untitled")
+            channel = str(hit.get("channel") or "")
+            dur = format_youtube_duration(hit.get("duration_sec"))
+            url = str(hit.get("url") or "").strip()
+            thumb = str(hit.get("thumbnail_url") or "").strip()
+            meta_bits = [b for b in (channel, dur) if b]
+            meta = " · ".join(meta_bits)
+            row = st.columns([1, 3, 1], vertical_alignment="center")
+            with row[0]:
+                if thumb:
+                    st.image(thumb, width=120)
+            with row[1]:
+                st.markdown(f"**{title}**")
+                if meta:
+                    st.caption(meta)
+            with row[2]:
+                if st.button(
+                    "Use",
+                    key=f"isolate_youtube_pick_{vid}",
+                    disabled=not url,
+                    use_container_width=True,
+                ):
+                    queue_youtube_url(st.session_state, url)
+                    st.session_state.pop("isolate_youtube_search_error", None)
+                    _close_youtube_search_dialog()
+                    st.rerun()
+
 
 def _stateful_expander(label: str, *, key: str, default: bool = False):
     """
@@ -499,12 +614,27 @@ def _ensure_pending_audio(uploaded: object) -> Path | None:
 
 def _active_source_path(uploaded: object) -> Path | None:
     pending = st.session_state.get("isolate_pending_audio_path")
-    if pending and Path(pending).exists():
-        return Path(pending)
+    pending_str = str(pending) if pending else None
     carry = st.session_state.get("carry_over_audio_path")
-    if not uploaded and carry and Path(carry).exists():
-        return Path(carry)
-    return None
+    carry_str = str(carry) if carry else None
+    youtube_on = bool(st.session_state.get("isolate_youtube_enabled"))
+    youtube_url = (
+        (st.session_state.get("isolate_youtube_url") or "").strip() if youtube_on else ""
+    )
+    chosen = staged_audio_for_new_tab(
+        uploaded=uploaded is not None,
+        youtube_url=youtube_url,
+        pending_path=pending_str,
+        pending_fp=(
+            str(st.session_state.get("isolate_pending_fp"))
+            if st.session_state.get("isolate_pending_fp")
+            else None
+        ),
+        pending_exists=bool(pending_str and Path(pending_str).exists()),
+        carry_path=carry_str,
+        carry_exists=bool(carry_str and Path(carry_str).exists()),
+    )
+    return Path(chosen) if chosen else None
 
 
 def _closed_selectbox(label: str, options: list[str], *, key: str, help: str | None = None):
@@ -646,6 +776,7 @@ def _render_separation_controls() -> dict:
     """New tab: source, tracks, speed, Advanced, section preview."""
     apply_pending_output_name(st.session_state)
     apply_pending_youtube_url(st.session_state)
+    apply_youtube_output_name_sync(st.session_state)
     if "isolate_separation_preset" not in st.session_state:
         st.session_state["isolate_separation_preset"] = DEFAULT_SEPARATION_PRESET
     if "isolate_speed_preset" not in st.session_state:
@@ -675,11 +806,24 @@ def _render_separation_controls() -> dict:
     )
     youtube_url = ""
     if youtube_enabled:
-        youtube_url = st.text_input(
-            "Or paste a YouTube URL",
-            key="isolate_youtube_url",
-            **persist,
-        )
+        url_row = st.columns([4, 1], vertical_alignment="bottom")
+        with url_row[0]:
+            youtube_url = st.text_input(
+                "Or paste a YouTube URL",
+                key="isolate_youtube_url",
+                **persist,
+            )
+        with url_row[1]:
+            if st.button(
+                "Search songs",
+                key="isolate_youtube_search_open_btn",
+                use_container_width=True,
+                help="Open a search panel to find a public video by song or artist.",
+            ):
+                st.session_state[ISOLATE_YOUTUBE_SEARCH_OPEN_KEY] = True
+                st.rerun()
+        if st.session_state.get(ISOLATE_YOUTUBE_SEARCH_OPEN_KEY):
+            _youtube_search_dialog()
         st.caption(YOUTUBE_DISCLAIMER)
         url_ready = youtube_url.strip()
         if url_ready and not is_youtube_url(url_ready):
@@ -696,8 +840,11 @@ def _render_separation_controls() -> dict:
                 st.session_state["isolate_pending_audio_path"] = str(path)
                 st.session_state["isolate_pending_fp"] = f"youtube:{url_ready}"
                 st.session_state["isolate_upload_fp"] = f"youtube:{url_ready}"
-                if not st.session_state.get("isolate_output_name"):
-                    st.session_state["isolate_output_name"] = path.stem
+                apply_youtube_output_name_sync(
+                    st.session_state,
+                    downloaded_stem=path.stem,
+                    apply_now=True,
+                )
                 st.rerun()
             except YouTubeDownloadError as exc:
                 youtube_error = str(exc)
@@ -1221,8 +1368,15 @@ def _resolve_audio_for_job(choice: dict) -> tuple[Path | None, str | None]:
             st.session_state["isolate_pending_audio_path"] = str(path)
             st.session_state["isolate_pending_fp"] = f"youtube:{youtube_url}"
             st.session_state["isolate_upload_fp"] = f"youtube:{youtube_url}"
-            if not st.session_state.get("isolate_output_name"):
-                st.session_state["isolate_output_name"] = path.stem
+            new_name = apply_youtube_output_name_sync(
+                st.session_state,
+                downloaded_stem=path.stem,
+                apply_now=False,
+            )
+            if new_name:
+                choice["output_name"] = new_name
+            elif not str(choice.get("output_name") or "").strip():
+                choice["output_name"] = path.stem
             return path, None
         except YouTubeDownloadError as exc:
             return None, str(exc)
@@ -1668,28 +1822,25 @@ def main() -> None:
         st.success(flash)
     _render_file_ready_banner()
 
-    selected = st.session_state.get(WORKSPACE_KEY, "New")
-    if selected not in WORKSPACE_TABS:
-        selected = "New"
     tab_new, tab_mixer, tab_queue = st.tabs(
         list(WORKSPACE_TABS),
         key=WORKSPACE_KEY,
         on_change="rerun",
     )
-    show_new = selected == "New"
-    show_mixer = selected == "Mixer"
-    show_queue = selected == "Queue"
-    if not (show_new or show_mixer or show_queue):
-        show_new = True
+    selected = st.session_state.get(WORKSPACE_KEY, "New")
+    if selected not in WORKSPACE_TABS:
+        selected = "New"
     with tab_new:
-        if show_new:
+        try:
             _render_new_workspace(demucs_ok)
+        except Exception:
+            logger.exception("New tab failed to draw")
+            st.error("Could not draw New. Click Refresh.")
     with tab_mixer:
-        if show_mixer:
+        if selected == "Mixer":
             _render_mixer_workspace(browser_id if isinstance(browser_id, str) else None)
     with tab_queue:
-        if show_queue:
-            _queue_tab_fragment()
+        _queue_tab_fragment()
 
     st.session_state["_isolate_form_drawn"] = True
     _persist_isolate_ui_state()

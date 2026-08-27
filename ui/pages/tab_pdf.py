@@ -31,8 +31,10 @@ from audio_to_tab.separate import is_demucs_available  # noqa: E402
 
 def main() -> None:
     st.title("Tab PDF (demo)")
-    st.caption(
-        "Demo only — tabs are rough drafts. Expect wrong notes; not finished sheet music."
+    st.error(
+        "**NOT A FINISHED PRODUCT**. Tab PDF barely functions. "
+        "Tabs are 90% wrong and or unusable. This page is here so I can experiment with it "
+       
     )
     st.warning(
         "Best on short solo-guitar clips. For full songs, isolate guitar first on "
