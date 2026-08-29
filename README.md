@@ -2,6 +2,8 @@
 
 Audio splitter app (for now) made with Demucs. More stuff will be added later.
 
+The following is for JJs bs, feel free to ignore
+
 ## Tester
 
 **Windows CPU**
@@ -60,39 +62,55 @@ powershell -ExecutionPolicy Bypass -File packaging/make_windows_installer.ps1 -F
 
 ### macOS Apple Silicon (M1–M4)
 
-Run on an M-series Mac only — produces the arm64 pkg.
+Run on an M-series Mac. Uses `.venv-desktop` (native arm64 Python).
 
 ```bash
-cd ~/Documents/GitHub/jj_audio_website
-python3.11 -m venv .venv-desktop              # first time only
+cd ~/Documents/-\ PERSONAL\ PROJECTS\ GITHUB\ -/jj_audio_website
+
+# First time only
+python3.11 -m venv .venv-desktop
 source .venv-desktop/bin/activate
 python -m pip install --upgrade pip
 python -m pip install --upgrade torch torchaudio
 pip install -e ".[demucs,desktop,roformer,separator]"
-make mixer-build                              # skip if frontend/build is committed
+
+# Build (skip mixer-build if frontend/build is already committed)
+make mixer-build
 make desktop-bundle-ffmpeg
 make desktop-build
 make desktop-pkg
 ```
+
 → `~/Downloads/AudioTools-0.1.2-macos-arm64-silicon.pkg`
+
+Optional: bump version in the filename — `AUDIO_TOOLS_VERSION=0.1.3 make desktop-pkg`
 
 ### macOS Intel (x64)
 
-Run on an Intel Mac only — produces the x64 pkg.
+**On an Intel Mac:** same steps as Apple Silicon above (native x64 `.venv-desktop`).
+
+**On an Apple Silicon Mac:** use a separate Rosetta (x86_64) venv — PyInstaller must freeze an x64 binary.
 
 ```bash
-cd ~/Documents/GitHub/jj_audio_website
-python3.11 -m venv .venv-desktop              # first time only
-source .venv-desktop/bin/activate
+cd ~/Documents/-\ PERSONAL\ PROJECTS\ GITHUB\ -/jj_audio_website
+
+# First time only — x86_64 Python under Rosetta
+arch -x86_64 python3.11 -m venv .venv-desktop-x64
+source .venv-desktop-x64/bin/activate
 python -m pip install --upgrade pip
 python -m pip install --upgrade torch torchaudio
 pip install -e ".[demucs,desktop,roformer,separator]"
-make mixer-build                              # skip if frontend/build is committed
-make desktop-bundle-ffmpeg
-make desktop-build
-make desktop-pkg
+
+# Build (skip mixer-build if frontend/build is already committed)
+make mixer-build
+.venv-desktop-x64/bin/python packaging/bundle_ffmpeg.py
+.venv-desktop-x64/bin/python -m PyInstaller packaging/audio_tools.spec --noconfirm --clean
+./packaging/make_pkg.sh
 ```
+
 → `~/Downloads/AudioTools-0.1.2-macos-x64-intel.pkg`
+
+No Intel Mac or Rosetta venv? Trigger the **desktop-release** GitHub Action (`workflow_dispatch`) — it builds the Intel pkg on `macos-15-intel`.
 
 Unsigned pkg unless you have Developer ID certs (see DESKTOP.md). Gatekeeper will complain — right-click → Open, or `xattr -cr` + `sudo installer`.
 
