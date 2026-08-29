@@ -40,6 +40,16 @@ def main() -> int:
     except Exception as exc:
         log.warning("Demucs prewarm skipped: %s", exc)
 
+    try:
+        from audio_to_tab.roformer import is_roformer_backend_available
+
+        if is_roformer_backend_available():
+            log.info("RoFormer backend available (weights download on first separation)")
+        else:
+            log.warning("RoFormer backend not installed; Full band preset will fail until extras are present")
+    except Exception as exc:
+        log.warning("RoFormer prewarm check skipped: %s", exc)
+
     return 0
 
 

@@ -13,6 +13,7 @@ from backend import db as db_module
 from backend.events import event_bus
 from backend.models import Job, JobArtifact, JobKindDB, JobStatusDB, Upload
 from backend.storage import LocalStorage, get_storage
+from audio_to_tab.isolate import isolate_timeout_multiplier
 
 
 @dataclass
@@ -46,10 +47,14 @@ class JobRecord:
     isolate_lead_rhythm_mode: str = "confident"
     isolate_guitar_checkpoint: str | None = None
     isolate_two_pass: bool = False
+    isolate_guitar_refine: bool = False
     isolate_emit_stems: list[str] | None = None
     isolate_fold_other_into_guitar: bool = True
+    isolate_fold_other_mode: str = "best_effort"
     isolate_dual_guitar: bool = False
     isolate_start_sec: float = 0.0
+    low_end_restore_db: float = 0.0
+    sub_bass_debleed: bool = False
     cancel_requested: bool = False
     work_dir: str | None = None
 
@@ -143,6 +148,11 @@ class JobManager:
         frame_threshold: float = 0.3,
         demucs_quality: str = "balanced",
         demucs_device: str = "cpu",
+        model: str = "htdemucs_6s",
+        guitar_refine: bool = False,
+        guitar_checkpoint: str | None = None,
+        low_end_restore_db: float = 0.0,
+        sub_bass_debleed: bool = False,
     ) -> JobRecord:
         if upload_id and not upload_key:
             upload_key = self.resolve_upload_key(upload_id, user_id)
@@ -162,6 +172,11 @@ class JobManager:
             "frame_threshold": frame_threshold,
             "demucs_quality": demucs_quality,
             "demucs_device": demucs_device,
+            "model": model,
+            "guitar_refine": guitar_refine,
+            "guitar_checkpoint": guitar_checkpoint,
+            "low_end_restore_db": low_end_restore_db,
+            "sub_bass_debleed": sub_bass_debleed,
         }
         db = db_module.SessionLocal()
         try:
@@ -200,8 +215,12 @@ class JobManager:
         lead_rhythm_mode: str | None = None,
         guitar_checkpoint: str | None = None,
         two_pass: bool = False,
+        guitar_refine: bool = False,
+        low_end_restore_db: float = 0.0,
+        sub_bass_debleed: bool = False,
         emit_stems: list[str] | None = None,
         fold_other_into_guitar: bool = True,
+        fold_other_mode: str = "best_effort",
         dual_guitar: bool = False,
     ) -> JobRecord:
         if not upload_key:
@@ -227,10 +246,17 @@ class JobManager:
             "lead_rhythm_mode": mode,
             "guitar_checkpoint": guitar_checkpoint,
             "two_pass": two_pass,
+            "guitar_refine": guitar_refine,
+            "low_end_restore_db": low_end_restore_db,
+            "sub_bass_debleed": sub_bass_debleed,
             "emit_stems": list(emit_stems) if emit_stems else None,
             "fold_other_into_guitar": fold_other_into_guitar,
+            "fold_other_mode": fold_other_mode,
             "dual_guitar": dual_guitar,
-            "timeout_sec": settings.job_timeout_for_quality(quality) * (2 if two_pass else 1),
+            "timeout_sec": settings.job_timeout_for_quality(quality)
+            * isolate_timeout_multiplier(
+                model=model, two_pass=two_pass, guitar_refine=guitar_refine
+            ),
         }
         db = db_module.SessionLocal()
         try:
@@ -293,10 +319,14 @@ class JobManager:
             isolate_lead_rhythm_mode=str(cfg.get("lead_rhythm_mode", "confident")),
             isolate_guitar_checkpoint=cfg.get("guitar_checkpoint"),
             isolate_two_pass=bool(cfg.get("two_pass", False)),
+            isolate_guitar_refine=bool(cfg.get("guitar_refine", False)),
             isolate_emit_stems=list(cfg["emit_stems"]) if cfg.get("emit_stems") else None,
             isolate_fold_other_into_guitar=bool(cfg.get("fold_other_into_guitar", True)),
+            isolate_fold_other_mode=str(cfg.get("fold_other_mode") or "best_effort"),
             isolate_dual_guitar=bool(cfg.get("dual_guitar", False)),
             isolate_start_sec=float(cfg.get("start_sec", 0.0)),
+            low_end_restore_db=float(cfg.get("low_end_restore_db") or 0.0),
+            sub_bass_debleed=bool(cfg.get("sub_bass_debleed", False)),
             cancel_requested=bool(row.cancel_requested),
             work_dir=str(self.jobs_dir / row.id),
         )

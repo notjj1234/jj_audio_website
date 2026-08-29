@@ -102,7 +102,7 @@ function Install-TesterDeps {
     & $py -m venv $Venv
     & $VenvPython -m pip install -U pip
     Install-TorchCpu -PythonExe $VenvPython
-    & $VenvPython -m pip install -e ".[demucs]"
+    & $VenvPython -m pip install -e ".[demucs,roformer,separator]"
     Write-Host "Done. Run: .\scripts\dev.ps1 ui   (or .\scripts\dev.ps1 tester)"
 }
 
@@ -168,7 +168,7 @@ Targets:
         & $py -m venv $Venv
         & $VenvPython -m pip install -U pip
         Install-TorchCpu -PythonExe $VenvPython
-        & $VenvPython -m pip install -e ".[dev,eval,demucs]"
+        & $VenvPython -m pip install -e ".[dev,eval,demucs,roformer,separator]"
         Write-Host "Done. Run: .\scripts\dev.ps1 ui   (or .\scripts\dev.ps1 tester)"
     }
     "install-demucs" {

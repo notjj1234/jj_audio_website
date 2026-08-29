@@ -10,6 +10,7 @@ import pytest
 from ui.isolate_state import (
     DEFAULT_SEPARATION_PRESET,
     DEFAULT_SPEED_PRESET,
+    DEFAULT_TRACK_OPTIONS,
     CUSTOM_STEM_CHOICES,
     ISOLATE_OUTPUT_NAME_KEY,
     ISOLATE_OUTPUT_NAME_PENDING_KEY,
@@ -37,7 +38,9 @@ from ui.isolate_state import (
     format_progress_label,
     format_source_caption,
     format_source_title,
+    guitar_track_radio_ids,
     infer_source_kind,
+    job_requires_roformer_backend,
     intra_stage_fraction,
     isolation_stages_for_job,
     isolate_ui_state_payload,
@@ -58,7 +61,10 @@ from ui.isolate_state import (
     resolve_isolate_user_id,
     resolve_separation_preset,
     resolve_speed_preset,
+    resolve_track_selection,
     running_progress_view,
+    normalize_guitar_track_selection,
+    tracks_picker_help,
     seed_consumed_job_ids,
     seed_notified_job_ids,
     os_notify_message,
@@ -81,6 +87,11 @@ from ui.isolate_state import (
     LISTEN_PICKER_KEY,
     LISTEN_PICKER_NEXT_KEY,
 )
+
+
+@pytest.fixture(autouse=True)
+def _cpu_edition_by_default(monkeypatch):
+    monkeypatch.delenv("AUDIO_TOOLS_EDITION", raising=False)
 
 
 def test_upload_fingerprint():
@@ -337,6 +348,10 @@ def test_isolate_reopen_handler_uses_pending_not_direct_widget_write():
     assert "apply_pending_output_name(st.session_state)" in source
     assert "apply_pending_youtube_url(st.session_state)" in source
     assert "reset_new_tab_source(st.session_state)" in source
+    assert "job_requires_roformer_backend(choice[\"model\"])" in source
+    assert "is_roformer_backend_available()" in source
+    assert "guitar_track_radio_ids" in source
+    assert "normalize_guitar_track_selection" in source
     assert "queue_youtube_url(st.session_state" in source
     assert '@st.dialog("Search YouTube"' in source
     assert "st.form(" in source
@@ -1047,7 +1062,8 @@ def test_should_auto_apply_job_respects_pin():
 
 def test_resolve_separation_preset_full_band():
     resolved = resolve_separation_preset("full_band")
-    assert resolved["model"] == "htdemucs_6s"
+    assert resolved["model"] == "bs_roformer_sw"
+    assert resolved["guitar_refine"] is False
     assert resolved["two_stems"] is None
     assert resolved["track_count"] == 4
     assert "Guitar" in resolved["tracks"]
@@ -1055,6 +1071,16 @@ def test_resolve_separation_preset_full_band():
     assert "Other" not in resolved["tracks"]
     assert resolved["emit_stems"] == ("vocals", "drums", "bass", "guitar")
     assert resolved["fold_other_into_guitar"] is True
+
+
+def test_resolve_separation_preset_best_guitar_uses_refine():
+    legacy = resolve_separation_preset("best_guitar")
+    current = resolve_separation_preset("full_band")
+    assert legacy["model"] == "bs_roformer_sw"
+    assert legacy["guitar_refine"] is True
+    assert current["guitar_refine"] is False
+    assert legacy["emit_stems"] == current["emit_stems"]
+    assert legacy["id"] == "custom"
 
 
 def test_resolve_separation_preset_essential():
@@ -1069,20 +1095,89 @@ def test_resolve_separation_preset_vocals_music():
     resolved = resolve_separation_preset("vocals_music")
     assert resolved["model"] == "htdemucs"
     assert resolved["two_stems"] == "vocals"
-    assert resolved["track_count"] == 2
-    assert "Instrumental" in resolved["tracks"]
+    assert resolved["track_count"] == 1
+    assert "instrumental" in resolved["tracks"].lower()
 
 
 def test_resolve_separation_preset_unknown_falls_back():
     resolved = resolve_separation_preset("not_a_real_preset")
-    assert resolved["id"] == DEFAULT_SEPARATION_PRESET
+    assert resolved["id"] == "custom"
     assert resolved["model"] == "htdemucs_6s"
+    assert resolved["track_options"] == list(DEFAULT_TRACK_OPTIONS)
 
 
-def test_resolve_custom_separation_vocals_only_uses_two_stem_split():
-    resolved = resolve_custom_separation(["vocals"])
+def test_resolve_track_selection_default_demucs_guitar():
+    resolved = resolve_track_selection(DEFAULT_TRACK_OPTIONS)
+    assert resolved["model"] == "htdemucs_6s"
+    assert resolved["guitar_refine"] is False
+    assert resolved["emit_stems"] == ("vocals", "guitar")
+    assert resolved["caveat"] == ""
+
+
+def test_resolve_track_selection_roformer_guitar_refine():
+    resolved = resolve_track_selection(
+        ["vocals_demucs", "drums_demucs", "guitar_roformer_refine"]
+    )
+    assert resolved["model"] == "bs_roformer_sw"
+    assert resolved["guitar_refine"] is True
+    assert resolved["caveat"]
+    assert "BS-RoFormer" in resolved["caveat"]
+
+
+def test_resolve_track_selection_roformer_with_demucs_stems_notes_mixed_pass():
+    resolved = resolve_track_selection(["vocals_demucs", "guitar_roformer"])
+    assert resolved["model"] == "bs_roformer_sw"
+    assert "one BS-RoFormer pass" in resolved["caveat"]
+
+
+def test_resolve_track_selection_rejects_two_guitar_options():
+    with pytest.raises(ValueError, match="one guitar"):
+        resolve_track_selection(["guitar_demucs_6s", "guitar_roformer"])
+
+
+def test_guitar_track_radio_ids_without_roformer():
+    assert guitar_track_radio_ids(roformer_available=False) == ("none", "guitar_demucs_6s")
+    assert guitar_track_radio_ids(roformer_available=True) == (
+        "none",
+        "guitar_demucs_6s",
+        "guitar_roformer",
+        "guitar_roformer_refine",
+    )
+
+
+def test_normalize_guitar_track_selection_downgrades_roformer_when_unavailable():
+    assert (
+        normalize_guitar_track_selection("guitar_roformer_refine", roformer_available=False)
+        == "guitar_demucs_6s"
+    )
+    assert normalize_guitar_track_selection("guitar_roformer", roformer_available=True) == "guitar_roformer"
+    assert normalize_guitar_track_selection("none", roformer_available=False) == "none"
+
+
+def test_tracks_picker_help_mentions_install_when_roformer_missing():
+    missing = tracks_picker_help(roformer_available=False)
+    assert "bs-roformer-infer" in missing
+    assert tracks_picker_help(roformer_available=True) != missing
+
+
+def test_job_requires_roformer_backend():
+    assert job_requires_roformer_backend("bs_roformer_sw") is True
+    assert job_requires_roformer_backend("melband_roformer_guitar") is True
+    assert job_requires_roformer_backend("htdemucs_6s") is False
+
+
+def test_resolve_track_selection_vocals_instrumental_exclusive():
+    resolved = resolve_track_selection(["vocals_instrumental_demucs"])
     assert resolved["model"] == "htdemucs"
     assert resolved["two_stems"] == "vocals"
+    with pytest.raises(ValueError, match="cannot combine"):
+        resolve_track_selection(["vocals_instrumental_demucs", "drums_demucs"])
+
+
+def test_resolve_custom_separation_vocals_only_uses_four_stem_demucs():
+    resolved = resolve_custom_separation(["vocals"])
+    assert resolved["model"] == "htdemucs"
+    assert resolved["two_stems"] is None
     assert resolved["stems"] == ["vocals"]
 
 
@@ -1091,7 +1186,8 @@ def test_resolve_custom_separation_piano_and_vocals_needs_six_stem_model():
     assert resolved["model"] == "htdemucs_6s"
     assert resolved["two_stems"] is None
     assert resolved["stems"] == ["vocals", "piano"]
-    assert resolved["tracks"] == "Vocals, Piano"
+    assert "Vocals (Demucs)" in resolved["tracks"]
+    assert "Piano (Demucs 6-stem)" in resolved["tracks"]
 
 
 def test_resolve_custom_separation_guitar_needs_six_stem_model():

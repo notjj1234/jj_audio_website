@@ -63,7 +63,70 @@ python eval/lead_rhythm/score_guitar_stage1.py \
 
 Pass only if guitar SIR / listening beats stock on the same clips without a worse piano-bleed regression.
 
-## Stage 2 — Lead / Rhythm post-process
+### BS-RoFormer-SW / MelBand refine / Tab PDF path A/B
+
+The isolate path and the Tab PDF pipeline now share `model`, `guitar_refine` (residual-aware), optional guitar-ft (cache only on the tab path), and opt-in `--low-end-restore-db`.
+
+```bash
+export PYTHONPATH=src:.
+audio-isolate --audio CLIP --output ./eval/lead_rhythm/out_baseline \
+  --model htdemucs_6s --quality fast
+audio-isolate --audio CLIP --output ./eval/lead_rhythm/out_roformer \
+  --model bs_roformer_sw --quality fast
+audio-isolate --audio CLIP --output ./eval/lead_rhythm/out_refine \
+  --model bs_roformer_sw --quality fast --guitar-refine
+audio-isolate --audio CLIP --output ./eval/lead_rhythm/out_restore \
+  --model htdemucs_6s --quality fast --low-end-restore-db 3
+python eval/lead_rhythm/score_guitar_stage1.py \
+  --dirs baseline=./eval/lead_rhythm/out_baseline \
+         roformer=./eval/lead_rhythm/out_roformer \
+         refine=./eval/lead_rhythm/out_refine \
+         restore=./eval/lead_rhythm/out_restore \
+  --gt-guitar /path/to/gt_guitar.wav \
+  --note "high-gain solo + bass"
+```
+
+Focus on `low_band_energy_share`, `competitor_overlap` (bass must not explode), and SI-SDR when GT exists. Then score transcription recall on a low-E fixture with `eval/score_transcription.py` through `run_pipeline` (`PipelineConfig.model` / `guitar_refine` / `low_end_restore_db` / `sub_bass_debleed`).
+
+### Dense-mix recovery A/B (subtractive de-bleed + harmonic restore)
+
+Use a **dense high-gain solo clip with bass/drums present** (not a solo section). Stay Advanced **opt-in** until listening + metrics pass.
+
+```bash
+export PYTHONPATH=src:.
+audio-isolate --audio CLIP --output ./eval/lead_rhythm/out_stock \
+  --model htdemucs_6s --quality fast
+audio-isolate --audio CLIP --output ./eval/lead_rhythm/out_roformer \
+  --model bs_roformer_sw --quality fast
+audio-isolate --audio CLIP --output ./eval/lead_rhythm/out_roformer_refine \
+  --model bs_roformer_sw --quality fast --guitar-refine
+audio-isolate --audio CLIP --output ./eval/lead_rhythm/out_roformer_recover \
+  --model bs_roformer_sw --quality fast --guitar-refine --low-end-recovery
+# Or explicit stages:
+audio-isolate --audio CLIP --output ./eval/lead_rhythm/out_debleed \
+  --model htdemucs_6s --quality fast --sub-bass-debleed
+audio-isolate --audio CLIP --output ./eval/lead_rhythm/out_debleed_restore \
+  --model htdemucs_6s --quality fast --sub-bass-debleed --low-end-restore-db 3
+python eval/lead_rhythm/score_guitar_stage1.py \
+  --dirs stock=./eval/lead_rhythm/out_stock \
+         roformer=./eval/lead_rhythm/out_roformer \
+         roformer_refine=./eval/lead_rhythm/out_roformer_refine \
+         roformer_recover=./eval/lead_rhythm/out_roformer_recover \
+         debleed=./eval/lead_rhythm/out_debleed \
+         debleed_restore=./eval/lead_rhythm/out_debleed_restore \
+  --gt-guitar /path/to/gt_guitar.wav \
+  --note "dense high-gain + bass/drums"
+```
+
+Each run writes `low_end_recovery_diagnostics.json` when de-bleed or restore is enabled. Pass when `low_band_energy_share` improves vs stock/refine without exploding `competitor_overlap` (bass bleed). Then compare transcription recall on low-E riffs:
+
+```bash
+python eval/score_transcription.py --help
+# Run run_pipeline with PipelineConfig(sub_bass_debleed=True, low_end_restore_db=3, ...)
+# against baseline stock htdemucs_6s on the same clip.
+```
+
+RoFormer guitar needs `bs-roformer-infer` in the same venv. guitar-ft on Tab PDF uses cache only (no runtime download).
 
 ## Stage 2 — Lead / Rhythm post-process
 

@@ -11,7 +11,7 @@ from backend.config import settings
 from backend.contracts import JobKind, JobStatus
 from backend.jobs import single_flight
 from backend.jobs.manager import JobManager
-from audio_to_tab.isolate import IsolateConfig, separate_stems
+from audio_to_tab.isolate import IsolateConfig, isolate_timeout_multiplier, separate_stems
 from audio_to_tab.pipeline import PipelineConfig, run_pipeline
 
 logger = logging.getLogger(__name__)
@@ -72,6 +72,11 @@ async def _run_job_async(job_manager: JobManager, job_id: str) -> None:
             frame_threshold=job.frame_threshold,
             demucs_quality=job.demucs_quality,
             demucs_device=job.demucs_device,
+            model=job.isolate_model or "htdemucs_6s",
+            guitar_refine=job.isolate_guitar_refine,
+            guitar_checkpoint=job.isolate_guitar_checkpoint,
+            low_end_restore_db=job.low_end_restore_db,
+            sub_bass_debleed=job.sub_bass_debleed,
         )
 
         artifacts = await asyncio.wait_for(
@@ -158,8 +163,11 @@ async def _run_isolate_job_async(job_manager: JobManager, job_id: str) -> None:
         future.result(timeout=60)
 
     timeout = settings.job_timeout_for_quality(job.isolate_quality)
-    if job.isolate_two_pass:
-        timeout *= 2
+    timeout *= isolate_timeout_multiplier(
+        model=job.isolate_model,
+        two_pass=job.isolate_two_pass,
+        guitar_refine=job.isolate_guitar_refine,
+    )
 
     try:
         config = IsolateConfig(
@@ -173,8 +181,12 @@ async def _run_isolate_job_async(job_manager: JobManager, job_id: str) -> None:
             lead_rhythm_mode=job.isolate_lead_rhythm_mode,
             guitar_checkpoint=job.isolate_guitar_checkpoint,
             two_pass=job.isolate_two_pass,
+            guitar_refine=job.isolate_guitar_refine,
             emit_stems=tuple(job.isolate_emit_stems) if job.isolate_emit_stems else None,
             fold_other_into_guitar=job.isolate_fold_other_into_guitar,
+            fold_other_mode=job.isolate_fold_other_mode,
+            low_end_restore_db=job.low_end_restore_db,
+            sub_bass_debleed=job.sub_bass_debleed,
         )
 
         artifacts = await asyncio.wait_for(

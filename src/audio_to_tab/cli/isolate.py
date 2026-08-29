@@ -16,6 +16,7 @@ from audio_to_tab.isolate import (
     separate_stems,
 )
 from audio_to_tab.lead_rhythm import LeadRhythmThresholds
+from audio_to_tab.roformer import ROFORMER_INSTALL_HINT, ROFORMER_MODELS, is_roformer_backend_available
 from audio_to_tab.separate import is_demucs_available
 
 
@@ -28,7 +29,9 @@ def main() -> None:
         ),
         epilog=(
             "Models: htdemucs_6s (6 stems: drums/bass/other/vocals/guitar/piano; "
-            "piano quality is limited), htdemucs / htdemucs_ft (4 stems). "
+            "piano quality is limited), htdemucs / htdemucs_ft (4 stems), "
+            "bs_roformer_sw (opt-in 6-stem BS-RoFormer-SW), "
+            "melband_roformer_guitar (opt-in 2-stem guitar specialist). "
             f"{DEMUCS_INSTALL_HINT}"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -40,7 +43,7 @@ def main() -> None:
         "-n",
         choices=list(SUPPORTED_MODELS),
         default="htdemucs_6s",
-        help="Demucs model (default: htdemucs_6s)",
+        help="Demucs model or opt-in RoFormer engine (default: htdemucs_6s)",
     )
     parser.add_argument(
         "--quality",
@@ -97,6 +100,48 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--guitar-refine",
+        action="store_true",
+        help=(
+            "Opt-in: second-pass MelBand guitar specialist (becruily) on the guitar "
+            "stem. Requires pip install -e \".[separator]\". Skipped if unavailable."
+        ),
+    )
+    parser.add_argument(
+        "--low-end-restore-db",
+        type=float,
+        default=0.0,
+        help=(
+            "Opt-in guitar-stem 60–200 Hz boost in dB (0 = off). "
+            "Does not enable the bass-bleed high-pass."
+        ),
+    )
+    parser.add_argument(
+        "--sub-bass-debleed",
+        action="store_true",
+        help=(
+            "Opt-in: subtract scaled bass/drum energy below ~150 Hz from the guitar stem "
+            "(default off)."
+        ),
+    )
+    parser.add_argument(
+        "--low-end-recovery",
+        action="store_true",
+        help=(
+            "Opt-in dense-mix recovery: enables --sub-bass-debleed and, unless "
+            "--low-end-restore-db is set, applies a 3 dB harmonic restore."
+        ),
+    )
+    parser.add_argument(
+        "--fold-other-mode",
+        choices=["full", "best_effort", "band_limited"],
+        default="best_effort",
+        help=(
+            "How to fold leftover Other into Guitar (default: best_effort = skip "
+            "piano-like Other, else mix the guitar band only). full = legacy mix-all."
+        ),
+    )
+    parser.add_argument(
         "--dual-guitar",
         action="store_true",
         help="Deprecated and ignored alias for --lead-rhythm (split is now automatic)",
@@ -131,7 +176,10 @@ def main() -> None:
             file=sys.stderr,
         )
 
-    if not is_demucs_available():
+    if args.model in ROFORMER_MODELS:
+        if not is_roformer_backend_available():
+            raise SystemExit(f"RoFormer backend is not installed. {ROFORMER_INSTALL_HINT}")
+    elif not is_demucs_available():
         raise SystemExit(f"Demucs is not installed. {DEMUCS_INSTALL_HINT}")
 
     max_dur = None if args.max_duration <= 0 else args.max_duration
@@ -149,6 +197,10 @@ def main() -> None:
         or args.lr_role_margin_min is not None
         or args.lr_allow_spectral_emit
     )
+    sub_bass_debleed = bool(args.sub_bass_debleed or args.low_end_recovery)
+    low_end_restore_db = float(args.low_end_restore_db or 0.0)
+    if args.low_end_recovery and low_end_restore_db < 1e-6:
+        low_end_restore_db = 3.0
     config = IsolateConfig(
         model=args.model,
         quality=args.quality,
@@ -165,7 +217,11 @@ def main() -> None:
         ),
         guitar_checkpoint=args.guitar_checkpoint,
         two_pass=bool(args.two_pass),
+        guitar_refine=bool(args.guitar_refine),
+        fold_other_mode=args.fold_other_mode,
         lead_rhythm_thresholds=thr if has_thr_override else None,
+        low_end_restore_db=low_end_restore_db,
+        sub_bass_debleed=sub_bass_debleed,
     )
 
     def progress(stage: str, msg: str) -> None:

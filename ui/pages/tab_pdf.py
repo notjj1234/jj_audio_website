@@ -26,15 +26,20 @@ from audio_to_tab.pipeline import (  # noqa: E402
     run_pipeline,
 )
 from audio_to_tab.ingest import YouTubeDownloadError, is_youtube_url  # noqa: E402
-from audio_to_tab.separate import is_demucs_available  # noqa: E402
+from audio_to_tab.roformer import is_roformer_backend_available  # noqa: E402
+from audio_to_tab.separate import guitar_ft_weights_path, is_demucs_available  # noqa: E402
+from ui.isolate_state import (  # noqa: E402
+    TRACK_OPTIONS,
+    guitar_track_radio_ids,
+    normalize_guitar_track_selection,
+)
 
 
 def main() -> None:
     st.title("Tab PDF (demo)")
     st.error(
-        "**NOT A FINISHED PRODUCT**. Tab PDF barely functions. "
-        "Tabs are 90% wrong and or unusable. This page is here so I can experiment with it "
-       
+        "**JJs stuff — NOT A FINISHED PRODUCT**. Tab PDF barely works. "
+        "Tabs are 90% wrong and or unusable. This page is here so I can experiment with it."
     )
     st.warning(
         "Best on short solo-guitar clips. For full songs, isolate guitar first on "
@@ -42,7 +47,10 @@ def main() -> None:
     )
 
     demucs_ok = is_demucs_available()
-    if not demucs_ok:
+    roformer_ok = is_roformer_backend_available()
+    guitar_ft_ok = guitar_ft_weights_path().is_file()
+    can_separate = demucs_ok or roformer_ok
+    if not can_separate:
         st.info(
             "Stem separation is unavailable (Demucs not installed). "
             "Conversions will run on the full mix — quality may be lower for songs with drums/bass. "
@@ -78,16 +86,88 @@ def main() -> None:
     with st.expander("Conversion settings", expanded=not has_results):
         title = st.text_input("Tab title", value="Guitar Tab")
         separate_stems = st.toggle(
-            "Separate guitar stem (Demucs) — required for full mixes",
-            value=demucs_ok,
-            disabled=not demucs_ok,
+            "Separate guitar stem — required for full mixes",
+            value=can_separate,
+            disabled=not can_separate,
             help=(
                 "Turn off for solo guitar uploads (much faster). "
                 "Install Demucs to enable: make install-demucs"
-                if not demucs_ok
+                if not can_separate
                 else "Turn off only for solo guitar uploads (much faster)."
             ),
         )
+        tab_model = "htdemucs_6s"
+        tab_guitar_refine = False
+        tab_guitar_checkpoint = None
+        tab_low_end_restore_db = 0.0
+        tab_sub_bass_debleed = False
+        if separate_stems and can_separate:
+            if "tab_low_end_restore_db" not in st.session_state:
+                st.session_state["tab_low_end_restore_db"] = 0.0
+            if "tab_sub_bass_debleed" not in st.session_state:
+                st.session_state["tab_sub_bass_debleed"] = False
+            radio_ids = guitar_track_radio_ids(roformer_available=roformer_ok)
+            guitar_labels = {
+                oid: TRACK_OPTIONS[oid]["label"] if oid in TRACK_OPTIONS else oid
+                for oid in radio_ids
+                if oid != "none"
+            }
+            current_engine = str(st.session_state.get("tab_guitar_engine") or "guitar_demucs_6s")
+            if current_engine not in guitar_labels:
+                st.session_state["tab_guitar_engine"] = normalize_guitar_track_selection(
+                    current_engine,
+                    roformer_available=roformer_ok,
+                )
+                if st.session_state["tab_guitar_engine"] not in guitar_labels:
+                    st.session_state["tab_guitar_engine"] = next(iter(guitar_labels))
+            engine = st.radio(
+                "Guitar separation",
+                options=list(guitar_labels.keys()),
+                format_func=lambda oid: guitar_labels[oid],
+                key="tab_guitar_engine",
+            )
+            if engine == "guitar_roformer":
+                tab_model = "bs_roformer_sw"
+            elif engine == "guitar_roformer_refine":
+                tab_model = "bs_roformer_sw"
+                tab_guitar_refine = True
+            else:
+                tab_model = "htdemucs_6s"
+            if tab_model == "htdemucs_6s":
+                if guitar_ft_ok:
+                    if st.checkbox(
+                        "Use cached guitar-ft Demucs weights",
+                        value=False,
+                        key="tab_guitar_ft",
+                        help="Uses guitar-ft already in TORCH_HOME. Does not download.",
+                    ):
+                        tab_guitar_checkpoint = "htdemucs_6s_guitar_ft"
+                else:
+                    st.caption(
+                        "guitar-ft is available after a one-time ~330 MB download from "
+                        "Audio Isolation → Advanced."
+                    )
+            tab_low_end_restore_db = float(
+                st.slider(
+                    "Low-end restore (dB)",
+                    min_value=0.0,
+                    max_value=6.0,
+                    step=1.0,
+                    key="tab_low_end_restore_db",
+                    help=(
+                        "Boosts 60–200 Hz on the guitar stem before transcription. "
+                        "0 = off. Opt-in; changes A/B scores."
+                    ),
+                )
+            )
+            tab_sub_bass_debleed = st.checkbox(
+                "Subtractive bass de-bleed",
+                key="tab_sub_bass_debleed",
+                help=(
+                    "Subtracts scaled bass/drum energy below ~150 Hz from the guitar stem "
+                    "before transcription. Opt-in; default off."
+                ),
+            )
         with st.expander("Advanced transcription settings"):
             mix_aware = st.checkbox("Mix-aware filtering (stricter note filters)", value=True)
             tempo_override = st.number_input(
@@ -132,10 +212,10 @@ def main() -> None:
             )
         youtube_enabled = st.checkbox(
             "Download from YouTube",
-            value=not bool(getattr(sys, "frozen", False)),
+            value=False,
             help=(
-                "Off by default in the desktop installer. Enable only if you have rights "
-                "to the audio. Arbitrary URLs are rejected."
+                "Off by default. Enable only if you have rights to the audio. "
+                "Arbitrary URLs are rejected."
             ),
         )
         youtube_url = ""
@@ -158,8 +238,8 @@ def main() -> None:
                 st.error("Only YouTube URLs are allowed.")
                 return
 
-            effective_separate = separate_stems and demucs_ok
-            skipped_separation = separate_stems and not demucs_ok
+            effective_separate = separate_stems and can_separate
+            skipped_separation = separate_stems and not can_separate
 
             output_dir = run_output_dir()
             config = PipelineConfig(
@@ -170,6 +250,11 @@ def main() -> None:
                 onset_threshold=onset_threshold,
                 frame_threshold=frame_threshold,
                 tempo_bpm_override=tempo_override if tempo_override > 0 else None,
+                model=tab_model,
+                guitar_refine=tab_guitar_refine,
+                guitar_checkpoint=tab_guitar_checkpoint,
+                low_end_restore_db=tab_low_end_restore_db,
+                sub_bass_debleed=tab_sub_bass_debleed,
             )
 
             # Known, fixed stage order the pipeline reports via on_progress — used only to

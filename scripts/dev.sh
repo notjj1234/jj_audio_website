@@ -116,7 +116,7 @@ install_tester_deps() {
   "$py" -m venv "$VENV"
   "${VENV}/bin/python" -m pip install -U pip
   install_torch_cpu_if_needed "${VENV}/bin/python"
-  "${VENV}/bin/python" -m pip install -e ".[demucs]"
+  "${VENV}/bin/python" -m pip install -e ".[demucs,roformer,separator]"
   echo "Done. Run: ./scripts/dev.sh ui   (or ./scripts/dev.sh tester)"
 }
 
@@ -179,7 +179,7 @@ EOF
     "$PY" -m venv "$VENV"
     "${VENV}/bin/python" -m pip install -U pip
     install_torch_cpu_if_needed "${VENV}/bin/python"
-    "${VENV}/bin/python" -m pip install -e ".[dev,eval,demucs]"
+    "${VENV}/bin/python" -m pip install -e ".[dev,eval,demucs,roformer,separator]"
     echo "Done. Run: ./scripts/dev.sh ui   (or ./scripts/dev.sh tester)"
     ;;
   install-demucs)

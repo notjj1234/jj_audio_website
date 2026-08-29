@@ -14,38 +14,132 @@ const STEM_LABELS: Record<string, string> = {
   other: "Other",
   guitar: "Guitar",
   piano: "Piano",
-  // Legacy artifacts only — default isolate path no longer emits these.
   lead_guitar: "Lead (legacy)",
   rhythm_guitar: "Rhythm (legacy)",
   guitar1: "Guitar 1",
   guitar2: "Guitar 2",
 };
 
-const SEPARATION_PRESETS = {
-  full_band: {
-    label: "Full band — Vocals, Drums, Bass, Guitar (4 tracks)",
-    model: "htdemucs_6s",
-    two_stems: null as string | null,
-    emit_stems: ["vocals", "drums", "bass", "guitar"] as string[],
-    fold_other_into_guitar: true,
+const TRACK_OPTIONS = {
+  vocals_demucs: { label: "Vocals (Demucs)", stem: "vocals" },
+  drums_demucs: { label: "Drums (Demucs)", stem: "drums" },
+  bass_demucs: { label: "Bass (Demucs)", stem: "bass" },
+  other_demucs: { label: "Other (Demucs)", stem: "other" },
+  piano_demucs: { label: "Piano (Demucs 6-stem)", stem: "piano" },
+  guitar_demucs_6s: { label: "Guitar (Demucs 6-stem, weaker)", stem: "guitar" },
+  guitar_roformer: { label: "Guitar (BS-RoFormer, better, slower)", stem: "guitar" },
+  guitar_roformer_refine: {
+    label: "Guitar (BS-RoFormer + MelBand refine, best, slowest)",
+    stem: "guitar",
   },
-  essential: {
-    label: "Essential tracks — Vocals, Drums, Bass, Other (4 tracks)",
-    model: "htdemucs",
-    two_stems: null,
-    emit_stems: ["vocals", "drums", "bass", "other"] as string[],
-    fold_other_into_guitar: true,
-  },
-  vocals_music: {
-    label: "Vocals & music — Vocals, Instrumental (2 tracks)",
-    model: "htdemucs",
-    two_stems: "vocals",
-    emit_stems: null as string[] | null,
-    fold_other_into_guitar: true,
+  vocals_instrumental_demucs: {
+    label: "Vocals & instrumental (Demucs 2-stem)",
+    stem: "vocals",
   },
 } as const;
 
-type PresetId = keyof typeof SEPARATION_PRESETS;
+type TrackOptionId = keyof typeof TRACK_OPTIONS;
+
+const GUITAR_TRACK_OPTION_IDS = new Set<TrackOptionId>([
+  "guitar_demucs_6s",
+  "guitar_roformer",
+  "guitar_roformer_refine",
+]);
+
+const DEMUCS_STEM_CHECKBOX_IDS: TrackOptionId[] = [
+  "vocals_demucs",
+  "drums_demucs",
+  "bass_demucs",
+  "piano_demucs",
+  "other_demucs",
+];
+
+const VOCALS_INSTRUMENTAL_OPTION_ID: TrackOptionId = "vocals_instrumental_demucs";
+const DEFAULT_TRACK_OPTIONS: TrackOptionId[] = ["vocals_demucs", "guitar_demucs_6s"];
+
+const ROFORMER_DOWNLOAD_CAVEAT =
+  "Downloads ~700 MB BS-RoFormer-SW weights on first use, then a guitar specialist (~45 MB). Much slower on CPU. Community weights have no stated license — use accordingly.";
+const ROFORMER_MIXED_STEMS_NOTE =
+  "All stems are separated in one BS-RoFormer pass; unselected stems are discarded.";
+const TRACKS_PICKER_HELP =
+  "Pick the stems you want. Guitar can use Demucs (faster) or BS-RoFormer (better quality, much slower on CPU).";
+
+type ResolvedTrackSelection = {
+  model: string;
+  two_stems: string | null;
+  emit_stems: string[];
+  fold_other_into_guitar: boolean;
+  guitar_refine: boolean;
+  caveat: string;
+};
+
+function trackSelectionCaveat(optionIds: string[], usesRoformer: boolean): string {
+  const parts: string[] = [];
+  if (usesRoformer) {
+    parts.push(ROFORMER_DOWNLOAD_CAVEAT);
+    if (optionIds.some((id) => !GUITAR_TRACK_OPTION_IDS.has(id as TrackOptionId))) {
+      parts.push(ROFORMER_MIXED_STEMS_NOTE);
+    }
+  }
+  return parts.join(" ");
+}
+
+function resolveTrackSelection(optionIds: string[]): ResolvedTrackSelection {
+  const ids = optionIds.filter((id): id is TrackOptionId => id in TRACK_OPTIONS);
+  if (ids.length === 0) {
+    throw new Error("Pick at least one track to separate.");
+  }
+
+  const guitarPicks = ids.filter((id) => GUITAR_TRACK_OPTION_IDS.has(id));
+  if (guitarPicks.length > 1) {
+    throw new Error("Pick only one guitar option.");
+  }
+
+  if (ids.includes(VOCALS_INSTRUMENTAL_OPTION_ID)) {
+    if (ids.length > 1) {
+      throw new Error("Vocals & instrumental cannot combine with other tracks.");
+    }
+    return {
+      model: "htdemucs",
+      two_stems: "vocals",
+      emit_stems: ["vocals"],
+      fold_other_into_guitar: true,
+      guitar_refine: false,
+      caveat: "",
+    };
+  }
+
+  const emit: string[] = [];
+  const customStems: string[] = [];
+  for (const oid of ids) {
+    const stem = TRACK_OPTIONS[oid].stem;
+    if (!emit.includes(stem)) emit.push(stem);
+    if (!customStems.includes(stem)) customStems.push(stem);
+  }
+
+  const usesRoformer =
+    guitarPicks.length === 1 &&
+    (guitarPicks[0] === "guitar_roformer" || guitarPicks[0] === "guitar_roformer_refine");
+  const guitarRefine = guitarPicks[0] === "guitar_roformer_refine";
+
+  let model: string;
+  if (usesRoformer) {
+    model = "bs_roformer_sw";
+  } else if (customStems.includes("guitar") || customStems.includes("piano")) {
+    model = "htdemucs_6s";
+  } else {
+    model = "htdemucs";
+  }
+
+  return {
+    model,
+    two_stems: null,
+    emit_stems: emit,
+    fold_other_into_guitar: !customStems.includes("other"),
+    guitar_refine: guitarRefine,
+    caveat: trackSelectionCaveat(ids, usesRoformer),
+  };
+}
 
 const AUDIO_KINDS = new Set(Object.keys(STEM_LABELS));
 
@@ -73,9 +167,23 @@ function readAdvancedOpen(): boolean {
   }
 }
 
+type GuitarTrackChoice = "none" | TrackOptionId;
+
 export function IsolatePage() {
   const [file, setFile] = useState<File | null>(null);
-  const [preset, setPreset] = useState<PresetId>("full_band");
+  const [demucsChecked, setDemucsChecked] = useState<Record<TrackOptionId, boolean>>({
+    vocals_demucs: true,
+    drums_demucs: false,
+    bass_demucs: false,
+    piano_demucs: false,
+    other_demucs: false,
+    guitar_demucs_6s: false,
+    guitar_roformer: false,
+    guitar_roformer_refine: false,
+    vocals_instrumental_demucs: false,
+  });
+  const [guitarTrack, setGuitarTrack] = useState<GuitarTrackChoice>("guitar_demucs_6s");
+  const [vocalsInstrumentalOnly, setVocalsInstrumentalOnly] = useState(false);
   const [processingMode, setProcessingMode] = useState("balanced");
   const [capabilities, setCapabilities] = useState<api.SystemCapabilities | null>(null);
   const [duration, setDuration] = useState<number | null>(null);
@@ -93,6 +201,34 @@ export function IsolatePage() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const previewStopRef = useRef<(() => void) | null>(null);
   const objectUrlRef = useRef<string | null>(null);
+
+  const trackOptions = useMemo((): TrackOptionId[] => {
+    if (vocalsInstrumentalOnly) {
+      return [VOCALS_INSTRUMENTAL_OPTION_ID];
+    }
+    const options = DEMUCS_STEM_CHECKBOX_IDS.filter((id) => demucsChecked[id]);
+    if (guitarTrack !== "none") {
+      options.push(guitarTrack);
+    }
+    return options;
+  }, [demucsChecked, guitarTrack, vocalsInstrumentalOnly]);
+
+  const resolved = useMemo((): ResolvedTrackSelection => {
+    try {
+      return resolveTrackSelection(trackOptions);
+    } catch {
+      return resolveTrackSelection(DEFAULT_TRACK_OPTIONS);
+    }
+  }, [trackOptions]);
+
+  const pickerError = useMemo(() => {
+    try {
+      resolveTrackSelection(trackOptions);
+      return null;
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  }, [trackOptions]);
 
   useEffect(() => {
     let cancelled = false;
@@ -221,10 +357,18 @@ export function IsolatePage() {
     };
   }
 
+  function toggleDemucsStem(id: TrackOptionId, checked: boolean) {
+    setDemucsChecked((prev) => ({ ...prev, [id]: checked }));
+  }
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     if (!file) {
       setError("Choose an audio file");
+      return;
+    }
+    if (pickerError) {
+      setError(pickerError);
       return;
     }
     if (useRegion) {
@@ -251,19 +395,19 @@ export function IsolatePage() {
     stopWatch?.();
     setClipLabel(useRegion && regionLabel ? regionLabel : null);
 
-    const presetCfg = SEPARATION_PRESETS[preset];
     const body: Record<string, unknown> = {
       upload_id: "",
-      model: presetCfg.model,
+      model: resolved.model,
       processing_mode: processingMode,
+      emit_stems: [...resolved.emit_stems],
+      fold_other_into_guitar: resolved.fold_other_into_guitar,
     };
-    if (presetCfg.two_stems) {
-      body.two_stems = presetCfg.two_stems;
+    if (resolved.two_stems) {
+      body.two_stems = resolved.two_stems;
     }
-    if (presetCfg.emit_stems) {
-      body.emit_stems = [...presetCfg.emit_stems];
+    if (resolved.guitar_refine) {
+      body.guitar_refine = true;
     }
-    body.fold_other_into_guitar = presetCfg.fold_other_into_guitar;
     if (useRegion) {
       body.start_sec = regionStart;
       body.end_sec = regionEnd;
@@ -301,11 +445,20 @@ export function IsolatePage() {
       )
     : [];
 
+  const guitarRadioOptions: { id: GuitarTrackChoice; label: string }[] = [
+    { id: "none", label: "No guitar" },
+    ...Array.from(GUITAR_TRACK_OPTION_IDS).map((id) => ({
+      id,
+      label: TRACK_OPTIONS[id].label,
+    })),
+  ];
+
   return (
     <div>
       <h1>Isolate</h1>
       <p className="lede">
-        Separate stems with Demucs. Pick tracks, an optional section, and a processing mode.
+        Separate stems. Pick labeled tracks (Demucs or BS-RoFormer for guitar), an optional
+        section, and a processing mode.
       </p>
       <form
         className={`stack${job ? " stack-secondary" : ""}`}
@@ -320,20 +473,50 @@ export function IsolatePage() {
           />
         </label>
 
-        <label className="field">
-          Tracks to separate
-          <select
-            value={preset}
-            onChange={(e) => setPreset(e.target.value as PresetId)}
-            aria-label="Tracks to separate"
-          >
-            {(Object.keys(SEPARATION_PRESETS) as PresetId[]).map((id) => (
-              <option key={id} value={id}>
-                {SEPARATION_PRESETS[id].label}
-              </option>
-            ))}
-          </select>
-        </label>
+        <fieldset className="field">
+          <legend>Tracks to separate</legend>
+          <p className="hint">{TRACKS_PICKER_HELP}</p>
+          <label className="field">
+            <input
+              type="checkbox"
+              checked={vocalsInstrumentalOnly}
+              onChange={(e) => setVocalsInstrumentalOnly(e.target.checked)}
+            />{" "}
+            {TRACK_OPTIONS[VOCALS_INSTRUMENTAL_OPTION_ID].label}
+          </label>
+          {!vocalsInstrumentalOnly && (
+            <>
+              <div className="stack" style={{ marginTop: "0.5rem" }}>
+                {DEMUCS_STEM_CHECKBOX_IDS.map((id) => (
+                  <label key={id} className="field">
+                    <input
+                      type="checkbox"
+                      checked={demucsChecked[id]}
+                      onChange={(e) => toggleDemucsStem(id, e.target.checked)}
+                    />{" "}
+                    {TRACK_OPTIONS[id].label}
+                  </label>
+                ))}
+              </div>
+              <fieldset className="field" style={{ marginTop: "0.75rem" }}>
+                <legend>Guitar</legend>
+                {guitarRadioOptions.map(({ id, label }) => (
+                  <label key={id} className="field">
+                    <input
+                      type="radio"
+                      name="guitar_track"
+                      checked={guitarTrack === id}
+                      onChange={() => setGuitarTrack(id)}
+                    />{" "}
+                    {label}
+                  </label>
+                ))}
+              </fieldset>
+            </>
+          )}
+          {pickerError ? <p className="error">{pickerError}</p> : null}
+          {resolved.caveat ? <p className="hint">{resolved.caveat}</p> : null}
+        </fieldset>
 
         <fieldset className="field" disabled={!file}>
           <legend>Section</legend>
@@ -435,7 +618,7 @@ export function IsolatePage() {
         </details>
 
         {error && <p className="error">{error}</p>}
-        <button type="submit" disabled={busy}>
+        <button type="submit" disabled={busy || Boolean(pickerError)}>
           {busy ? "Starting…" : "Start isolation"}
         </button>
       </form>

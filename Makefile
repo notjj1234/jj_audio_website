@@ -1,4 +1,4 @@
-.PHONY: install install-demucs fixtures test eval eval-lead-rhythm eval-lead-rhythm-synth backend ui pipeline mixer-build help _check_python preflight tester desktop-bundle-ffmpeg desktop-build desktop-app desktop-pkg desktop-dmg
+.PHONY: install install-demucs install-roformer fixtures test eval eval-lead-rhythm eval-lead-rhythm-synth backend ui pipeline mixer-build help _check_python preflight tester desktop-bundle-ffmpeg desktop-build desktop-app desktop-pkg desktop-dmg
 
 VENV := .venv311
 VENV_PYTHON := $(VENV)/bin/python
@@ -28,6 +28,7 @@ help:
 	@echo "  make tester           - Preflight + install (if needed) + prewarm + UI"
 	@echo "  make install          - Create .venv311 and install dependencies"
 	@echo "  make install-demucs   - Install Demucs + PyTorch into the venv"
+	@echo "  make install-roformer - Optional BS-RoFormer-SW extra (guitar quality)"
 	@echo "  make fixtures         - Generate eval MIDI fixtures"
 	@echo "  make test             - Run pytest"
 	@echo "  make eval             - Run transcription eval harness"
@@ -67,11 +68,14 @@ install: _check_python
 	@if [ "$$(uname -s)" = "Linux" ]; then \
 		$(VENV_PYTHON) -m pip install --upgrade torch torchaudio --index-url https://download.pytorch.org/whl/cpu; \
 	fi
-	$(VENV_PYTHON) -m pip install -e ".[dev,eval,demucs]"
+	$(VENV_PYTHON) -m pip install -e ".[dev,eval,demucs,roformer,separator]"
 	@echo "Done. Run: make ui   (or make tester / ./scripts/dev.sh tester)"
 
 install-demucs:
 	$(PYTHON) -m pip install -r requirements-demucs.txt
+
+install-roformer:
+	$(PYTHON) -m pip install -e ".[roformer,separator]"
 
 fixtures:
 	$(PYTHON) eval/generate_fixtures.py

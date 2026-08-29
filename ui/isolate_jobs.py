@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
+import os
 import re
 import shutil
 import threading
@@ -25,7 +27,8 @@ _QUEUE_LOCK = threading.Lock()
 _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
 _WORKER_THREAD: threading.Thread | None = None
-_CURRENT_JOB_ID: str | None = None
+_ACTIVE_JOB_ID: str | None = None
+_ACTIVE_PROCESS: multiprocessing.Process | None = None
 
 
 @dataclass
@@ -44,9 +47,12 @@ class IsolateJobSpec:
     two_stems: str | None = None
     guitar_checkpoint: str | None = None
     two_pass: bool = False
+    guitar_refine: bool = False
     emit_stems: list[str] | None = None
     fold_other_into_guitar: bool = True
+    fold_other_mode: str = "best_effort"
     custom_stems: list[str] = field(default_factory=list)
+    track_options: list[str] = field(default_factory=list)
     source_fingerprint: str | None = None
     source_kind: str | None = None
     region_label: str | None = None
@@ -54,6 +60,8 @@ class IsolateJobSpec:
     created_at: float = 0.0
     audio_duration_sec: float | None = None
     prior_timing: dict[str, Any] | None = None
+    low_end_restore_db: float = 0.0
+    sub_bass_debleed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -92,7 +100,16 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    last_exc: OSError | None = None
+    for attempt in range(8):
+        try:
+            tmp.replace(path)
+            return
+        except OSError as exc:
+            last_exc = exc
+            time.sleep(0.02 * (attempt + 1))
+    if last_exc is not None:
+        raise last_exc
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -116,6 +133,9 @@ def _default_status(job_id: str) -> dict[str, Any]:
         "updated_at": time.time(),
         "started_at": None,
         "finished_at": None,
+        "completed_stages": [],
+        "pause_requested_at": None,
+        "paused_at": None,
     }
 
 
@@ -199,16 +219,126 @@ def enqueue_job(spec: IsolateJobSpec) -> str:
     return spec.id
 
 
-def remove_job(job_id: str) -> bool:
-    """Drop a job from the list (queued / failed / done). Does not start a second Demucs.
+def _abort_flag_path(job_id: str) -> Path:
+    return _job_dir(job_id) / "abort.flag"
 
-    Running jobs are marked cancelled so they leave the queue; an in-flight Demucs
-    process may still finish, but its result is ignored.
+
+def _checkpoint_dir(job_id: str) -> Path:
+    return _job_dir(job_id) / "checkpoint"
+
+
+def _request_abort(job_id: str) -> None:
+    _abort_flag_path(job_id).write_text("1", encoding="utf-8")
+
+
+def _clear_abort_flag(job_id: str) -> None:
+    _abort_flag_path(job_id).unlink(missing_ok=True)
+
+
+def _terminate_active_process(job_id: str) -> None:
+    with _QUEUE_LOCK:
+        proc = _ACTIVE_PROCESS
+        active_id = _ACTIVE_JOB_ID
+    if proc is None or active_id != job_id:
+        return
+    if not proc.is_alive():
+        return
+    proc.terminate()
+    proc.join(timeout=5.0)
+    if proc.is_alive():
+        proc.kill()
+        proc.join(timeout=2.0)
+
+
+def _delete_job_folder(job_id: str) -> bool:
+    path = jobs_root() / job_id
+    if not path.is_dir():
+        return False
+    shutil.rmtree(path, ignore_errors=True)
+    return not path.exists()
+
+
+def _finalize_job_after_process(job_id: str) -> None:
+    """Apply pause/cancel cleanup after the child process exits."""
+    status = read_status(job_id)
+    if not status:
+        return
+    st = status.get("status")
+    if st == "pausing":
+        write_status(
+            job_id,
+            status="paused",
+            message="Paused",
+            paused_at=time.time(),
+        )
+        _clear_abort_flag(job_id)
+    elif st == "cancelled":
+        _delete_job_folder(job_id)
+    elif st == "running":
+        write_status(
+            job_id,
+            status="failed",
+            stage="error",
+            message="Separation stopped unexpectedly",
+            error="Process exited before completion",
+            finished_at=time.time(),
+        )
+
+
+def pause_job(job_id: str) -> bool:
+    """Pause a running job: abort between stages and keep checkpoints on disk."""
+    if not job_id or "/" in job_id or "\\" in job_id or job_id in {".", ".."}:
+        return False
+    status = read_status(job_id)
+    if not status or status.get("status") != "running":
+        return False
+    _request_abort(job_id)
+    write_status(
+        job_id,
+        status="pausing",
+        message="Pausing…",
+        pause_requested_at=time.time(),
+    )
+    _terminate_active_process(job_id)
+    ensure_worker_started()
+    return True
+
+
+def resume_job(job_id: str) -> bool:
+    """Re-queue a paused job so it continues from the last saved stage."""
+    if not job_id or "/" in job_id or "\\" in job_id or job_id in {".", ".."}:
+        return False
+    status = read_status(job_id)
+    if not status or status.get("status") != "paused":
+        return False
+    if read_spec(job_id) is None:
+        return False
+    _clear_abort_flag(job_id)
+    write_status(
+        job_id,
+        status="queued",
+        stage="pending",
+        message="Queued",
+        progress=float(status.get("progress") or 0.0),
+        error=None,
+        pause_requested_at=None,
+        paused_at=status.get("paused_at"),
+    )
+    ensure_worker_started()
+    return True
+
+
+def remove_job(job_id: str) -> bool:
+    """Drop a job from the list (queued / paused / failed / done).
+
+    Running jobs are cancelled, their worker process is terminated, and the
+    folder is removed once the process exits.
     """
     if not job_id or "/" in job_id or "\\" in job_id or job_id in {".", ".."}:
         return False
     status = read_status(job_id)
-    if status and status.get("status") == "running":
+    if status and status.get("status") in {"running", "pausing"}:
+        _request_abort(job_id)
         write_status(
             job_id,
             status="cancelled",
@@ -217,12 +347,10 @@ def remove_job(job_id: str) -> bool:
             error="Removed from queue",
             finished_at=time.time(),
         )
+        _terminate_active_process(job_id)
+        ensure_worker_started()
         return True
-    path = jobs_root() / job_id
-    if not path.is_dir():
-        return False
-    shutil.rmtree(path, ignore_errors=True)
-    return not path.exists()
+    return _delete_job_folder(job_id)
 
 
 def delete_finished_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -312,7 +440,9 @@ def list_jobs(*, limit: int = 20) -> list[dict[str, Any]]:
     return rows[:limit]
 
 
-_IN_FLIGHT_STATUSES = frozenset({"queued", "running", "failed", "cancelled"})
+_IN_FLIGHT_STATUSES = frozenset(
+    {"queued", "running", "failed", "cancelled", "paused", "pausing"}
+)
 
 
 def list_in_flight_jobs(*, limit: int = 20) -> list[dict[str, Any]]:
@@ -327,11 +457,9 @@ def queued_job_ids() -> list[str]:
 
 def queued_wait_caption(job_id: str, queued_ids: list[str]) -> str:
     """Waiting line with queue position; never a fake percent."""
-    try:
-        n = queued_ids.index(job_id) + 1
-    except ValueError:
-        return "Waiting…"
-    return f"Waiting — position {n} of {len(queued_ids)}"
+    from ui.isolate_state import queued_wait_caption as _caption
+
+    return _caption(job_id, queued_ids)
 
 
 def merge_library_runs(
@@ -359,8 +487,22 @@ def merge_library_runs(
 
 
 def active_job_id() -> str | None:
+    """Job id the worker is starting, running, or stopping (process still alive)."""
     with _QUEUE_LOCK:
-        return _CURRENT_JOB_ID
+        return _ACTIVE_JOB_ID
+
+
+def worker_busy() -> bool:
+    """True while a child process is still running or being torn down."""
+    with _QUEUE_LOCK:
+        proc = _ACTIVE_PROCESS
+        if proc is not None and proc.is_alive():
+            return True
+        return _ACTIVE_JOB_ID is not None
+
+
+def _use_inline_worker() -> bool:
+    return os.environ.get("ISOLATE_JOBS_INLINE", "").strip() == "1"
 
 
 def _queued_job_ids() -> list[str]:
@@ -378,8 +520,12 @@ def _queued_job_ids() -> list[str]:
     return [job_id for _, job_id in rows]
 
 
+def _job_process_entry(job_id: str) -> None:
+    _run_one_job(job_id)
+
+
 def _run_one_job(job_id: str) -> None:
-    from audio_to_tab.isolate import IsolateConfig, separate_stems
+    from audio_to_tab.isolate import IsolateConfig, JobAborted, separate_stems
     from audio_to_tab.hardware import ensure_cuda_available, get_desktop_probe
     from ui.common import write_run_metadata
     from ui.isolate_state import (
@@ -399,15 +545,20 @@ def _run_one_job(job_id: str) -> None:
         return
 
     current = read_status(job_id)
-    if current and current.get("status") == "cancelled":
+    if current and current.get("status") in ("cancelled", "pausing"):
         return
+
+    _clear_abort_flag(job_id)
+    completed_stages = set(current.get("completed_stages") or []) if current else set()
 
     guitar_job = expects_guitar_stem(
         model=spec.model,
         two_stems=spec.two_stems,
         custom_stems=spec.custom_stems,
     )
-    stages = isolation_stages_for_job(expects_guitar=guitar_job)
+    stages = isolation_stages_for_job(
+        expects_guitar=guitar_job, guitar_refine=spec.guitar_refine
+    )
     clip_sec = spec.audio_duration_sec
     if clip_sec is None:
         clip_sec = spec.max_duration_sec
@@ -420,6 +571,7 @@ def _run_one_job(job_id: str) -> None:
         model=spec.model,
         expects_guitar=guitar_job,
         two_pass=spec.two_pass,
+        guitar_refine=spec.guitar_refine,
     )
     started = time.time()
     eta_fields = {
@@ -465,11 +617,15 @@ def _run_one_job(job_id: str) -> None:
         two_stems=spec.two_stems,
         guitar_checkpoint=spec.guitar_checkpoint,
         two_pass=spec.two_pass,
+        guitar_refine=spec.guitar_refine,
         emit_stems=tuple(spec.emit_stems) if spec.emit_stems else None,
         fold_other_into_guitar=spec.fold_other_into_guitar,
+        fold_other_mode=spec.fold_other_mode,
         # Default isolate path: never emit lead/rhythm.
         lead_rhythm=False,
         lead_rhythm_mode="confident",
+        low_end_restore_db=spec.low_end_restore_db,
+        sub_bass_debleed=spec.sub_bass_debleed,
     )
 
     progress_state: dict[str, Any] = {"stage": "ingest", "stage_started_wall": started}
@@ -495,12 +651,26 @@ def _run_one_job(job_id: str) -> None:
             stage_started_at=progress_state["stage_started_wall"],
         )
 
+    def should_abort() -> bool:
+        return _abort_flag_path(job_id).is_file()
+
+    def on_stage_complete(stage: str) -> None:
+        latest = read_status(job_id) or {}
+        stages_done = list(latest.get("completed_stages") or [])
+        if stage not in stages_done:
+            stages_done.append(stage)
+        write_status(job_id, completed_stages=stages_done)
+
     try:
         artifacts = separate_stems(
             audio_path=Path(spec.audio_path),
             output_dir=Path(spec.output_dir),
             config=config,
             on_progress=on_progress,
+            should_abort=should_abort,
+            checkpoint_dir=_checkpoint_dir(job_id),
+            completed_stages=completed_stages,
+            on_stage_complete=on_stage_complete,
         )
         cleanup_mix_artifacts(Path(spec.output_dir))
         artifact_map = {k: str(v) for k, v in artifacts.items()}
@@ -514,7 +684,7 @@ def _run_one_job(job_id: str) -> None:
             source_fingerprint=spec.source_fingerprint,
         )
         latest = read_status(job_id)
-        if latest and latest.get("status") == "cancelled":
+        if latest and latest.get("status") in ("cancelled", "pausing"):
             return
         write_status(
             job_id,
@@ -534,7 +704,12 @@ def _run_one_job(job_id: str) -> None:
             clip_length=spec.max_duration_sec,
             **eta_fields,
         )
+    except JobAborted:
+        return
     except Exception as exc:
+        latest = read_status(job_id)
+        if latest and latest.get("status") in ("cancelled", "pausing"):
+            return
         write_status(
             job_id,
             status="failed",
@@ -547,29 +722,62 @@ def _run_one_job(job_id: str) -> None:
         )
 
 
+def _execute_job(job_id: str) -> None:
+    global _ACTIVE_JOB_ID, _ACTIVE_PROCESS
+    if _use_inline_worker():
+        _run_one_job(job_id)
+        _finalize_job_after_process(job_id)
+        return
+    proc = multiprocessing.Process(
+        target=_job_process_entry,
+        args=(job_id,),
+        name=f"isolate-{job_id[:8]}",
+    )
+    proc.start()
+    with _QUEUE_LOCK:
+        _ACTIVE_PROCESS = proc
+        _ACTIVE_JOB_ID = job_id
+    proc.join()
+    with _QUEUE_LOCK:
+        if _ACTIVE_PROCESS is proc:
+            _ACTIVE_PROCESS = None
+    _finalize_job_after_process(job_id)
+
+
 def _worker_loop() -> None:
-    global _CURRENT_JOB_ID
+    global _ACTIVE_JOB_ID, _ACTIVE_PROCESS
     while True:
         try:
             with _QUEUE_LOCK:
                 queued = _queued_job_ids()
                 job_id = queued[0] if queued else None
-                _CURRENT_JOB_ID = job_id
+                if job_id is None:
+                    _ACTIVE_JOB_ID = None
             if job_id is None:
                 time.sleep(0.4)
                 continue
+            current = read_status(job_id)
+            if current and current.get("status") == "cancelled":
+                _finalize_job_after_process(job_id)
+                continue
             try:
-                _run_one_job(job_id)
+                with _QUEUE_LOCK:
+                    _ACTIVE_JOB_ID = job_id
+                _execute_job(job_id)
             finally:
                 with _QUEUE_LOCK:
-                    if _CURRENT_JOB_ID == job_id:
-                        _CURRENT_JOB_ID = None
+                    if _ACTIVE_JOB_ID == job_id:
+                        _ACTIVE_JOB_ID = None
+                    if _ACTIVE_PROCESS is not None and not _ACTIVE_PROCESS.is_alive():
+                        _ACTIVE_PROCESS = None
         except Exception:
             time.sleep(1.0)
 
 
 def ensure_worker_started() -> None:
     """Start the serial worker, or restart it if the thread died."""
+    if os.environ.get("ISOLATE_JOBS_WORKER", "1").strip() == "0":
+        return
     global _WORKER_STARTED, _WORKER_THREAD
     with _WORKER_LOCK:
         if _WORKER_THREAD is not None and _WORKER_THREAD.is_alive():

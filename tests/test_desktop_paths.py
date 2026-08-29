@@ -963,7 +963,8 @@ def test_inno_and_installer_script_use_versioned_filename():
     assert "ArchitecturesAllowed=x64compatible" in iss
     assert "MinVersion=10.0" in iss
     ps1 = (root / "packaging" / "make_windows_installer.ps1").read_text(encoding="utf-8")
-    assert 'AppVersion = "0.1.2"' in ps1
+    assert 'AppVersion = ""' in ps1
+    assert "audio_to_tab import __version__" in ps1
     assert 'Flavor = "cpu"' in ps1
     assert "AudioTools-$AppVersion-windows-x64-$Flavor-setup.exe" in ps1
 
@@ -994,7 +995,7 @@ def test_tab_pdf_page_has_explicit_developer_playground_disclaimer():
     page = (root / "ui" / "pages" / "tab_pdf.py").read_text(encoding="utf-8")
     assert 'title="Tab PDF (demo)"' in app
     assert 'st.title("Tab PDF (demo)")' in page
-    assert "Developer playground" in page
+    assert "JJs stuff" in page
     assert "barely works" in page
     assert "st.caption(" not in page.split("def main")[1].split("demucs_ok")[0]
     assert "Demo only — tabs are rough drafts" not in page

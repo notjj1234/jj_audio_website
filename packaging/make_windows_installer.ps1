@@ -5,13 +5,13 @@
 
 .EXAMPLE
   .\packaging\make_windows_installer.ps1 -Flavor cpu -CopyToDownloads
-  .\packaging\make_windows_installer.ps1 -Flavor cuda -AppVersion 0.1.2 -CopyToDownloads
+  .\packaging\make_windows_installer.ps1 -Flavor cuda -CopyToDownloads
 #>
 [CmdletBinding()]
 param(
     [string]$DistDir = "",
     [string]$OutputDir = "",
-    [string]$AppVersion = "0.1.2",
+    [string]$AppVersion = "",
     [ValidateSet("cpu", "cuda")]
     [string]$Flavor = "cpu",
     [switch]$CopyToDownloads
@@ -19,6 +19,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
+
+if (-not $AppVersion) {
+    $AppVersion = & python -c "import sys; sys.path.insert(0, 'src'); from audio_to_tab import __version__; print(__version__)"
+    if ($LASTEXITCODE -ne 0 -or -not $AppVersion) {
+        throw "Could not read audio_to_tab.__version__ (activate the desktop venv and pip install -e . first)."
+    }
+}
 $Iss = Join-Path $PSScriptRoot "AudioTools.iss"
 $Flavor = $Flavor.ToLowerInvariant()
 

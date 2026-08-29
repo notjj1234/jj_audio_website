@@ -28,7 +28,11 @@ def single_flight_client(tmp_path, monkeypatch):
     single_flight.release()
 
 
-def test_second_isolate_job_returns_503_while_slot_held(single_flight_client, monkeypatch):
+def test_isolate_job_create_succeeds_while_runner_slot_held(single_flight_client, monkeypatch):
+    """Create enqueues with HTTP 200 even when the Demucs slot is held.
+
+    Isolate create no longer 503s on busy; the runner waits for the slot.
+    """
     client, main_mod, single_flight = single_flight_client
     headers = login_headers(client)
 
@@ -40,41 +44,20 @@ def test_second_isolate_job_returns_503_while_slot_held(single_flight_client, mo
     assert upload.status_code == 200
     upload_id = upload.json()["upload_id"]
 
-    # Hold the slot as if a job were running
     assert single_flight.try_acquire()
 
-    blocked = client.post(
+    async def noop_enqueue(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(main_mod, "_enqueue_or_run", noop_enqueue)
+
+    created = client.post(
         "/v1/isolate/jobs",
         headers=headers,
         json={"upload_id": upload_id, "model": "htdemucs", "quality": "fast", "max_duration_sec": 15},
     )
-    assert blocked.status_code == 503
-    assert "one job" in blocked.json()["detail"].lower() or "already running" in blocked.json()["detail"].lower()
-
+    assert created.status_code == 200, created.text
     single_flight.release()
-
-    def fake_separate_stems(audio_path, output_dir, config=None, on_progress=None):
-        from pathlib import Path
-
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        artifacts = {}
-        for name in ("vocals", "drums", "bass", "other"):
-            p = output_dir / f"{name}.wav"
-            p.write_bytes(b"stem")
-            artifacts[name] = p
-        if on_progress:
-            on_progress("done", "ok")
-        return artifacts
-
-    monkeypatch.setattr("backend.jobs.runner.separate_stems", fake_separate_stems)
-
-    ok = client.post(
-        "/v1/isolate/jobs",
-        headers=headers,
-        json={"upload_id": upload_id, "model": "htdemucs", "quality": "fast", "max_duration_sec": 15},
-    )
-    assert ok.status_code == 200, ok.text
 
 
 def test_single_flight_disabled_allows_concurrent_create(tmp_path, monkeypatch):
@@ -90,19 +73,10 @@ def test_single_flight_disabled_allows_concurrent_create(tmp_path, monkeypatch):
     # Simulate a held slot; with feature off, creates must still succeed
     assert single_flight.try_acquire()
 
-    def fake_separate_stems(audio_path, output_dir, config=None, on_progress=None):
-        from pathlib import Path
+    async def noop_enqueue(*_args, **_kwargs):
+        return None
 
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        artifacts = {}
-        for name in ("vocals", "drums", "bass", "other"):
-            p = output_dir / f"{name}.wav"
-            p.write_bytes(b"stem")
-            artifacts[name] = p
-        return artifacts
-
-    monkeypatch.setattr("backend.jobs.runner.separate_stems", fake_separate_stems)
+    monkeypatch.setattr(main_mod, "_enqueue_or_run", noop_enqueue)
 
     with TestClient(main_mod.app) as client:
         headers = login_headers(client)

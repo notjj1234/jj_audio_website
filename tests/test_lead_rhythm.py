@@ -468,10 +468,11 @@ def test_make_synthetic_clips_writes_mild_pan(tmp_path: Path):
 
 def test_isolate_default_stage1_model_is_htdemucs_6s():
     from audio_to_tab.isolate import IsolateConfig, SUPPORTED_MODELS
-    from ui.isolate_state import DEFAULT_SEPARATION_PRESET, SEPARATION_PRESETS
+    from ui.isolate_state import DEFAULT_TRACK_OPTIONS, resolve_track_selection
 
     assert IsolateConfig().model == "htdemucs_6s"
     assert "htdemucs_6s" in SUPPORTED_MODELS
-    assert SEPARATION_PRESETS[DEFAULT_SEPARATION_PRESET]["model"] == "htdemucs_6s"
-    assert SEPARATION_PRESETS[DEFAULT_SEPARATION_PRESET]["track_count"] == 4
-    assert "Piano" not in SEPARATION_PRESETS[DEFAULT_SEPARATION_PRESET]["tracks"]
+    default = resolve_track_selection(DEFAULT_TRACK_OPTIONS)
+    assert default["model"] == "htdemucs_6s"
+    assert default["emit_stems"] == ("vocals", "guitar")
+    assert "piano" not in default["emit_stems"]

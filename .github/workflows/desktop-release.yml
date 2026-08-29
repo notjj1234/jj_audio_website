@@ -97,7 +97,7 @@ jobs:
         run: |
           python -m pip install -U pip
           python -m pip install --upgrade torch torchaudio
-          python -m pip install -e ".[demucs,desktop]"
+          python -m pip install -e ".[demucs,desktop,roformer,separator]"
           python -c "import torch; assert torch.version.cuda is None, torch.version.cuda; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
 
       - name: Install CUDA Torch + app + PyInstaller (Windows)
@@ -106,14 +106,15 @@ jobs:
         run: |
           python -m pip install -U pip
           python -m pip install --upgrade torch torchaudio --index-url https://download.pytorch.org/whl/cu126
-          python -m pip install -e ".[demucs,desktop]"
+          python -m pip install "bs-roformer-infer>=0.1.5"
+          python -m pip install -e ".[demucs,desktop,separator]"
           python -c "import torch; assert torch.version.cuda is not None, torch.version.cuda; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
 
       - name: Install app + PyInstaller (macOS)
         if: runner.os == 'macOS'
         run: |
           python -m pip install -U pip
-          python -m pip install -e ".[demucs,desktop]"
+          python -m pip install -e ".[demucs,desktop,roformer,separator]"
 
       - name: Bundle ffmpeg
         run: python packaging/bundle_ffmpeg.py
@@ -174,13 +175,15 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          powershell -ExecutionPolicy Bypass -File packaging/make_windows_installer.ps1 -AppVersion 0.1.0 -Flavor ${{ matrix.edition }}
-          Copy-Item -Path dist/AudioTools-0.1.0-windows-x64-${{ matrix.edition }}-setup.exe -Destination ${{ matrix.artifact }} -Force
+          $version = python -c "from audio_to_tab import __version__; print(__version__)"
+          powershell -ExecutionPolicy Bypass -File packaging/make_windows_installer.ps1 -AppVersion $version -Flavor ${{ matrix.edition }}
+          Copy-Item -Path "dist/AudioTools-$version-windows-x64-${{ matrix.edition }}-setup.exe" -Destination ${{ matrix.artifact }} -Force
 
       - name: Package macOS pkg
         if: runner.os == 'macOS'
         run: |
           chmod +x packaging/make_pkg.sh packaging/make_app.sh packaging/pkg_scripts/postinstall
+          export AUDIO_TOOLS_VERSION="$(python -c 'from audio_to_tab import __version__; print(__version__)')"
           AUDIO_TOOLS_OUTPUT_DIR="$PWD" AUDIO_TOOLS_PKG_NAME="${{ matrix.artifact }}" ./packaging/make_pkg.sh
 
       - name: Upload artifact
@@ -207,7 +210,7 @@ jobs:
           generate_release_notes: true
           files: release-assets/**/*
           body: |
-            **0.1.0** desktop demo — Audio Isolation runs on your computer. The onedir freeze is not obfuscated; it ships no hosted-site code, `.env`, or cloud credentials. macOS `.pkg` is signed and notarized when the build machine has Developer ID certificates.
+            **0.1.2** desktop demo — Audio Isolation runs on your computer. The onedir freeze is not obfuscated; it ships no hosted-site code, `.env`, or cloud credentials. macOS `.pkg` is signed and notarized when the build machine has Developer ID certificates.
 
             Pick **one** file for your machine (not a universal installer). Windows testers pick CPU **or** NVIDIA (or install both side by side):
 

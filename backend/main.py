@@ -348,6 +348,11 @@ async def create_job(
             frame_threshold=body.frame_threshold,
             demucs_quality=demucs_quality,
             demucs_device=demucs_device,
+            model=body.model,
+            guitar_refine=body.guitar_refine,
+            guitar_checkpoint=body.guitar_checkpoint,
+            low_end_restore_db=body.low_end_restore_db,
+            sub_bass_debleed=body.sub_bass_debleed,
         )
     except FileNotFoundError as exc:
         if settings.single_flight_jobs:
@@ -417,9 +422,13 @@ async def create_isolate_job(
             lead_rhythm_mode=body.lead_rhythm_mode,
             guitar_checkpoint=body.guitar_checkpoint,
             two_pass=body.two_pass,
+            guitar_refine=body.guitar_refine,
             emit_stems=body.emit_stems,
             fold_other_into_guitar=body.fold_other_into_guitar,
+            fold_other_mode=body.fold_other_mode,
             dual_guitar=body.dual_guitar,
+            low_end_restore_db=body.low_end_restore_db,
+            sub_bass_debleed=body.sub_bass_debleed,
         )
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from None

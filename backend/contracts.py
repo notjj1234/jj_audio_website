@@ -53,6 +53,11 @@ class JobCreateRequest(BaseModel):
     onset_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     frame_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
     processing_mode: str | None = Field(default=None, max_length=32)
+    model: str = Field(default="htdemucs_6s", max_length=64)
+    guitar_refine: bool = False
+    guitar_checkpoint: str | None = Field(default=None, max_length=64)
+    low_end_restore_db: float = Field(default=0.0, ge=0.0, le=12.0)
+    sub_bass_debleed: bool = False
 
 
 class IsolateJobCreateRequest(BaseModel):
@@ -74,8 +79,13 @@ class IsolateJobCreateRequest(BaseModel):
     guitar_checkpoint: str | None = Field(default=None, max_length=64)
     # Opt-in 4-stem then 6-stem residual pass (htdemucs_6s only).
     two_pass: bool = False
+    # Opt-in MelBand guitar specialist refine pass.
+    guitar_refine: bool = False
+    low_end_restore_db: float = Field(default=0.0, ge=0.0, le=12.0)
+    sub_bass_debleed: bool = False
     emit_stems: list[str] | None = Field(default=None)
     fold_other_into_guitar: bool = True
+    fold_other_mode: str = Field(default="best_effort", max_length=32)
 
     @model_validator(mode="after")
     def _alias_dual_guitar(self) -> IsolateJobCreateRequest:
@@ -91,6 +101,14 @@ class IsolateJobCreateRequest(BaseModel):
         mode = v.strip().lower()
         if mode not in ("confident", "best_effort"):
             raise ValueError("lead_rhythm_mode must be confident or best_effort")
+        return mode
+
+    @field_validator("fold_other_mode")
+    @classmethod
+    def _validate_fold_other_mode(cls, v: str) -> str:
+        mode = (v or "best_effort").strip().lower()
+        if mode not in ("full", "best_effort", "band_limited"):
+            raise ValueError("fold_other_mode must be full|best_effort|band_limited")
         return mode
 
     @model_validator(mode="after")

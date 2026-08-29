@@ -26,6 +26,12 @@ CUDA_LOW = HostProbe(cuda=True, mps=False, ram_gb=6.0)
 MPS_MAC = HostProbe(cuda=False, mps=True, ram_gb=16.0)
 
 
+@pytest.fixture(autouse=True)
+def _cpu_edition_by_default(monkeypatch):
+    """Most tests assume the CPU desktop edition unless they set AUDIO_TOOLS_EDITION."""
+    monkeypatch.delenv("AUDIO_TOOLS_EDITION", raising=False)
+
+
 def test_mac_never_offers_cuda_even_if_probe_says_cuda():
     fake_cuda = HostProbe(cuda=True, mps=True, ram_gb=16.0)
     assert desktop_device_options(fake_cuda, platform="darwin") == ["cpu"]
@@ -70,10 +76,30 @@ def test_auto_cpu_or_mac_is_faster_cpu():
         assert rec["quality"] == "fast"
 
 
-def test_resolve_faster_always_cpu():
+def test_resolve_faster_always_cpu_on_cpu_edition(monkeypatch):
+    monkeypatch.delenv("AUDIO_TOOLS_EDITION", raising=False)
     resolved = resolve_desktop_speed("faster", CUDA_HIGH, platform="win32")
     assert resolved["device"] == "cpu"
     assert resolved["quality"] == "fast"
+
+
+def test_resolve_faster_uses_cuda_on_cuda_edition(monkeypatch):
+    monkeypatch.setenv("AUDIO_TOOLS_EDITION", "cuda")
+    resolved = resolve_desktop_speed("faster", CPU_MID, platform="win32")
+    assert resolved["device"] == "cuda"
+    assert resolved["quality"] == "fast"
+
+
+def test_cuda_edition_windows_device_options_cuda_only(monkeypatch):
+    monkeypatch.setenv("AUDIO_TOOLS_EDITION", "cuda")
+    assert desktop_device_options(CPU_MID, platform="win32") == ["cuda"]
+
+
+def test_cuda_edition_system_summary_shows_nvidia_not_cpu(monkeypatch):
+    monkeypatch.setenv("AUDIO_TOOLS_EDITION", "cuda")
+    summary = desktop_system_summary(CPU_MID, platform="win32")
+    assert "NVIDIA GPU" in summary
+    assert " · CPU" not in summary
 
 
 def test_resolve_balanced_and_best_use_cuda_on_windows_when_available():
@@ -134,6 +160,7 @@ def test_separate_progress_mentions_device():
 def test_get_desktop_probe_without_torch_does_not_import_torch(monkeypatch):
     import inspect
 
+    monkeypatch.delenv("AUDIO_TOOLS_EDITION", raising=False)
     src = inspect.getsource(get_desktop_probe_without_torch)
     assert "probe_torch" not in src
     assert "import torch" not in src.split('"""')[-1]
@@ -141,3 +168,9 @@ def test_get_desktop_probe_without_torch_does_not_import_torch(monkeypatch):
     assert probe.cuda is False
     assert probe.mps is False
     assert probe.ram_gb is None or probe.ram_gb > 0
+
+
+def test_get_desktop_probe_without_torch_cuda_edition(monkeypatch):
+    monkeypatch.setenv("AUDIO_TOOLS_EDITION", "cuda")
+    probe = get_desktop_probe_without_torch()
+    assert probe.cuda is True

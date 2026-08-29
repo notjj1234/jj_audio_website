@@ -76,10 +76,10 @@ These are **four separate builds**. Send testers only the file that matches thei
 |----------------|------|--------|
 | Apple Silicon Mac (M1–M4) | `AudioTools-macos-arm64-silicon.pkg` | macOS **12+**. Double-click → **Install**. The app launches when install finishes. If Finder blocks: Terminal `xattr -cr` + `sudo installer`, or **System Settings → Privacy & Security → Open Anyway**. |
 | Intel Mac | `AudioTools-macos-x64-intel.pkg` | Same install steps. An arm64 pkg will not launch here. |
-| Windows 10 or 11 (x64), no NVIDIA GPU | `AudioTools-0.1.0-windows-x64-cpu-setup.exe` | **64-bit only.** Small Setup. Start Menu: **Audio Tools (CPU)**. Needs [WebView2](https://go.microsoft.com/fwlink/p/?LinkId=2124703). |
-| Windows 10 or 11 (x64) with NVIDIA GPU | `AudioTools-0.1.0-windows-x64-cuda-setup.exe` | **64-bit only.** Large Setup. Start Menu: **Audio Tools (NVIDIA)**. Isolation is faster on NVIDIA + drivers. Can be installed next to the CPU edition. |
+| Windows 10 or 11 (x64), no NVIDIA GPU | `AudioTools-0.1.2-windows-x64-cpu-setup.exe` | **64-bit only.** Small Setup. Start Menu: **Audio Tools (CPU)**. Needs [WebView2](https://go.microsoft.com/fwlink/p/?LinkId=2124703). |
+| Windows 10 or 11 (x64) with NVIDIA GPU | `AudioTools-0.1.2-windows-x64-cuda-setup.exe` | **64-bit only.** Large Setup. Start Menu: **Audio Tools (NVIDIA)**. Isolation is faster on NVIDIA + drivers. Can be installed next to the CPU edition. |
 
-This is a **0.1.0 demo**. macOS builds are signed and notarized when Developer ID certificates are available on the build Mac. Windows SmartScreen will warn. The PyInstaller onedir is not obfuscated (Python is extractable); the freeze ships **no** hosted-site code, `.env`, or cloud credentials. No 32-bit Windows 10 build. No native Windows ARM build. No App Store.
+This is a **0.1.2 demo**. macOS builds are signed and notarized when Developer ID certificates are available on the build Mac. Windows SmartScreen will warn. The PyInstaller onedir is not obfuscated (Python is extractable); the freeze ships **no** hosted-site code, `.env`, or cloud credentials. No 32-bit Windows 10 build. No native Windows ARM build. No App Store.
 
 The previous unlabeled `AudioTools-0.1.0-windows-x64-setup.exe` (all-in-one CUDA) used the CPU AppId and `C:\Program Files\AudioTools`. Installing the new **CPU** Setup **replaces** that tree. Uninstall it first if you want a clean split, then install CPU and/or NVIDIA.
 
@@ -87,7 +87,7 @@ Published under a `desktop-v*` GitHub Release (draft until a maintainer publishe
 
 ## Download & install (terminal)
 
-Use the file that matches your OS. Windows has two 0.1.0 Setups: **`AudioTools-0.1.0-windows-x64-cpu-setup.exe`** (default) and **`AudioTools-0.1.0-windows-x64-cuda-setup.exe`** (NVIDIA). GitHub Release assets use the unversioned names `AudioTools-windows-x64-cpu-setup.exe` and `AudioTools-windows-x64-cuda-setup.exe`.
+Use the file that matches your OS. Windows has two 0.1.2 Setups: **`AudioTools-0.1.2-windows-x64-cpu-setup.exe`** (default) and **`AudioTools-0.1.2-windows-x64-cuda-setup.exe`** (NVIDIA). GitHub Release assets use the unversioned names `AudioTools-windows-x64-cpu-setup.exe` and `AudioTools-windows-x64-cuda-setup.exe`.
 
 ### Apple Silicon Mac (M1–M4)
 
@@ -118,24 +118,24 @@ open /Applications/AudioTools.app
 ### Windows 10 / 11 CPU (PowerShell)
 
 ```powershell
-curl.exe -fL -o "$env:USERPROFILE\Downloads\AudioTools-0.1.0-windows-x64-cpu-setup.exe" `
+curl.exe -fL -o "$env:USERPROFILE\Downloads\AudioTools-0.1.2-windows-x64-cpu-setup.exe" `
   "https://github.com/notjj1234/jj_audio_website/releases/latest/download/AudioTools-windows-x64-cpu-setup.exe"
 
-Start-Process "$env:USERPROFILE\Downloads\AudioTools-0.1.0-windows-x64-cpu-setup.exe"
+Start-Process "$env:USERPROFILE\Downloads\AudioTools-0.1.2-windows-x64-cpu-setup.exe"
 ```
 
 ### Windows 10 / 11 NVIDIA CUDA (PowerShell)
 
 ```powershell
-curl.exe -fL -o "$env:USERPROFILE\Downloads\AudioTools-0.1.0-windows-x64-cuda-setup.exe" `
+curl.exe -fL -o "$env:USERPROFILE\Downloads\AudioTools-0.1.2-windows-x64-cuda-setup.exe" `
   "https://github.com/notjj1234/jj_audio_website/releases/latest/download/AudioTools-windows-x64-cuda-setup.exe"
 
-Start-Process "$env:USERPROFILE\Downloads\AudioTools-0.1.0-windows-x64-cuda-setup.exe"
+Start-Process "$env:USERPROFILE\Downloads\AudioTools-0.1.2-windows-x64-cuda-setup.exe"
 ```
 
 **Windows 10 and 11 (x64):** `MinVersion` is 10.0. Not 32-bit, not native ARM. **WebView2** is required (built into Windows 11 and recent 10; older 10 must install Evergreen). CPU Setup is the small default. NVIDIA Setup is large and only speeds isolation on an NVIDIA GPU + drivers; the wizard warns if no NVIDIA adapter is seen (install still allowed).
 
-SmartScreen: **More info → Run anyway**. Finish the wizard, then launch **Audio Tools (CPU)** or **Audio Tools (NVIDIA)** from the Start Menu. Native Edge WebView2 window, not a browser tab. Apps & Features shows **0.1.0**. Both editions may be installed at once.
+SmartScreen: **More info → Run anyway**. Finish the wizard, then launch **Audio Tools (CPU)** or **Audio Tools (NVIDIA)** from the Start Menu. Native Edge WebView2 window, not a browser tab. Apps & Features shows **0.1.2**. Both editions may be installed at once.
 
 Missing window? Install [WebView2](https://go.microsoft.com/fwlink/p/?LinkId=2124703), then check `%LOCALAPPDATA%\AudioTools\logs\launcher.log` (CPU) or `%LOCALAPPDATA%\AudioToolsNVIDIA\logs\launcher.log` (NVIDIA) — a healthy launch logs `Native window shown (hwnds=[...])`.
 
@@ -178,6 +178,26 @@ Optional guitar-ft: `$TORCH_HOME/checkpoints/guitar_htdemucs_6s.pt` (~330 MB). M
 
 UI run folders default to `data/ui_runs/` in the repo. Override with `AUDIO_TOOLS_DATA_DIR`.
 
+### Run from source (Windows NVIDIA)
+
+Use a **separate venv** from contributor `tester` (`.venv311` is CPU-only PyTorch). BS-RoFormer guitar also needs `bs-roformer-infer` — install it directly first (combined `pip install -e ".[roformer,separator]"` can hit resolution-too-deep on some machines):
+
+```powershell
+cd C:\Users\orall\Documents\GitHub\jj_audio_website
+py -3.11 -m venv .venv-desktop
+.\.venv-desktop\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install --upgrade torch torchaudio --index-url https://download.pytorch.org/whl/cu126
+pip install "bs-roformer-infer>=0.1.5"
+pip install -e ".[demucs,desktop]"
+python -c "from audio_to_tab.roformer import is_roformer_backend_available; assert is_roformer_backend_available()"
+
+$env:AUDIO_TOOLS_EDITION = "cuda"
+.\.venv-desktop\Scripts\python.exe packaging/launcher.py
+```
+
+Without `bs-roformer-infer`, Demucs guitar works; **Guitar (BS-RoFormer, …)** options are hidden until the runtime is installed.
+
 ## Maintainer: build desktop packages
 
 macOS (this repo’s Makefile targets):
@@ -185,7 +205,7 @@ macOS (this repo’s Makefile targets):
 ```bash
 python3.11 -m venv .venv-desktop
 source .venv-desktop/bin/activate
-pip install -e ".[demucs,desktop]"
+pip install -e ".[demucs,desktop,roformer,separator]"
 make mixer-build          # if frontend/build is missing
 make desktop-bundle-ffmpeg
 make desktop-build
@@ -201,22 +221,26 @@ Windows (PowerShell, x64 machine — needs [Inno Setup](https://jrsoftware.org/i
 py -3.11 -m venv .venv-desktop-cpu
 .\.venv-desktop-cpu\Scripts\Activate.ps1
 python -m pip install --upgrade torch torchaudio
-pip install -e ".[demucs,desktop]"
+pip install -e ".[demucs,desktop,roformer,separator]"
+.\scripts\dev.ps1 mixer-build
 python packaging/bundle_ffmpeg.py
 $env:AUDIO_TOOLS_EDITION = "cpu"
 pyinstaller packaging/audio_tools.spec --noconfirm --clean
-powershell -ExecutionPolicy Bypass -File packaging/make_windows_installer.ps1 -AppVersion 0.1.0 -Flavor cpu -CopyToDownloads
+powershell -ExecutionPolicy Bypass -File packaging/make_windows_installer.ps1 -Flavor cpu -CopyToDownloads
 
 # NVIDIA edition (large CUDA freeze) — separate venv
 py -3.11 -m venv .venv-desktop
 .\.venv-desktop\Scripts\Activate.ps1
 python -m pip install --upgrade torch torchaudio --index-url https://download.pytorch.org/whl/cu126
-pip install -e ".[demucs,desktop]"
+pip install "bs-roformer-infer>=0.1.5"
+pip install -e ".[demucs,desktop,separator]"
+.\scripts\dev.ps1 mixer-build
+python packaging/bundle_ffmpeg.py
 $env:AUDIO_TOOLS_EDITION = "cuda"
 pyinstaller packaging/audio_tools.spec --noconfirm --clean
-powershell -ExecutionPolicy Bypass -File packaging/make_windows_installer.ps1 -AppVersion 0.1.0 -Flavor cuda -CopyToDownloads
+powershell -ExecutionPolicy Bypass -File packaging/make_windows_installer.ps1 -Flavor cuda -CopyToDownloads
 ```
 
-Writes `%USERPROFILE%\Downloads\AudioTools-0.1.0-windows-x64-cpu-setup.exe` and `AudioTools-0.1.0-windows-x64-cuda-setup.exe`.
+Writes `%USERPROFILE%\Downloads\AudioTools-0.1.2-windows-x64-cpu-setup.exe` and `AudioTools-0.1.2-windows-x64-cuda-setup.exe`. Version is read from `audio_to_tab.__version__` unless you pass `-AppVersion`.
 
 CI: tag `desktop-v*` or run **desktop-release** via `workflow_dispatch`. Intel Mac job uses `macos-15-intel` (`macos-13` is retired).

@@ -42,6 +42,17 @@ def test_system_capabilities_smoke(client):
     assert any(m["id"] == "auto" for m in body["modes"])
 
 
+def test_tab_job_request_quality_backend_defaults():
+    from backend.contracts import JobCreateRequest
+
+    req = JobCreateRequest()
+    assert req.model == "htdemucs_6s"
+    assert req.guitar_refine is False
+    assert req.guitar_checkpoint is None
+    assert req.low_end_restore_db == 0.0
+    assert req.sub_bass_debleed is False
+
+
 def test_isolate_job_request_defaults_to_full_song():
     from backend.contracts import IsolateJobCreateRequest
 
@@ -53,6 +64,8 @@ def test_isolate_job_request_defaults_to_full_song():
     assert req.lead_rhythm_mode == "confident"
     assert req.dual_guitar is False
     assert req.quality == "fast"
+    assert req.low_end_restore_db == 0.0
+    assert req.sub_bass_debleed is False
 
 
 def test_isolate_job_request_rejects_invalid_region():

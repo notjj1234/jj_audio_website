@@ -7,6 +7,9 @@ export function TabPage() {
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("Guitar Tab");
   const [processingMode, setProcessingMode] = useState("auto");
+  const [guitarEngine, setGuitarEngine] = useState("demucs");
+  const [lowEndRestoreDb, setLowEndRestoreDb] = useState(0);
+  const [subBassDebleed, setSubBassDebleed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [job, setJob] = useState<api.JobResponse | null>(null);
@@ -28,6 +31,10 @@ export function TabPage() {
         title,
         separate_stems: true,
         processing_mode: processingMode,
+        model: guitarEngine === "demucs" ? "htdemucs_6s" : "bs_roformer_sw",
+        guitar_refine: guitarEngine === "roformer_refine",
+        low_end_restore_db: lowEndRestoreDb,
+        sub_bass_debleed: subBassDebleed,
       });
       setJob(created);
       const stop = api.watchJob(created.id, setJob);
@@ -66,6 +73,36 @@ export function TabPage() {
           />
         </label>
         <ProcessingModeSelect value={processingMode} onChange={setProcessingMode} />
+        <label className="field">
+          Guitar separation
+          <select
+            value={guitarEngine}
+            onChange={(e) => setGuitarEngine(e.target.value)}
+          >
+            <option value="demucs">Guitar (Demucs 6-stem)</option>
+            <option value="roformer">Guitar (BS-RoFormer)</option>
+            <option value="roformer_refine">Guitar (BS-RoFormer + MelBand refine)</option>
+          </select>
+        </label>
+        <label className="field">
+          Low-end restore (dB, 0 = off)
+          <input
+            type="number"
+            min={0}
+            max={6}
+            step={1}
+            value={lowEndRestoreDb}
+            onChange={(e) => setLowEndRestoreDb(Number(e.target.value) || 0)}
+          />
+        </label>
+        <label className="field checkbox">
+          <input
+            type="checkbox"
+            checked={subBassDebleed}
+            onChange={(e) => setSubBassDebleed(e.target.checked)}
+          />
+          Subtractive bass de-bleed (opt-in)
+        </label>
         {error && <p className="error">{error}</p>}
         <button type="submit" disabled={busy}>
           {busy ? "Starting…" : "Create tab job"}

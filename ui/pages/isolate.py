@@ -13,6 +13,20 @@ from pathlib import Path
 
 import streamlit as st
 
+from ui.guitar_fixup import (
+    GUITAR_BACKUP_NAME,
+    GUITAR_PREREFINE_NAME,
+    GUITAR_REFINED_NAME,
+    apply_mixer_guitar_fixup,
+    has_guitar_backup,
+    has_guitar_prerefine,
+    invalidate_mixer_playback,
+    load_fold_other_diagnostics,
+    load_guitar_stem_quality,
+    merge_artifact_updates,
+    reset_mixer_guitar_fixup,
+    switch_mixer_guitar_variant,
+)
 from ui.common import (
     AUDIO_UPLOAD_TYPES,
     DATA_DIR,
@@ -22,12 +36,18 @@ from ui.common import (
     save_upload,
 )
 from ui.isolate_state import (
-    CUSTOM_STEM_CHOICES,
-    DEFAULT_CUSTOM_STEMS,
-    DEFAULT_SEPARATION_PRESET,
     DEFAULT_SPEED_PRESET,
-    SEPARATION_PRESETS,
+    DEFAULT_TRACK_OPTIONS,
+    DEMUCS_STEM_CHECKBOX_IDS,
+    GUITAR_TRACK_OPTION_IDS,
     SPEED_PRESETS,
+    TRACK_OPTIONS,
+    ROFORMER_BACKEND_UI_HINT,
+    VOCALS_INSTRUMENTAL_OPTION_ID,
+    guitar_track_radio_ids,
+    job_requires_roformer_backend,
+    normalize_guitar_track_selection,
+    tracks_picker_help,
     WORKSPACE_KEY,
     WORKSPACE_NEXT_KEY,
     WORKSPACE_TABS,
@@ -46,34 +66,39 @@ from ui.isolate_state import (
     format_source_caption,
     format_source_title,
     infer_source_kind,
+    is_stopping_previous_job,
     isolate_ui_state_payload,
     jobs_needing_os_notify,
     listen_picker_default,
     load_persist_isolate_user_id,
     os_notify_message,
     partition_queue_jobs,
+    paused_job_caption,
     pending_audio_needs_resave,
     pending_upload_fp_for_stale,
     plan_isolate_job_poll,
     queue_reopen_output_name,
+    queued_wait_caption,
     queue_youtube_url,
     read_isolate_ui_state,
     recent_runs_with_owner_fallback,
     reset_new_tab_source,
-    resolve_custom_separation,
-    resolve_separation_preset,
+    migrate_track_options,
+    resolve_track_selection,
     resolve_speed_preset,
     running_progress_view,
     select_rehydrate_row,
     session_mixer_artifacts_ok,
     should_hide_stale_results,
     staged_audio_for_new_tab,
+    status_strip_waiting_caption,
     sync_output_name_on_upload,
     upload_fingerprint,
     write_isolate_ui_state,
 )
 from ui.isolate_jobs import (
     IsolateJobSpec,
+    active_job_id,
     apply_succeeded_job_to_session,
     delete_all_finished_jobs,
     delete_finished_job,
@@ -84,10 +109,12 @@ from ui.isolate_jobs import (
     jobs_visible_in_queue,
     list_jobs,
     merge_library_runs,
+    pause_job,
     queued_job_ids,
-    queued_wait_caption,
     read_status,
     remove_job,
+    resume_job,
+    worker_busy,
 )
 from ui.media import ensure_mixer_audio_paths, ensure_region_preview_wav, stem_media_urls
 from ui.desktop_export import (
@@ -139,12 +166,17 @@ from audio_to_tab.mixer import (  # noqa: E402
     waveform_peaks,
 )
 from audio_to_tab.pipeline import YOUTUBE_DISCLAIMER  # noqa: E402
+from audio_to_tab.roformer import (  # noqa: E402
+    ROFORMER_INSTALL_HINT,
+    is_roformer_backend_available,
+)
 from audio_to_tab.separate import is_demucs_available  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 STEM_HINTS = {
     "piano": "May sound less accurate than other tracks",
+    "guitar": "Isolation is harder than vocals/drums/bass; Best guitar is slower but cleaner",
     "guitar1": "Legacy spatial label",
     "guitar2": "Legacy spatial label",
 }
@@ -426,6 +458,203 @@ def _load_bass_bleed_diagnostics(artifacts: dict) -> dict:
         return {}
 
 
+def _load_low_end_recovery_diagnostics(artifacts: dict) -> dict:
+    path = artifacts.get("low_end_recovery_diagnostics")
+    if not path or not Path(path).exists():
+        return {}
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _render_guitar_fixup_panel(
+    stem_paths: dict[str, Path],
+    run_dir: Path,
+    artifacts_map: dict,
+    bass_bleed: dict,
+) -> None:
+    """Post-separation guitar tweak — no Demucs re-run required."""
+    if "guitar" not in stem_paths:
+        return
+
+    guitar_path = stem_paths["guitar"]
+    run_fp = hashlib.sha256(str(run_dir.resolve()).encode()).hexdigest()[:12]
+    has_bass = bool(stem_paths.get("bass") and stem_paths["bass"].is_file())
+    backup_exists = has_guitar_backup(guitar_path)
+    prerefine_exists = has_guitar_prerefine(guitar_path)
+    refined_exists = (run_dir / GUITAR_REFINED_NAME).is_file()
+    flagged = bool(bass_bleed.get("flagged"))
+    recovery = _load_low_end_recovery_diagnostics(artifacts_map)
+    quality = load_guitar_stem_quality(artifacts_map or {})
+    fold = load_fold_other_diagnostics(artifacts_map or {})
+
+    debleed_key = f"mixer_fixup_debleed_{run_fp}"
+    restore_key = f"mixer_fixup_restore_{run_fp}"
+    variant_key = f"mixer_guitar_variant_{run_fp}"
+    if debleed_key not in st.session_state:
+        st.session_state[debleed_key] = flagged and has_bass
+    if restore_key not in st.session_state:
+        st.session_state[restore_key] = 0.0
+
+    with st.expander(
+        "Guitar fix-up — adjust after separation (no re-run needed)",
+        expanded=flagged or bool(recovery.get("attempted")) or prerefine_exists,
+    ):
+        st.caption(
+            "Fix boomy bass bleed or thin low notes on the **guitar** stem only. "
+            f"Each apply resets from `{GUITAR_BACKUP_NAME}` (saved on first apply)."
+        )
+
+        if quality.get("high_end_energy_share") is not None:
+            hi = quality["high_end_energy_share"]
+            lo = quality.get("low_band_energy_share")
+            parts = [f"high-end (>4 kHz) share **{hi:.2f}**"]
+            if isinstance(lo, (int, float)):
+                parts.append(f"low-band share **{lo:.2f}**")
+            if fold.get("folded"):
+                parts.append(f"Other folded: {fold.get('reason', 'yes')}")
+            st.caption("Stem quality: " + " · ".join(parts))
+
+        if prerefine_exists and refined_exists:
+            options = {
+                "refined": f"MelBand refined (`{GUITAR_REFINED_NAME}`)",
+                "prerefine": f"Pre-refine BS-RoFormer (`{GUITAR_PREREFINE_NAME}`)",
+            }
+            if variant_key not in st.session_state:
+                st.session_state[variant_key] = "refined"
+            choice = st.radio(
+                "Guitar version",
+                options=list(options.keys()),
+                format_func=lambda k: options[k],
+                key=variant_key,
+                help="MelBand refine can soften highs. Compare without re-separating.",
+            )
+            use_prerefine = choice == "prerefine"
+            if st.button(
+                "Load selected guitar version",
+                key=f"mixer_variant_apply_{run_fp}",
+            ):
+                result = switch_mixer_guitar_variant(
+                    guitar_path=guitar_path,
+                    stem_paths=stem_paths,
+                    run_dir=run_dir,
+                    use_prerefine=use_prerefine,
+                )
+                if result.ok:
+                    st.session_state["isolate_artifacts"] = merge_artifact_updates(
+                        st.session_state.get("isolate_artifacts") or artifacts_map,
+                        result.artifact_updates,
+                    )
+                    invalidate_mixer_playback(st.session_state)
+                    st.success(result.message)
+                    st.rerun()
+                else:
+                    st.error(result.message)
+
+        if flagged:
+            share = bass_bleed.get("low_band_energy_share")
+            hint = (
+                f"Bass-heavy guitar detected (low-band share {share:.2f}). "
+                "Try **Quick de-bleed** below."
+                if isinstance(share, (int, float))
+                else "Bass-heavy guitar detected — try **Quick de-bleed** below."
+            )
+            st.info(hint)
+
+        col_debleed, col_restore = st.columns(2)
+        with col_debleed:
+            st.checkbox(
+                "Subtractive bass de-bleed",
+                help=(
+                    "Subtract leaked bass/drum energy below ~150 Hz using the separated "
+                    "bass stem from this run."
+                ),
+                disabled=not has_bass,
+                key=debleed_key,
+            )
+            if not has_bass:
+                st.caption("No bass stem in this run — de-bleed unavailable.")
+        with col_restore:
+            st.slider(
+                "Low-end restore (dB)",
+                min_value=0.0,
+                max_value=6.0,
+                step=1.0,
+                help="Optional 60–200 Hz boost after de-bleed if the guitar sounds thin.",
+                key=restore_key,
+            )
+
+        if recovery.get("attempted"):
+            st.caption(
+                f"Last fix: {recovery.get('reason', 'applied')} "
+                f"(de-bleed={recovery.get('sub_bass_debleed_applied')}, "
+                f"restore={recovery.get('harmonic_restore_applied')})"
+            )
+
+        btn_apply, btn_quick, btn_reset = st.columns(3)
+        with btn_apply:
+            apply_clicked = st.button(
+                "Apply to guitar",
+                type="primary",
+                key=f"mixer_fixup_apply_{run_fp}",
+            )
+        with btn_quick:
+            quick_clicked = st.button(
+                "Quick de-bleed",
+                key=f"mixer_fixup_quick_{run_fp}",
+                disabled=not has_bass,
+                help="Subtractive bass de-bleed only (no restore). Add restore manually if needed.",
+            )
+        with btn_reset:
+            reset_clicked = st.button(
+                "Reset fix-up",
+                key=f"mixer_fixup_reset_{run_fp}",
+                disabled=not backup_exists,
+                help=f"Restore guitar from `{GUITAR_BACKUP_NAME}` before fix-up.",
+            )
+
+        result = None
+        if apply_clicked:
+            result = apply_mixer_guitar_fixup(
+                guitar_path=guitar_path,
+                stem_paths=stem_paths,
+                run_dir=run_dir,
+                sub_bass_debleed=bool(st.session_state.get(debleed_key)),
+                low_end_restore_db=float(st.session_state.get(restore_key) or 0.0),
+            )
+        elif quick_clicked:
+            result = apply_mixer_guitar_fixup(
+                guitar_path=guitar_path,
+                stem_paths=stem_paths,
+                run_dir=run_dir,
+                sub_bass_debleed=True,
+                low_end_restore_db=0.0,
+            )
+            st.session_state[debleed_key] = True
+            st.session_state[restore_key] = 0.0
+        elif reset_clicked:
+            result = reset_mixer_guitar_fixup(
+                guitar_path=guitar_path,
+                stem_paths=stem_paths,
+                run_dir=run_dir,
+            )
+
+        if result is None:
+            return
+
+        if result.ok:
+            st.session_state["isolate_artifacts"] = merge_artifact_updates(
+                st.session_state.get("isolate_artifacts") or artifacts_map,
+                result.artifact_updates,
+            )
+            invalidate_mixer_playback(st.session_state)
+            st.success(result.message)
+            st.rerun()
+        else:
+            st.error(result.message)
+
+
 def _load_guitar_split_diagnostics(artifacts: dict) -> dict:
     path = artifacts.get("guitar_split_diagnostics")
     if not path or not Path(path).exists():
@@ -581,12 +810,88 @@ def _render_live_mixer(
     )
 
 
-def _preset_radio_label(preset_id: str) -> str:
-    preset = SEPARATION_PRESETS[preset_id]
-    count = preset.get("track_count")
-    if count is None:
-        return f"{preset['label']} — {preset['tracks']}"
-    return f"{preset['label']} — {preset['tracks']} ({count} tracks)"
+def _init_track_picker_session() -> None:
+    """Seed track picker widget keys from legacy preset or defaults (once)."""
+    if st.session_state.get("isolate_track_picker_initialized"):
+        return
+    migrated = migrate_track_options(st.session_state)
+    for oid in DEMUCS_STEM_CHECKBOX_IDS:
+        st.session_state[f"isolate_track_{oid}"] = oid in migrated
+    guitar_pick = next((g for g in migrated if g in GUITAR_TRACK_OPTION_IDS), None)
+    st.session_state["isolate_guitar_track"] = guitar_pick or "none"
+    st.session_state["isolate_vocals_instrumental_only"] = (
+        VOCALS_INSTRUMENTAL_OPTION_ID in migrated
+    )
+    st.session_state["isolate_track_options"] = list(migrated)
+    st.session_state["isolate_track_picker_initialized"] = True
+    st.session_state.pop("isolate_separation_preset", None)
+
+
+def _collect_track_options_from_session() -> list[str]:
+    if st.session_state.get("isolate_vocals_instrumental_only"):
+        return [VOCALS_INSTRUMENTAL_OPTION_ID]
+    options: list[str] = []
+    for oid in DEMUCS_STEM_CHECKBOX_IDS:
+        if st.session_state.get(f"isolate_track_{oid}"):
+            options.append(oid)
+    guitar = str(st.session_state.get("isolate_guitar_track") or "none")
+    if guitar in GUITAR_TRACK_OPTION_IDS:
+        options.append(guitar)
+    return options
+
+
+def _render_track_picker(*, persist: dict) -> tuple[list[str], dict, str | None]:
+    """Custom-only labeled track picker. Returns (option_ids, resolved, error)."""
+    _init_track_picker_session()
+    roformer_ok = is_roformer_backend_available()
+    st.caption(tracks_picker_help(roformer_available=roformer_ok))
+    if not roformer_ok:
+        st.info(ROFORMER_BACKEND_UI_HINT)
+
+    vocals_inst = st.checkbox(
+        TRACK_OPTIONS[VOCALS_INSTRUMENTAL_OPTION_ID]["label"],
+        key="isolate_vocals_instrumental_only",
+        **persist,
+    )
+
+    if not vocals_inst:
+        cols = st.columns(3)
+        for idx, option_id in enumerate(DEMUCS_STEM_CHECKBOX_IDS):
+            with cols[idx % 3]:
+                st.checkbox(
+                    TRACK_OPTIONS[option_id]["label"],
+                    key=f"isolate_track_{option_id}",
+                    **persist,
+                )
+        normalized_guitar = normalize_guitar_track_selection(
+            str(st.session_state.get("isolate_guitar_track") or "none"),
+            roformer_available=roformer_ok,
+        )
+        if st.session_state.get("isolate_guitar_track") != normalized_guitar:
+            st.session_state["isolate_guitar_track"] = normalized_guitar
+        guitar_radio_ids = guitar_track_radio_ids(roformer_available=roformer_ok)
+        guitar_labels = {
+            "none": "No guitar",
+            **{oid: TRACK_OPTIONS[oid]["label"] for oid in guitar_radio_ids if oid != "none"},
+        }
+        st.radio(
+            "Guitar",
+            options=list(guitar_labels.keys()),
+            format_func=lambda oid: guitar_labels[oid],
+            key="isolate_guitar_track",
+            **persist,
+        )
+
+    option_ids = _collect_track_options_from_session()
+    st.session_state["isolate_track_options"] = list(option_ids)
+    preset_error: str | None = None
+    try:
+        resolved = resolve_track_selection(option_ids)
+    except ValueError as exc:
+        preset_error = str(exc)
+        st.warning(preset_error)
+        resolved = resolve_track_selection(list(DEFAULT_TRACK_OPTIONS))
+    return option_ids, resolved, preset_error
 
 
 def _speed_preset_radio_label(preset_id: str) -> str:
@@ -780,11 +1085,8 @@ def _render_separation_controls() -> dict:
     apply_pending_output_name(st.session_state)
     apply_pending_youtube_url(st.session_state)
     apply_youtube_output_name_sync(st.session_state)
-    if "isolate_separation_preset" not in st.session_state:
-        st.session_state["isolate_separation_preset"] = DEFAULT_SEPARATION_PRESET
     if st.session_state.get("isolate_speed_preset") not in SPEED_PRESETS:
         st.session_state["isolate_speed_preset"] = DEFAULT_SPEED_PRESET
-
     persist = _persist_kwargs()
 
     uploaded = st.file_uploader(
@@ -799,11 +1101,11 @@ def _render_separation_controls() -> dict:
     youtube_error: str | None = None
     youtube_enabled = st.checkbox(
         "Download from YouTube",
-        value=not bool(getattr(sys, "frozen", False)),
+        value=False,
         key="isolate_youtube_enabled",
         help=(
-            "Off by default in the desktop installer. Enable only if you have rights "
-            "to the audio. Arbitrary URLs are rejected."
+            "Off by default. Enable only if you have rights to the audio. "
+            "Arbitrary URLs are rejected."
         ),
         **persist,
     )
@@ -870,10 +1172,6 @@ def _render_separation_controls() -> dict:
             "have rights to the audio."
         )
 
-    if st.button("New file", key="isolate_new_file"):
-        reset_new_tab_source(st.session_state)
-        st.rerun()
-
     carry_over_path = st.session_state.get("carry_over_audio_path")
     carry_over_name = st.session_state.get("carry_over_audio_name")
     if not uploaded and carry_over_path and Path(carry_over_path).exists():
@@ -887,36 +1185,8 @@ def _render_separation_controls() -> dict:
 
     audio_path = _active_source_path(uploaded)
 
-    preset_id = st.radio(
-        "Tracks",
-        options=list(SEPARATION_PRESETS.keys()),
-        format_func=_preset_radio_label,
-        key="isolate_separation_preset",
-        **persist,
-    )
-
-    custom_stems: list[str] = []
-    preset_error: str | None = None
-    if preset_id == "custom":
-        cols = st.columns(3)
-        for idx, (stem_id, label) in enumerate(CUSTOM_STEM_CHOICES.items()):
-            with cols[idx % 3]:
-                checked = st.checkbox(
-                    label,
-                    value=stem_id in DEFAULT_CUSTOM_STEMS,
-                    key=f"isolate_custom_{stem_id}",
-                    **persist,
-                )
-                if checked:
-                    custom_stems.append(stem_id)
-        try:
-            resolved = resolve_custom_separation(custom_stems)
-        except ValueError as exc:
-            preset_error = str(exc)
-            st.warning(preset_error)
-            resolved = resolve_separation_preset("custom")
-    else:
-        resolved = resolve_separation_preset(preset_id)
+    track_options, resolved, preset_error = _render_track_picker(persist=persist)
+    custom_stems = list(resolved.get("stems") or [])
     if resolved["caveat"]:
         st.caption(resolved["caveat"])
 
@@ -997,6 +1267,25 @@ def _render_separation_controls() -> dict:
                 key="isolate_two_pass",
                 **persist,
             )
+            st.checkbox(
+                "Refine guitar with MelBand specialist (experimental)",
+                help=(
+                    "Second-pass guitar extraction (becruily MelBand-Roformer, ~45 MB first "
+                    "download). De-bleeds the Demucs guitar stem. Skipped when the refine "
+                    "runtime is unavailable."
+                ),
+                key="isolate_guitar_refine",
+                **persist,
+            )
+        elif resolved["model"] == "bs_roformer_sw" and resolved.get("guitar_refine"):
+            st.caption(
+                "BS-RoFormer-SW runs first; MelBand refine follows when guitar is selected."
+            )
+        st.caption(
+            "Guitar low-end fix-up (bass de-bleed, restore) lives on the **Mixer** tab after "
+            "separation — no need to re-run Demucs. MelBand refine improves isolation but can "
+            "soften highs — use **Guitar (BS-RoFormer)** without refine if guitar sounds dull."
+        )
         st.markdown("**Section (optional)**")
         start_sec, max_duration_sec, region_label = _render_region_controls(audio_path)
 
@@ -1012,10 +1301,15 @@ def _render_separation_controls() -> dict:
     two_pass = bool(
         st.session_state.get("isolate_two_pass") and resolved["model"] == "htdemucs_6s"
     )
+    guitar_refine = bool(resolved.get("guitar_refine")) or bool(
+        st.session_state.get("isolate_guitar_refine")
+        and resolved["model"] in {"htdemucs_6s", "bs_roformer_sw", "melband_roformer_guitar"}
+    )
     return {
         "model": resolved["model"],
         "two_stems": resolved["two_stems"],
         "custom_stems": custom_stems,
+        "track_options": list(track_options),
         "error": preset_error or youtube_error,
         "quality": quality,
         "device": device,
@@ -1026,8 +1320,12 @@ def _render_separation_controls() -> dict:
         "region_label": region_label,
         "guitar_checkpoint": guitar_checkpoint,
         "two_pass": two_pass,
+        "guitar_refine": guitar_refine,
+        "low_end_restore_db": 0.0,
+        "sub_bass_debleed": False,
         "emit_stems": list(resolved["emit_stems"]) if resolved.get("emit_stems") else None,
         "fold_other_into_guitar": bool(resolved.get("fold_other_into_guitar", True)),
+        "fold_other_mode": str(resolved.get("fold_other_mode") or "best_effort"),
         "youtube_url": youtube_url.strip() if youtube_enabled else "",
         "tracks_label": resolved.get("tracks") or "",
         "preset_label": resolved.get("label") or "",
@@ -1110,10 +1408,26 @@ def _render_job_queue_panel() -> None:
             _clear_mixer_if_run_deleted(dirs)
             st.rerun()
     waiting_ids = queued_job_ids()
+    active_id = active_job_id()
+    stopping_previous = False
+    if active_id and worker_busy():
+        active_status = read_status(active_id) or {}
+        stopping_previous = is_stopping_previous_job(
+            active_id,
+            str(active_status.get("status") or ""),
+        )
     for job in parts["in_flight"]:
-        _render_queue_job_row(job, waiting_ids=waiting_ids)
+        _render_queue_job_row(
+            job,
+            waiting_ids=waiting_ids,
+            stopping_previous=stopping_previous,
+        )
     for job in parts["succeeded"]:
-        _render_queue_job_row(job, waiting_ids=waiting_ids)
+        _render_queue_job_row(
+            job,
+            waiting_ids=waiting_ids,
+            stopping_previous=stopping_previous,
+        )
 
 
 def _clear_mixer_if_run_deleted(run_dirs: list[str] | str | None) -> None:
@@ -1128,21 +1442,67 @@ def _clear_mixer_if_run_deleted(run_dirs: list[str] | str | None) -> None:
         _persist_isolate_ui_state()
 
 
-def _render_queue_job_row(job: dict, *, waiting_ids: list[str]) -> None:
+def _render_job_failure(
+    title: str,
+    raw_error: str | None,
+    *,
+    detail_key: str,
+    inline_caption: bool = False,
+) -> None:
+    """Short summary plus full error text in an expander."""
+    summary = format_job_error(raw_error)
+    detail = (raw_error or "").strip() or summary
+    if inline_caption:
+        st.caption(summary)
+    else:
+        st.error(f"**{title}** failed: {summary}")
+    if detail:
+        with st.expander("Details", expanded=True, key=detail_key):
+            st.code(detail)
+
+
+def _render_queue_job_row(
+    job: dict,
+    *,
+    waiting_ids: list[str],
+    stopping_previous: bool,
+) -> None:
     status = job.get("status", "unknown")
     title = _job_source_title(job)
     job_id = str(job.get("id") or "")
     label = "done" if status == "succeeded" else status
-    n_actions = 2 if status == "succeeded" else 1
+    if status == "running":
+        n_actions = 2
+    elif status == "paused":
+        n_actions = 2
+    elif status == "succeeded":
+        n_actions = 2
+    else:
+        n_actions = 1
     cols = st.columns([4, *([1] * n_actions)])
     with cols[0]:
         st.write(f"**{title}** — {label}")
         if status == "failed":
-            st.caption(format_job_error(job.get("error") or job.get("message")))
+            _render_job_failure(
+                title,
+                job.get("error") or job.get("message"),
+                detail_key=f"job_fail_details_{job_id}",
+                inline_caption=True,
+            )
         elif status == "queued":
-            st.caption(queued_wait_caption(job_id, waiting_ids))
+            st.caption(
+                queued_wait_caption(
+                    job_id,
+                    waiting_ids,
+                    stopping_previous=stopping_previous,
+                )
+            )
         elif status == "cancelled":
             st.caption("Removed from queue")
+        elif status == "paused":
+            st.caption(paused_job_caption(job.get("completed_stages")))
+        elif status == "pausing":
+            st.caption("Pausing…")
         elif status == "running":
             st.caption("Separating…")
     if status == "succeeded" and job_id:
@@ -1168,20 +1528,46 @@ def _render_queue_job_row(job: dict, *, waiting_ids: list[str]) -> None:
                 _clear_mixer_if_run_deleted(result.get("run_dir"))
                 st.rerun()
         return
-    with cols[1]:
-        if status == "running" and job_id:
+    if status == "running" and job_id:
+        with cols[1]:
+            if st.button(
+                "Pause",
+                key=f"pause_job_{job_id}",
+                help=(
+                    "Pauses after the current step finishes (or stops heavy processing). "
+                    "Resume continues from the last saved step."
+                ),
+            ):
+                pause_job(job_id)
+                ensure_worker_started()
+                st.rerun()
+        with cols[2]:
             if st.button(
                 "Stop",
                 key=f"stop_job_{job_id}",
-                help="Cancel this separation. The next queued song then starts (still one at a time).",
+                help="Cancel and remove this job.",
             ):
                 remove_job(job_id)
                 ensure_worker_started()
                 st.rerun()
-        elif job_id and st.button(
+        return
+    if status == "paused" and job_id:
+        with cols[1]:
+            if st.button("Resume", key=f"resume_job_{job_id}"):
+                resume_job(job_id)
+                ensure_worker_started()
+                st.rerun()
+        with cols[2]:
+            if st.button("Remove", key=f"remove_paused_{job_id}"):
+                remove_job(job_id)
+                ensure_worker_started()
+                st.rerun()
+        return
+    with cols[1]:
+        if job_id and st.button(
             "Remove",
             key=f"remove_job_{job_id}",
-            help="Drop this job from the list. The next queued song then starts (still one at a time).",
+            help="Drop this job from the list.",
         ):
             remove_job(job_id)
             ensure_worker_started()
@@ -1203,20 +1589,33 @@ def _render_status_strip(jobs: list) -> None:
         elif status == "failed" and failed is None:
             failed = fresh
     waiting_ids = queued_job_ids()
+    active_id = active_job_id()
+    stopping_previous = False
+    if active_id and worker_busy():
+        active_status = read_status(active_id) or {}
+        stopping_previous = is_stopping_previous_job(
+            active_id,
+            str(active_status.get("status") or ""),
+        )
     show_queued = running is None and failed is None and bool(waiting_ids)
-    if not (running or failed or show_queued):
+    if not (running or failed or show_queued or stopping_previous):
         return
     with st.container(border=True, key="isolate_status_strip"):
         if running:
             st.info(f"Separating **{_job_source_title(running)}**")
             _render_running_progress(running)
         elif failed:
-            st.error(
-                f"**{_job_source_title(failed)}** failed: "
-                f"{format_job_error(failed.get('error'))}"
+            _render_job_failure(
+                _job_source_title(failed),
+                failed.get("error"),
+                detail_key="isolate_status_fail_details",
             )
+        elif stopping_previous:
+            st.caption(status_strip_waiting_caption(waiting_ids, stopping_previous=True))
         elif show_queued:
-            st.caption(queued_wait_caption(waiting_ids[0], waiting_ids))
+            st.caption(
+                status_strip_waiting_caption(waiting_ids, stopping_previous=False)
+            )
 
 
 @st.fragment(run_every=2.0)
@@ -1543,6 +1942,10 @@ def _enqueue_confirmed_job(choice: dict, audio_path: Path) -> None:
     except Exception:
         job_audio_sec = float(max_duration_sec) if max_duration_sec is not None else None
 
+    if job_requires_roformer_backend(choice["model"]) and not is_roformer_backend_available():
+        st.error(f"RoFormer backend is not installed. {ROFORMER_INSTALL_HINT}")
+        return
+
     try:
         ensure_cuda_available(choice["device"], get_desktop_probe())
     except RuntimeError:
@@ -1579,9 +1982,14 @@ def _enqueue_confirmed_job(choice: dict, audio_path: Path) -> None:
         two_stems=choice.get("two_stems"),
         guitar_checkpoint=choice.get("guitar_checkpoint"),
         two_pass=bool(choice.get("two_pass")),
+        guitar_refine=bool(choice.get("guitar_refine")),
+        low_end_restore_db=0.0,
+        sub_bass_debleed=False,
         emit_stems=list(choice["emit_stems"]) if choice.get("emit_stems") else None,
         fold_other_into_guitar=bool(choice.get("fold_other_into_guitar", True)),
+        fold_other_mode=str(choice.get("fold_other_mode") or "best_effort"),
         custom_stems=list(choice.get("custom_stems") or []),
+        track_options=list(choice.get("track_options") or []),
         source_fingerprint=str(source_fp) if source_fp else None,
         source_kind=source_kind,
         region_label=region_label,
@@ -1602,6 +2010,7 @@ def _enqueue_confirmed_job(choice: dict, audio_path: Path) -> None:
             "device": choice["device"],
             "model": choice["model"],
             "two_pass": bool(choice.get("two_pass")),
+            "guitar_refine": bool(choice.get("guitar_refine")),
         }
     _open_queue_workspace()
     st.rerun()
@@ -1851,20 +2260,23 @@ def _render_mixer_workspace(browser_id: str | None) -> None:
 
     base_name = st.session_state.get("isolate_base_name", "stems")
     st.session_state["isolate_results_fp"] = _artifact_fingerprint(stem_paths)
+    run_dir = Path(
+        st.session_state.get("isolate_run_dir", next(iter(stem_paths.values())).parent)
+    )
 
     presence = _load_stem_presence(artifacts_map)
     bass_bleed = _load_bass_bleed_diagnostics(artifacts_map)
     if bass_bleed.get("flagged"):
         st.warning(
             "Guitar check: "
-            f"{bass_bleed.get('reason', 'this track may contain extra bass bleed')}"
+            f"{bass_bleed.get('reason', 'this track may contain extra bass bleed')} "
+            "Use **Guitar fix-up** below to adjust without re-separating."
         )
+
+    _render_guitar_fixup_panel(stem_paths, run_dir, artifacts_map or {}, bass_bleed)
 
     _render_mixer_region_caption(base_name)
 
-    run_dir = Path(
-        st.session_state.get("isolate_run_dir", next(iter(stem_paths.values())).parent)
-    )
     _mixer_and_downloads_fragment(
         stem_paths,
         presence=presence,

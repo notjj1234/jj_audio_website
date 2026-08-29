@@ -25,6 +25,7 @@ STAGE_WEIGHTS: dict[str, float] = {
     "ingest": 0.05,
     "separate": 0.80,
     "collect": 0.05,
+    "guitar_refine": 0.15,
     "bass_bleed": 0.05,
     "presence": 0.03,
     "done": 0.02,
@@ -35,6 +36,7 @@ STAGE_CHECKLIST_LABELS: dict[str, str] = {
     "ingest": "Prepare audio",
     "separate": "Separate tracks",
     "collect": "Separate tracks",
+    "guitar_refine": "Refine guitar",
     "bass_bleed": "Separate tracks",
     "presence": "Separate tracks",
     "done": "Finish",
@@ -48,54 +50,145 @@ _DEVICE_REALTIME = {"cpu": 1.0, "cuda": 0.25, "mps": 0.8}
 # Extra work from Demucs --shifts (QUALITY_SHIFTS in isolate.py).
 _QUALITY_TIME_FACTOR = {"fast": 1.0, "balanced": 2.0, "high": 4.0, "extreme": 6.0}
 _INTRA_STAGE_CAP = 0.95
-_GUITAR_MODEL_MARKERS = ("6s", "guitar")
+_GUITAR_MODEL_MARKERS = ("6s", "guitar", "roformer")
 
-# Plain-language separation presets → Demucs engine settings.
-# Keys are stable UI ids; labels/descriptions are user-facing.
+# Labeled track picks → one resolved pipeline (see resolve_track_selection).
+TRACK_OPTIONS: dict[str, dict[str, Any]] = {
+    "vocals_demucs": {
+        "label": "Vocals (Demucs)",
+        "stem": "vocals",
+    },
+    "drums_demucs": {
+        "label": "Drums (Demucs)",
+        "stem": "drums",
+    },
+    "bass_demucs": {
+        "label": "Bass (Demucs)",
+        "stem": "bass",
+    },
+    "other_demucs": {
+        "label": "Other (Demucs)",
+        "stem": "other",
+    },
+    "piano_demucs": {
+        "label": "Piano (Demucs 6-stem)",
+        "stem": "piano",
+    },
+    "guitar_demucs_6s": {
+        "label": "Guitar (Demucs 6-stem, weaker)",
+        "stem": "guitar",
+    },
+    "guitar_roformer": {
+        "label": "Guitar (BS-RoFormer, better, slower)",
+        "stem": "guitar",
+    },
+    "guitar_roformer_refine": {
+        "label": "Guitar (BS-RoFormer + MelBand refine, best, slowest)",
+        "stem": "guitar",
+    },
+    "vocals_instrumental_demucs": {
+        "label": "Vocals & instrumental (Demucs 2-stem)",
+        "stem": "vocals",
+    },
+}
+
+GUITAR_TRACK_OPTION_IDS = frozenset(
+    {"guitar_demucs_6s", "guitar_roformer", "guitar_roformer_refine"}
+)
+GUITAR_TRACK_RADIO_ORDER = (
+    "guitar_demucs_6s",
+    "guitar_roformer",
+    "guitar_roformer_refine",
+)
+DEMUCS_STEM_CHECKBOX_IDS = (
+    "vocals_demucs",
+    "drums_demucs",
+    "bass_demucs",
+    "piano_demucs",
+    "other_demucs",
+)
+VOCALS_INSTRUMENTAL_OPTION_ID = "vocals_instrumental_demucs"
+DEFAULT_TRACK_OPTIONS = ("vocals_demucs", "guitar_demucs_6s")
+
+ROFORMER_DOWNLOAD_CAVEAT = (
+    "Downloads ~700 MB BS-RoFormer-SW weights on first use, then a guitar "
+    "specialist (~45 MB). Much slower on CPU. Community weights have no stated "
+    "license — use accordingly."
+)
+ROFORMER_MIXED_STEMS_NOTE = (
+    "All stems are separated in one BS-RoFormer pass; unselected stems are discarded."
+)
+TRACKS_PICKER_HELP = (
+    "Pick the stems you want. Guitar can use Demucs (faster) or BS-RoFormer "
+    "(better quality, much slower on CPU)."
+)
+
+ROFORMER_GUITAR_OPTION_IDS = frozenset({"guitar_roformer", "guitar_roformer_refine"})
+ROFORMER_MODEL_IDS = frozenset({"bs_roformer_sw", "melband_roformer_guitar"})
+ROFORMER_BACKEND_UI_HINT = (
+    "BS-RoFormer guitar options need the optional runtime. "
+    "In your app Python environment run: `pip install bs-roformer-infer`."
+)
+
+
+def guitar_track_radio_ids(*, roformer_available: bool) -> tuple[str, ...]:
+    """Radio keys for the Guitar row: ``none`` plus engines available on this host."""
+    if roformer_available:
+        return ("none", *GUITAR_TRACK_RADIO_ORDER)
+    return ("none", "guitar_demucs_6s")
+
+
+def normalize_guitar_track_selection(guitar: str, *, roformer_available: bool) -> str:
+    """Map persisted RoFormer picks to Demucs when the backend is missing."""
+    pick = (guitar or "none").strip()
+    if pick in ROFORMER_GUITAR_OPTION_IDS and not roformer_available:
+        return "guitar_demucs_6s"
+    if pick == "none" or pick in GUITAR_TRACK_OPTION_IDS:
+        return pick
+    return "none"
+
+
+def tracks_picker_help(*, roformer_available: bool) -> str:
+    if roformer_available:
+        return TRACKS_PICKER_HELP
+    return (
+        "Pick the stems you want. Guitar uses Demucs only until BS-RoFormer is installed "
+        "(pip install bs-roformer-infer in your app environment)."
+    )
+
+
+def job_requires_roformer_backend(model: str) -> bool:
+    return (model or "").strip().lower() in ROFORMER_MODEL_IDS
+
+# Legacy preset ids → track option ids (session migration / tests only).
+LEGACY_PRESET_TRACK_OPTIONS: dict[str, tuple[str, ...]] = {
+    "full_band": (
+        "vocals_demucs",
+        "drums_demucs",
+        "bass_demucs",
+        "guitar_roformer",
+    ),
+    "best_guitar": (
+        "vocals_demucs",
+        "drums_demucs",
+        "bass_demucs",
+        "guitar_roformer_refine",
+    ),
+    "essential": (
+        "vocals_demucs",
+        "drums_demucs",
+        "bass_demucs",
+        "other_demucs",
+    ),
+    "vocals_music": (VOCALS_INSTRUMENTAL_OPTION_ID,),
+}
+
+# Internal migration only — not shown in UI.
 SEPARATION_PRESETS: dict[str, dict[str, Any]] = {
-    # Stage-1 default stays htdemucs_6s (only official Demucs checkpoint with a
-    # guitar stem). Built-in presets emit at most 4 stems; piano/6-stem output
-    # is Custom (and CLI/eval). See eval/lead_rhythm/RESEARCH.md.
-    "full_band": {
-        "label": "Full band",
-        "tracks": "Vocals, Drums, Bass, Guitar",
-        "track_count": 4,
-        "model": "htdemucs_6s",
-        "two_stems": None,
-        "emit_stems": ("vocals", "drums", "bass", "guitar"),
-        "fold_other_into_guitar": True,
-        "caveat": "Guitar isolation is less accurate than vocals/drums/bass.",
-    },
-    "essential": {
-        "label": "Essential tracks",
-        "tracks": "Vocals, Drums, Bass, Other",
-        "track_count": 4,
-        "model": "htdemucs",
-        "two_stems": None,
-        "emit_stems": ("vocals", "drums", "bass", "other"),
-        "fold_other_into_guitar": True,
-        "caveat": "",
-    },
-    "vocals_music": {
-        "label": "Vocals & music",
-        "tracks": "Vocals, Instrumental",
-        "track_count": 2,
-        "model": "htdemucs",
-        "two_stems": "vocals",
-        "emit_stems": None,
-        "fold_other_into_guitar": True,
-        "caveat": "",
-    },
-    "custom": {
-        "label": "Custom",
-        "tracks": "Pick your own instruments",
-        "track_count": None,
-        "model": "htdemucs",
-        "two_stems": None,
-        "emit_stems": None,
-        "fold_other_into_guitar": True,
-        "caveat": "",
-    },
+    "full_band": {"label": "Full band"},
+    "essential": {"label": "Essential tracks"},
+    "vocals_music": {"label": "Vocals & music"},
+    "custom": {"label": "Custom"},
 }
 
 DEFAULT_SEPARATION_PRESET = "full_band"
@@ -120,8 +213,6 @@ CUSTOM_STEM_OUTPUTS: dict[str, tuple[str, ...]] = {
 }
 
 DEFAULT_CUSTOM_STEMS = ("vocals", "guitar")
-
-CUSTOM_CAVEAT = ""
 
 SPEED_PRESETS: dict[str, dict[str, Any]] = {
     "faster": {
@@ -218,65 +309,134 @@ def clamp_region_bounds(
     return start, end
 
 
-def resolve_separation_preset(preset_id: str) -> dict[str, Any]:
-    """
-    Map a UI preset id to engine settings.
-
-    Returns a dict with ``model`` and ``two_stems`` (possibly None), plus
-    the preset's display metadata. Unknown ids fall back to the default.
-    """
-    preset = SEPARATION_PRESETS.get(preset_id) or SEPARATION_PRESETS[DEFAULT_SEPARATION_PRESET]
-    return {
-        "id": preset_id if preset_id in SEPARATION_PRESETS else DEFAULT_SEPARATION_PRESET,
-        "label": preset["label"],
-        "tracks": preset["tracks"],
-        "track_count": preset["track_count"],
-        "model": preset["model"],
-        "two_stems": preset["two_stems"],
-        "emit_stems": preset.get("emit_stems"),
-        "fold_other_into_guitar": bool(preset.get("fold_other_into_guitar", True)),
-        "caveat": preset["caveat"],
-    }
-
-
-def resolve_custom_separation(stems: Any) -> dict[str, Any]:
-    """
-    Map Custom instrument picks to the smallest Demucs setup that covers them.
-
-    Guitar or piano needs the 6-stem model; vocals alone can use the cheap
-    two-stem split; anything else fits the 4-stem model. Raises ``ValueError``
-    when nothing is picked.
-    """
-    wanted = {s for s in stems if s in CUSTOM_STEM_CHOICES}
-    picked = [s for s in CUSTOM_STEM_CHOICES if s in wanted]
-    if not picked:
+def custom_stems_to_track_options(stems: Any) -> list[str]:
+    """Map legacy instrument ids to default track option ids."""
+    wanted = {s for s in (stems or ()) if s in CUSTOM_STEM_CHOICES}
+    if not wanted:
         raise ValueError("Pick at least one instrument to separate.")
+    options: list[str] = []
+    for stem_id in CUSTOM_STEM_CHOICES:
+        if stem_id not in wanted:
+            continue
+        if stem_id == "guitar":
+            options.append("guitar_demucs_6s")
+        else:
+            options.append(f"{stem_id}_demucs")
+    return options or list(DEFAULT_TRACK_OPTIONS)
 
-    if wanted == {"vocals"}:
-        model, two_stems = "htdemucs", "vocals"
-    elif wanted & {"guitar", "piano"}:
-        model, two_stems = "htdemucs_6s", None
-    else:
-        model, two_stems = "htdemucs", None
+
+def migrate_track_options(session: MutableMapping[str, Any]) -> list[str]:
+    """Resolve track option ids from session, migrating legacy preset keys."""
+    current = session.get("isolate_track_options")
+    if isinstance(current, (list, tuple)) and current:
+        known = [str(x) for x in current if str(x) in TRACK_OPTIONS]
+        if known:
+            return known
+    legacy_preset = session.get("isolate_separation_preset")
+    if isinstance(legacy_preset, str):
+        if legacy_preset == "best_guitar":
+            legacy_preset = "full_band"
+        mapped = LEGACY_PRESET_TRACK_OPTIONS.get(legacy_preset)
+        if mapped:
+            return list(mapped)
+        if legacy_preset == "custom":
+            return custom_stems_to_track_options(session.get("isolate_last_custom_stems"))
+    return list(DEFAULT_TRACK_OPTIONS)
+
+
+def _track_selection_caveat(option_ids: list[str], *, uses_roformer: bool) -> str:
+    parts: list[str] = []
+    if uses_roformer:
+        parts.append(ROFORMER_DOWNLOAD_CAVEAT)
+        non_guitar = [oid for oid in option_ids if oid not in GUITAR_TRACK_OPTION_IDS]
+        if non_guitar:
+            parts.append(ROFORMER_MIXED_STEMS_NOTE)
+    return " ".join(parts)
+
+
+def resolve_track_selection(option_ids: Any) -> dict[str, Any]:
+    """Map labeled track picks to one engine config (model, emit_stems, guitar_refine)."""
+    ids = [str(x) for x in (option_ids or ()) if str(x) in TRACK_OPTIONS]
+    if not ids:
+        raise ValueError("Pick at least one track to separate.")
+
+    guitar_picks = [oid for oid in ids if oid in GUITAR_TRACK_OPTION_IDS]
+    if len(guitar_picks) > 1:
+        raise ValueError("Pick only one guitar option.")
+
+    if VOCALS_INSTRUMENTAL_OPTION_ID in ids:
+        if len(ids) > 1:
+            raise ValueError("Vocals & instrumental cannot combine with other tracks.")
+        return {
+            "id": "custom",
+            "label": "Custom",
+            "tracks": TRACK_OPTIONS[VOCALS_INSTRUMENTAL_OPTION_ID]["label"],
+            "track_count": 1,
+            "model": "htdemucs",
+            "two_stems": "vocals",
+            "stems": ["vocals"],
+            "emit_stems": ("vocals",),
+            "track_options": list(ids),
+            "fold_other_into_guitar": True,
+            "fold_other_mode": "best_effort",
+            "guitar_refine": False,
+            "caveat": "",
+        }
 
     emit: list[str] = []
-    for pick in picked:
-        for name in CUSTOM_STEM_OUTPUTS.get(pick, ()):
-            if name not in emit:
-                emit.append(name)
+    custom_stems: list[str] = []
+    for oid in ids:
+        stem = str(TRACK_OPTIONS[oid]["stem"])
+        if stem not in emit:
+            emit.append(stem)
+        if stem in CUSTOM_STEM_CHOICES and stem not in custom_stems:
+            custom_stems.append(stem)
+
+    uses_roformer = bool(guitar_picks and guitar_picks[0] in {"guitar_roformer", "guitar_roformer_refine"})
+    guitar_refine = guitar_picks == ["guitar_roformer_refine"]
+
+    if uses_roformer:
+        model = "bs_roformer_sw"
+        two_stems = None
+    elif {"guitar", "piano"} & set(custom_stems):
+        model = "htdemucs_6s"
+        two_stems = None
+    else:
+        model = "htdemucs"
+        two_stems = None
 
     return {
         "id": "custom",
-        "label": SEPARATION_PRESETS["custom"]["label"],
-        "tracks": ", ".join(CUSTOM_STEM_CHOICES[s] for s in picked),
-        "track_count": len(picked),
+        "label": "Custom",
+        "tracks": ", ".join(TRACK_OPTIONS[oid]["label"] for oid in ids),
+        "track_count": len(ids),
         "model": model,
         "two_stems": two_stems,
-        "stems": picked,
+        "stems": custom_stems,
         "emit_stems": tuple(emit),
-        "fold_other_into_guitar": "other" not in wanted,
-        "caveat": CUSTOM_CAVEAT,
+        "track_options": list(ids),
+        "fold_other_into_guitar": "other" not in custom_stems,
+        "fold_other_mode": "best_effort",
+        "guitar_refine": guitar_refine,
+        "caveat": _track_selection_caveat(ids, uses_roformer=uses_roformer),
     }
+
+
+def resolve_separation_preset(preset_id: str) -> dict[str, Any]:
+    """Legacy preset id → engine settings via track option mapping."""
+    option_ids = LEGACY_PRESET_TRACK_OPTIONS.get(preset_id)
+    if option_ids is None:
+        option_ids = DEFAULT_TRACK_OPTIONS
+    resolved = resolve_track_selection(option_ids)
+    resolved["id"] = preset_id if preset_id in SEPARATION_PRESETS else "custom"
+    if preset_id in SEPARATION_PRESETS:
+        resolved["label"] = SEPARATION_PRESETS[preset_id]["label"]
+    return resolved
+
+
+def resolve_custom_separation(stems: Any) -> dict[str, Any]:
+    """Map legacy Custom instrument picks to engine settings."""
+    return resolve_track_selection(custom_stems_to_track_options(stems))
 
 
 def custom_selected_stems(
@@ -536,8 +696,56 @@ def apply_workspace_tab(session: MutableMapping[str, Any], *, has_artifacts: boo
     return str(current)
 
 
-QUEUE_IN_FLIGHT_STATUSES = frozenset({"queued", "running", "failed", "cancelled"})
+QUEUE_IN_FLIGHT_STATUSES = frozenset(
+    {"queued", "running", "failed", "cancelled", "paused", "pausing"}
+)
 ISOLATE_UI_STATE_FILENAME = "isolate_ui_state.json"
+
+
+def stopping_previous_caption() -> str:
+    return "Stopping previous job… next track starts when ready"
+
+
+def is_stopping_previous_job(active_job_id: str | None, job_status: str | None) -> bool:
+    """True when the worker is tearing down a cancelled/pausing job."""
+    if not active_job_id:
+        return False
+    return job_status in {"cancelled", "pausing"}
+
+
+def queued_wait_caption(
+    job_id: str,
+    queued_ids: list[str],
+    *,
+    stopping_previous: bool = False,
+) -> str:
+    """Waiting line with queue position; never a fake percent."""
+    if stopping_previous and queued_ids and job_id in queued_ids:
+        return "Up next — waiting for previous job to stop"
+    try:
+        n = queued_ids.index(job_id) + 1
+    except ValueError:
+        return "Waiting…"
+    return f"Waiting — position {n} of {len(queued_ids)}"
+
+
+def status_strip_waiting_caption(
+    queued_ids: list[str],
+    *,
+    stopping_previous: bool,
+) -> str:
+    if stopping_previous:
+        return stopping_previous_caption()
+    if not queued_ids:
+        return "Waiting…"
+    return queued_wait_caption(queued_ids[0], queued_ids)
+
+
+def paused_job_caption(completed_stages: Any = None) -> str:
+    stages = list(completed_stages or [])
+    if stages:
+        return f"Paused — resume continues after {stages[-1]}"
+    return "Paused — resume restarts from the beginning"
 
 
 def partition_queue_jobs(jobs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -946,11 +1154,23 @@ def expects_guitar_stem(
     return any(marker in lowered for marker in _GUITAR_MODEL_MARKERS)
 
 
-def isolation_stages_for_job(*, expects_guitar: bool) -> tuple[str, ...]:
+def isolation_stages_for_job(
+    *,
+    expects_guitar: bool,
+    guitar_refine: bool = False,
+) -> tuple[str, ...]:
     """Stages that will actually run for this job."""
-    if expects_guitar:
-        return ISOLATION_STAGE_ORDER
-    return tuple(s for s in ISOLATION_STAGE_ORDER if s not in _GUITAR_ONLY_STAGES)
+    stages = ISOLATION_STAGE_ORDER
+    if not expects_guitar:
+        stages = tuple(s for s in stages if s not in _GUITAR_ONLY_STAGES)
+    if guitar_refine and expects_guitar:
+        out: list[str] = []
+        for stage in stages:
+            out.append(stage)
+            if stage == "collect":
+                out.append("guitar_refine")
+        return tuple(out)
+    return stages
 
 
 def resolve_active_stage(stage: str, stages: tuple[str, ...]) -> str:
@@ -1037,12 +1257,14 @@ def estimate_job_seconds(
     model: str | None = None,
     expects_guitar: bool | None = None,
     two_pass: bool = False,
+    guitar_refine: bool = False,
 ) -> tuple[float | None, str]:
     """Predicted wall time for the whole job.
 
     Uses a prior run when quality/device/model match (confidence ``high``),
     otherwise a clip-length × quality × device heuristic (``low``).
     Two-pass isolation is about 2× the Demucs ``separate`` stage.
+    Guitar refine and BS-RoFormer-SW add extra wall time.
     """
     if last_run:
         same_setup = (
@@ -1051,6 +1273,7 @@ def estimate_job_seconds(
             and (model is None or last_run.get("model") == model)
             and (expects_guitar is None or bool(last_run.get("expects_guitar")) == bool(expects_guitar))
             and bool(last_run.get("two_pass")) == bool(two_pass)
+            and bool(last_run.get("guitar_refine")) == bool(guitar_refine)
         )
         last_audio = float(last_run.get("audio_sec") or 0.0)
         last_wall = float(last_run.get("wall_sec") or 0.0)
@@ -1069,6 +1292,8 @@ def estimate_job_seconds(
     q = _QUALITY_TIME_FACTOR.get(quality, 1.0)
     d = _DEVICE_REALTIME.get(device, _DEVICE_REALTIME["cpu"])
     pass_factor = 2.0 if two_pass else 1.0
+    if (model or "").lower() in {"bs_roformer_sw", "melband_roformer_guitar"}:
+        pass_factor *= 1.6
     separate_sec = audio_duration_sec * q * d * pass_factor
     sep_w = STAGE_WEIGHTS["separate"]
     active_w = sum(STAGE_WEIGHTS.get(s, 0.0) for s in stages)

@@ -1,29 +1,43 @@
 """Multi-stem audio isolation via Demucs (standalone feature).
 
-Stage-1 guitar model (2026-08-24 research decision): keep ``htdemucs_6s`` as
-the default first-stage separator whenever a dedicated ``guitar`` stem is
-required. Do not swap the default to ``htdemucs`` / ``htdemucs_ft`` (no guitar
-stem), vocal-SOTA RoFormer, or UVR. Lead vs rhythm remains a *post-process*
-on that single guitar stem — see ``eval/lead_rhythm/RESEARCH.md``.
+Stage-1 guitar model (2026-08-24, updated 2026-08-29): keep ``htdemucs_6s`` as
+the **default** first-stage separator whenever a dedicated ``guitar`` stem is
+required and no optional extra is installed. Do not swap the default to
+``htdemucs`` / ``htdemucs_ft`` (no guitar stem). Lead vs rhythm remains a
+*post-process* on that single guitar stem — see ``eval/lead_rhythm/README.md``.
+
+2026-08-29 guitar-quality decision: ``htdemucs_6s`` has no dedicated guitar
+head — its guitar stem bleeds bass/drums/cymbals/vocals and loses clean
+content, and folding the full ``other`` stem back into guitar reintroduces
+piano/keys. Opt-in engines that beat it on guitar SDR (MVSep: BS-RoFormer-SW
+guitar ~9.05 dB vs guitar "not established" for htdemucs_6s):
+
+- ``bs_roformer_sw`` — jarredou BS-RoFormer-SW 6-stem, mirrored at
+  ``enerjazzer/BS-ROFO-SW-Fixed`` after the original HF account was deleted.
+  Weights have **no stated license**. Requires optional ``.[roformer]``
+  (``bs-roformer-infer``) or ``.[separator]`` (``audio-separator``).
+- ``melband_roformer_guitar`` / ``IsolateConfig.guitar_refine`` — becruily
+  MelBand-Roformer Guitar 2-stem specialist as a second-pass refine.
+  Requires optional ``.[separator]``.
+- ``htdemucs_6s_guitar_ft`` stays Advanced opt-in (smallest gain).
+
+Default path stays Demucs-only and backwards-compatible on time: smarter
+``fold_other_mode="best_effort"`` (band-limited / skip piano-like ``other``)
+instead of dumping the residual mix into guitar. New ML is never the default.
 
 Bass/guitar bleed (2026-07-17): distorted/overdriven bass and electric guitar
 share heavily overlapping spectral and timbral content, so Demucs (including
-``htdemucs_6s``, the only supported model that produces a ``guitar`` stem)
-does not always keep them cleanly separated — the ``guitar`` stem can carry
-audible bass energy. This is a documented, model-level limitation (see
-facebookresearch/demucs issue #291: "no easy solution... a hell of a
-challenge" without training new per-instrument models on curated datasets,
-which is out of scope here) — not a bug in this repo's post-processing, and
-not something this module claims to fix. ``htdemucs_ft`` does not have this
-specific failure mode because it is the fine-tuned *4-stem* model (vocals/
-drums/bass/other) and never produces a ``guitar`` stem at all — "other" would
-still contain guitar, unseparated. See ``eval/lead_rhythm/README.md`` for the
-full writeup, the ``BassBleedDiagnostics`` dataclass below for the (diagnostic
--only-by-default) low-frequency-energy heuristic, and ``IsolateConfig.
-bass_bleed_mitigation`` for the optional, opt-in, partial high-pass mitigation.
+``htdemucs_6s``) does not always keep them cleanly separated — the ``guitar``
+stem can carry audible bass energy. This is a documented, model-level
+limitation (see facebookresearch/demucs issue #291) — not a bug in this
+repo's post-processing. ``htdemucs_ft`` does not have this specific failure
+mode because it never produces a ``guitar`` stem. See
+``eval/lead_rhythm/README.md``, ``BassBleedDiagnostics``, and
+``IsolateConfig.bass_bleed_mitigation``.
 
-Two-pass (opt-in ``IsolateConfig.two_pass`` / ``--two-pass``): 4-stem ``htdemucs``
-then ``htdemucs_6s`` on the leftover mix. About 2× time. Not the default.
+Two-pass (opt-in ``IsolateConfig.two_pass`` / ``--two-pass``): 4-stem
+``htdemucs`` then ``htdemucs_6s`` on the leftover mix. About 2× time. Not
+the default. Guitar refine is a separate opt-in stage.
 """
 
 from __future__ import annotations
@@ -45,7 +59,17 @@ logger = logging.getLogger(__name__)
 from audio_to_tab.ingest import normalize_audio
 from audio_to_tab.lead_rhythm import LeadRhythmThresholds, resolve_lead_rhythm_mode
 from audio_to_tab.hardware import ensure_cuda_available, separate_progress_message
-from audio_to_tab.mixer import mix_stems_to_wav
+from audio_to_tab.mixer import apply_true_peak_ceiling, mix_stems_to_wav
+from audio_to_tab.roformer import (
+    BS_ROFORMER_SW_ID,
+    MELBAND_GUITAR_ID,
+    ROFORMER_INSTALL_HINT,
+    ROFORMER_MODELS,
+    is_guitar_refine_available,
+    is_roformer_backend_available,
+    run_guitar_refine,
+    run_roformer_model,
+)
 from audio_to_tab.separate import (
     GUITAR_FT_CHECKPOINT_ID,
     SUPPORTED_GUITAR_CHECKPOINTS,
@@ -61,8 +85,38 @@ DEMUCS_INSTALL_HINT = (
 )
 
 ProgressCallback = Callable[[str, str], None]
+StageCompleteCallback = Callable[[str], None]
 
-SUPPORTED_MODELS = ("htdemucs_6s", "htdemucs", "htdemucs_ft")
+
+class JobAborted(Exception):
+    """Raised when isolation should stop between pipeline stages (stop/pause)."""
+
+
+def _abort_if(should_abort: Callable[[], bool] | None) -> None:
+    if should_abort and should_abort():
+        raise JobAborted("Job aborted")
+
+
+def _stage_done(completed: set[str], stage: str) -> bool:
+    return stage in completed
+
+
+def _mark_stage_complete(stage: str, on_stage_complete: StageCompleteCallback | None) -> None:
+    if on_stage_complete:
+        on_stage_complete(stage)
+
+DEMUCS_MODELS = ("htdemucs_6s", "htdemucs", "htdemucs_ft")
+SUPPORTED_MODELS = DEMUCS_MODELS + ROFORMER_MODELS
+# Models that emit a dedicated guitar stem (quality floor, refine, fold).
+GUITAR_PRODUCING_MODELS = frozenset(
+    {"htdemucs_6s", BS_ROFORMER_SW_ID, MELBAND_GUITAR_ID}
+)
+FOLD_OTHER_MODES = ("full", "best_effort", "band_limited")
+# Guitar-typical recovery band when folding leftover ``other`` (open low E ≈82 Hz).
+FOLD_GUITAR_BAND_LOW_HZ = 82.0
+FOLD_GUITAR_BAND_HIGH_HZ = 8000.0
+# Skip mixing ``other`` when it spectrally matches the piano stem this closely.
+FOLD_SKIP_PIANO_OVERLAP = 0.40
 
 QUALITY_SHIFTS = {"fast": "0", "balanced": "1", "high": "3", "extreme": "5"}
 QUALITY_OVERLAP = {"fast": "0.25", "balanced": "0.25", "high": "0.5", "extreme": "0.75"}
@@ -71,6 +125,18 @@ QUALITY_RANK = {"fast": 0, "balanced": 1, "high": 2, "extreme": 3}
 GUITAR_QUALITY_FLOOR = "balanced"
 # High-end preservation band for guitar-stem diagnostics (vs. bass-bleed <250 Hz).
 GUITAR_HIGH_END_HZ = 4000.0
+# Opt-in low-E presence restore (fundamental ≈82 Hz, 2nd harmonic ≈165 Hz).
+LOW_END_RESTORE_LOW_HZ = 60.0
+LOW_END_RESTORE_HIGH_HZ = 200.0
+LOW_END_RESTORE_MAX_DB = 12.0
+# Subtractive bass de-bleed: remove bled bass/drum energy below this band (opt-in).
+SUB_BASS_DEBLEED_CUTOFF_HZ = 150.0
+SUB_BASS_DEBLEED_MIX = 0.85
+SUB_BASS_DRUMS_MIX = 0.35
+# Linear gain on ``other`` when folding into guitar (reserve headroom vs peak ceiling).
+FOLD_OTHER_MIX_GAIN = 0.5
+GUITAR_PREREFINE_NAME = "guitar_prerefine.wav"
+GUITAR_REFINED_NAME = "guitar_refined.wav"
 TWO_PASS_KEEP_FROM_FIRST = ("vocals", "drums", "bass")
 TWO_PASS_KEEP_FROM_SECOND = ("guitar", "piano")
 TWO_PASS_FOLD_INTO_OTHER = ("other", "vocals", "drums", "bass")
@@ -82,6 +148,23 @@ DEMUCS_MAX_SEGMENT_SEC = {
     "htdemucs": 10,
     "htdemucs_ft": 10,
 }
+
+
+def isolate_timeout_multiplier(
+    *,
+    model: str,
+    two_pass: bool = False,
+    guitar_refine: bool = False,
+) -> int:
+    """Wall-clock timeout scale vs a single Demucs pass."""
+    n = 1
+    if two_pass:
+        n += 1
+    if guitar_refine:
+        n += 1
+    if model in ROFORMER_MODELS:
+        n += 1
+    return n
 
 
 def effective_demucs_segment(model: str, requested: int | float | None) -> int | None:
@@ -109,10 +192,10 @@ def effective_isolation_quality(
 
     IsolateConfig / CLI keep an explicit ``quality`` (default ``fast``) so eval
     A/B stays apples-to-apples. Desktop Faster keeps ``fast``; other speeds
-    floor ``htdemucs_6s`` to Balanced.
+    floor dedicated-guitar models to Balanced.
     """
     current = quality if quality in QUALITY_SHIFTS else "fast"
-    if model != "htdemucs_6s":
+    if model not in GUITAR_PRODUCING_MODELS:
         return current
     if speed_id == "faster":
         return current
@@ -306,29 +389,178 @@ class DualGuitarDiagnostics:
     balance_ratio: float | None = None
 
 
-def fold_other_into_guitar(artifacts: dict[str, Path]) -> dict[str, Path]:
-    """Mix Demucs Other into Guitar and drop Other from 6-stem artifacts.
+@dataclass
+class FoldOtherDiagnostics:
+    """Whether leftover ``other`` was mixed into guitar (and how)."""
 
-    Essential 4-stem runs have no guitar stem; Other stays (it is the rest of
-    the mix). Mutates ``artifacts`` in place and returns it.
-    """
-    other = artifacts.get("other")
-    guitar = artifacts.get("guitar")
-    if other is None or guitar is None:
-        return artifacts
-    if not other.is_file() or not guitar.is_file():
-        return artifacts
-    mix_stems_to_wav(
-        {"guitar": guitar, "other": other},
-        audible=["guitar", "other"],
-        output_path=guitar,
-    )
+    attempted: bool
+    folded: bool
+    mode: str
+    reason: str
+    piano_overlap: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def write_json(self, path: Path) -> Path:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
+        return path
+
+
+def _bandpass_audio(
+    data: np.ndarray,
+    sr: int,
+    low_hz: float,
+    high_hz: float,
+    order: int = 4,
+) -> np.ndarray:
+    from scipy.signal import butter, sosfiltfilt
+
+    nyquist = sr / 2.0
+    lo = min(0.99, max(1e-6, low_hz / nyquist))
+    hi = min(0.99, max(lo + 1e-4, high_hz / nyquist))
+    if lo >= hi:
+        return data.astype(np.float32)
+    sos = butter(order, [lo, hi], btype="band", output="sos")
+    return sosfiltfilt(sos, data, axis=0).astype(np.float32)
+
+
+def _write_band_limited_other(other: Path, dest: Path) -> Path:
+    import soundfile as sf
+
+    data, sr = sf.read(str(other), always_2d=True)
+    filtered = _bandpass_audio(data, int(sr), FOLD_GUITAR_BAND_LOW_HZ, FOLD_GUITAR_BAND_HIGH_HZ)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(dest), filtered, int(sr), subtype="PCM_16")
+    return dest
+
+
+def _drop_other_stem(artifacts: dict[str, Path]) -> None:
+    other = artifacts.pop("other", None)
+    if other is None:
+        return
     try:
-        other.unlink()
+        Path(other).unlink(missing_ok=True)
     except OSError:
         pass
-    artifacts.pop("other", None)
+
+
+def fold_other_into_guitar(
+    artifacts: dict[str, Path],
+    *,
+    mode: str = "full",
+) -> dict[str, Path]:
+    """Mix leftover Other into Guitar and drop Other from 6-stem artifacts.
+
+    ``mode="full"`` is the legacy mix-everything path. ``band_limited`` mixes
+    only the guitar-typical band of Other. ``best_effort`` skips the mix when
+    Other looks piano-like (or is near-silent) so keys/synths are not dumped
+    into Guitar — Other is still dropped. Essential 4-stem runs have no
+    guitar stem; Other stays. Mutates ``artifacts`` in place.
+    """
+    artifacts, _diag = apply_fold_other_into_guitar(artifacts, mode=mode)
     return artifacts
+
+
+def apply_fold_other_into_guitar(
+    artifacts: dict[str, Path],
+    *,
+    mode: str = "full",
+) -> tuple[dict[str, Path], FoldOtherDiagnostics]:
+    """Like ``fold_other_into_guitar`` but returns diagnostics for tests/eval."""
+    other = artifacts.get("other")
+    guitar = artifacts.get("guitar")
+    resolved_mode = mode if mode in FOLD_OTHER_MODES else "full"
+    if other is None or guitar is None:
+        return artifacts, FoldOtherDiagnostics(
+            attempted=False,
+            folded=False,
+            mode=resolved_mode,
+            reason="other or guitar stem missing",
+        )
+    if not other.is_file() or not guitar.is_file():
+        return artifacts, FoldOtherDiagnostics(
+            attempted=False,
+            folded=False,
+            mode=resolved_mode,
+            reason="other or guitar stem is not a file",
+        )
+
+    piano_overlap: float | None = None
+    skip_reason: str | None = None
+    if resolved_mode == "best_effort":
+        other_rms = _stem_rms(other)
+        if other_rms < _STEM_PRESENCE_MIN_RMS * 10:
+            skip_reason = "other stem is near-silent; skip mix"
+        else:
+            piano = artifacts.get("piano")
+            if piano is not None and Path(piano).is_file():
+                try:
+                    import soundfile as sf
+
+                    other_data, other_sr = sf.read(str(other), always_2d=True)
+                    piano_data, piano_sr = sf.read(str(piano), always_2d=True)
+                    if other_sr == piano_sr and other_data.size and piano_data.size:
+                        piano_overlap = _spectral_overlap(
+                            _to_mono(other_data), _to_mono(piano_data)
+                        )
+                        if piano_overlap >= FOLD_SKIP_PIANO_OVERLAP:
+                            skip_reason = (
+                                f"other overlaps piano stem ({piano_overlap:.2f} "
+                                f">= {FOLD_SKIP_PIANO_OVERLAP:.2f}); skip mix to "
+                                "avoid keys bleed"
+                            )
+                except Exception:
+                    piano_overlap = None
+
+    if skip_reason:
+        _drop_other_stem(artifacts)
+        return artifacts, FoldOtherDiagnostics(
+            attempted=True,
+            folded=False,
+            mode=resolved_mode,
+            reason=skip_reason,
+            piano_overlap=piano_overlap,
+        )
+
+    mix_src = other
+    tmp_band: Path | None = None
+    if resolved_mode in ("best_effort", "band_limited"):
+        tmp_band = other.parent / f"{other.stem}_guitar_band.wav"
+        try:
+            mix_src = _write_band_limited_other(other, tmp_band)
+        except Exception as exc:
+            logger.warning("band-limited other fold failed; using full other: %s", exc)
+            mix_src = other
+            resolved_mode = "full"
+            tmp_band = None
+
+    mix_stems_to_wav(
+        {"guitar": guitar, "other": mix_src},
+        output_path=guitar,
+        gains={"guitar": 1.0, "other": FOLD_OTHER_MIX_GAIN},
+    )
+    if tmp_band is not None:
+        try:
+            tmp_band.unlink(missing_ok=True)
+        except OSError:
+            pass
+    _drop_other_stem(artifacts)
+    band_note = (
+        f"mixed guitar-band other ({FOLD_GUITAR_BAND_LOW_HZ:.0f}–"
+        f"{FOLD_GUITAR_BAND_HIGH_HZ:.0f} Hz)"
+        if mix_src != other
+        else "mixed full other into guitar"
+    )
+    return artifacts, FoldOtherDiagnostics(
+        attempted=True,
+        folded=True,
+        mode=resolved_mode,
+        reason=band_note,
+        piano_overlap=piano_overlap,
+    )
 
 
 def apply_emit_stems(
@@ -396,8 +628,18 @@ class IsolateConfig:
     # Keep only these WAV stems after Demucs. None = keep the model's full set
     # (after optional Other→Guitar fold). Built-in UI presets cap at 4 stems.
     emit_stems: tuple[str, ...] | None = None
-    # Mix Demucs Other into Guitar and drop Other. False when Custom asks for Other.
+    # Mix leftover Other into Guitar and drop Other. False when Custom asks for Other.
     fold_other_into_guitar: bool = True
+    # How to fold: full (legacy mix-all), band_limited (guitar-band only),
+    # best_effort (skip piano-like/silent other, else band-limited). Default
+    # best_effort avoids dumping keys/synths into guitar.
+    fold_other_mode: str = "best_effort"
+    # Opt-in second-pass MelBand guitar specialist (becruily). Default off.
+    guitar_refine: bool = False
+    # Opt-in low-shelf boost on the final guitar stem (60–200 Hz). 0 = off.
+    low_end_restore_db: float = 0.0
+    # Opt-in subtractive bass/drum de-bleed below ~150 Hz (default off).
+    sub_bass_debleed: bool = False
 
     def __post_init__(self) -> None:
         # dual_guitar=True enables lead_rhythm (deprecated alias) with best_effort emit.
@@ -410,10 +652,22 @@ class IsolateConfig:
                 f"Unsupported guitar_checkpoint {self.guitar_checkpoint!r}. "
                 f"Choose from: {', '.join(sorted(SUPPORTED_GUITAR_CHECKPOINTS))}"
             )
+        if self.fold_other_mode not in FOLD_OTHER_MODES:
+            raise ValueError(
+                f"Unsupported fold_other_mode {self.fold_other_mode!r}. "
+                f"Choose from: {', '.join(FOLD_OTHER_MODES)}"
+            )
         if self.two_pass and (self.two_stems or self.model != "htdemucs_6s"):
             self.two_pass = False
+        if self.two_stems or self.model not in GUITAR_PRODUCING_MODELS:
+            self.guitar_refine = False
         if self.emit_stems is not None:
             self.emit_stems = tuple(self.emit_stems)
+        try:
+            boost = float(self.low_end_restore_db)
+        except (TypeError, ValueError):
+            boost = 0.0
+        self.low_end_restore_db = max(0.0, min(LOW_END_RESTORE_MAX_DB, boost))
 
 
 @dataclass
@@ -764,6 +1018,304 @@ def apply_bass_bleed_mitigation(
     return output_path
 
 
+def _lowpass_audio(
+    data: np.ndarray,
+    sr: int,
+    cutoff_hz: float,
+    order: int = 4,
+) -> np.ndarray:
+    from scipy.signal import butter, sosfiltfilt
+
+    nyquist = sr / 2.0
+    normalized = min(0.99, max(1e-6, cutoff_hz / nyquist))
+    sos = butter(order, normalized, btype="low", output="sos")
+    return sosfiltfilt(sos, data, axis=0).astype(np.float32)
+
+
+@dataclass
+class LowEndRecoveryDiagnostics:
+    """Pre/post low-band metrics for opt-in de-bleed + harmonic restore."""
+
+    attempted: bool
+    reason: str
+    sub_bass_debleed_applied: bool = False
+    harmonic_restore_applied: bool = False
+    debleed_cutoff_hz: float = SUB_BASS_DEBLEED_CUTOFF_HZ
+    harmonic_restore_db: float = 0.0
+    pre_low_band_energy_share: float | None = None
+    post_low_band_energy_share: float | None = None
+    low_band_rms_removed: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def write_json(self, path: Path) -> Path:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
+        return path
+
+
+def guitar_prerefine_path(guitar_path: Path) -> Path:
+    return Path(guitar_path).parent / GUITAR_PREREFINE_NAME
+
+
+def guitar_refined_path(guitar_path: Path) -> Path:
+    return Path(guitar_path).parent / GUITAR_REFINED_NAME
+
+
+def has_guitar_prerefine(guitar_path: Path) -> bool:
+    return guitar_prerefine_path(guitar_path).is_file()
+
+
+def ensure_guitar_prerefine_backup(guitar_path: Path) -> Path:
+    """Keep the first-pass guitar stem before MelBand refine."""
+    backup = guitar_prerefine_path(guitar_path)
+    if not backup.is_file() and Path(guitar_path).is_file():
+        shutil.copy2(guitar_path, backup)
+    return backup
+
+
+def save_guitar_refined_backup(guitar_path: Path) -> Path:
+    """Snapshot guitar after MelBand refine for Mixer A/B."""
+    dest = guitar_refined_path(guitar_path)
+    if Path(guitar_path).is_file():
+        shutil.copy2(guitar_path, dest)
+    return dest
+
+
+def switch_guitar_stem_variant(guitar_path: Path, *, use_prerefine: bool) -> bool:
+    """Copy pre-refine or refined backup onto ``guitar.wav``."""
+    guitar = Path(guitar_path)
+    source = guitar_prerefine_path(guitar) if use_prerefine else guitar_refined_path(guitar)
+    if not source.is_file():
+        return False
+    shutil.copy2(source, guitar)
+    return True
+
+
+def _apply_peak_limit(audio: np.ndarray) -> np.ndarray:
+    """Soft ceiling (~−1 dBTP proxy) without hard peak-normalizing the whole stem."""
+    return apply_true_peak_ceiling(audio.astype(np.float32, copy=False))
+
+
+def apply_sub_bass_debleed(
+    guitar_path: Path,
+    output_path: Path | None,
+    bass_path: Path,
+    *,
+    drums_path: Path | None = None,
+    cutoff_hz: float = SUB_BASS_DEBLEED_CUTOFF_HZ,
+    mix_scale: float = SUB_BASS_DEBLEED_MIX,
+) -> tuple[Path, float | None, float | None, float | None]:
+    """Subtract scaled bass (and optional drum) low band from the guitar stem.
+
+    Returns ``(dest_path, pre_share, post_share, removed_rms)``.
+    """
+    import soundfile as sf
+
+    dest = Path(output_path) if output_path is not None else Path(guitar_path)
+    if not Path(guitar_path).is_file() or not Path(bass_path).is_file():
+        return dest, None, None, None
+
+    guitar, sr = sf.read(str(guitar_path), always_2d=True)
+    bass, bass_sr = sf.read(str(bass_path), always_2d=True)
+    if guitar.size == 0 or bass.size == 0 or int(sr) != int(bass_sr):
+        return dest, None, None, None
+
+    n = min(len(guitar), len(bass))
+    guitar = guitar[:n].astype(np.float32)
+    bass = bass[:n].astype(np.float32)
+    pre_share = _low_band_energy_share(guitar, int(sr), cutoff_hz)
+
+    guitar_low = _lowpass_audio(guitar, int(sr), cutoff_hz)
+    bleed = _lowpass_audio(bass, int(sr), cutoff_hz)
+    if drums_path is not None and Path(drums_path).is_file():
+        drums, drums_sr = sf.read(str(drums_path), always_2d=True)
+        if drums.size and int(drums_sr) == int(sr):
+            drums = drums[:n].astype(np.float32)
+            bleed = bleed + SUB_BASS_DRUMS_MIX * _lowpass_audio(drums, int(sr), cutoff_hz)
+
+    scale = max(0.0, min(1.0, float(mix_scale)))
+    removed = scale * bleed
+    removed_rms = float(np.sqrt(np.mean(np.square(removed)) + 1e-12))
+    restored = (guitar - guitar_low + (guitar_low - removed)).astype(np.float32)
+    restored = _apply_peak_limit(restored)
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(dest), restored, int(sr), subtype="PCM_16")
+    post_share = _low_band_energy_share(restored, int(sr), cutoff_hz)
+    return dest, pre_share, post_share, removed_rms
+
+
+def apply_guitar_low_end_recovery(
+    guitar_path: Path,
+    output_path: Path | None = None,
+    *,
+    bass_path: Path | None = None,
+    drums_path: Path | None = None,
+    sub_bass_debleed: bool = False,
+    boost_db: float = 0.0,
+) -> LowEndRecoveryDiagnostics:
+    """Opt-in subtractive de-bleed then harmonic restore (both default off)."""
+    dest = Path(output_path) if output_path is not None else Path(guitar_path)
+    work = dest
+    debleed_applied = False
+    restore_applied = False
+    pre_share: float | None = None
+    post_share: float | None = None
+    removed_rms: float | None = None
+    reasons: list[str] = []
+
+    if sub_bass_debleed and bass_path is not None and Path(bass_path).is_file():
+        work, pre_share, post_share, removed_rms = apply_sub_bass_debleed(
+            work,
+            work,
+            bass_path,
+            drums_path=drums_path,
+        )
+        if pre_share is not None:
+            debleed_applied = True
+            reasons.append(
+                f"subtracted bass/drum energy below {SUB_BASS_DEBLEED_CUTOFF_HZ:.0f} Hz"
+            )
+    elif sub_bass_debleed:
+        reasons.append("sub_bass_debleed requested but bass stem missing")
+
+    try:
+        boost = float(boost_db)
+    except (TypeError, ValueError):
+        boost = 0.0
+    boost = max(0.0, min(LOW_END_RESTORE_MAX_DB, boost))
+    if boost >= 1e-6:
+        restore_diag = apply_low_end_restore(work, work, boost_db=boost)
+        if restore_diag.attempted:
+            restore_applied = True
+            reasons.append(restore_diag.reason)
+            if pre_share is None:
+                pre_share = restore_diag.pre_low_band_energy_share
+            post_share = restore_diag.post_low_band_energy_share
+        elif not debleed_applied:
+            return LowEndRecoveryDiagnostics(
+                attempted=False,
+                reason=restore_diag.reason,
+                harmonic_restore_db=boost,
+            )
+
+    if not debleed_applied and not restore_applied:
+        return LowEndRecoveryDiagnostics(
+            attempted=False,
+            reason="off (no recovery stages enabled)",
+            harmonic_restore_db=boost,
+        )
+
+    return LowEndRecoveryDiagnostics(
+        attempted=True,
+        reason="; ".join(reasons),
+        sub_bass_debleed_applied=debleed_applied,
+        harmonic_restore_applied=restore_applied,
+        debleed_cutoff_hz=SUB_BASS_DEBLEED_CUTOFF_HZ,
+        harmonic_restore_db=boost,
+        pre_low_band_energy_share=pre_share,
+        post_low_band_energy_share=post_share,
+        low_band_rms_removed=removed_rms,
+    )
+
+
+@dataclass
+class LowEndRestoreDiagnostics:
+    """Pre/post low-band share after an opt-in 60–200 Hz presence boost."""
+
+    attempted: bool
+    reason: str
+    boost_db: float = 0.0
+    low_hz: float = LOW_END_RESTORE_LOW_HZ
+    high_hz: float = LOW_END_RESTORE_HIGH_HZ
+    pre_low_band_energy_share: float | None = None
+    post_low_band_energy_share: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def write_json(self, path: Path) -> Path:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
+        return path
+
+
+def apply_low_end_restore(
+    wav_path: Path,
+    output_path: Path | None = None,
+    *,
+    boost_db: float = 0.0,
+    low_hz: float = LOW_END_RESTORE_LOW_HZ,
+    high_hz: float = LOW_END_RESTORE_HIGH_HZ,
+) -> LowEndRestoreDiagnostics:
+    """Boost 60–200 Hz on a guitar stem. ``boost_db=0`` is a no-op (file unchanged)."""
+    dest = Path(output_path) if output_path is not None else Path(wav_path)
+    try:
+        boost = float(boost_db)
+    except (TypeError, ValueError):
+        boost = 0.0
+    boost = max(0.0, min(LOW_END_RESTORE_MAX_DB, boost))
+    if boost < 1e-6:
+        return LowEndRestoreDiagnostics(
+            attempted=False,
+            reason="off (boost_db is 0)",
+            boost_db=0.0,
+            low_hz=low_hz,
+            high_hz=high_hz,
+        )
+    if not Path(wav_path).is_file():
+        return LowEndRestoreDiagnostics(
+            attempted=False,
+            reason="guitar stem missing",
+            boost_db=boost,
+            low_hz=low_hz,
+            high_hz=high_hz,
+        )
+
+    import soundfile as sf
+
+    data, sr = sf.read(str(wav_path), always_2d=True)
+    if data.size == 0:
+        return LowEndRestoreDiagnostics(
+            attempted=True,
+            reason="guitar stem is empty",
+            boost_db=boost,
+            low_hz=low_hz,
+            high_hz=high_hz,
+        )
+
+    pre = _low_band_energy_share(data, int(sr), high_hz)
+    gain = 10.0 ** (boost / 20.0)
+    band = _bandpass_audio(data, int(sr), low_hz, high_hz)
+    restored = (data.astype(np.float32) + (gain - 1.0) * band).astype(np.float32)
+    restored = _apply_peak_limit(restored)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(dest), restored, int(sr), subtype="PCM_16")
+    post_data, post_sr = sf.read(str(dest), always_2d=True)
+    post = _low_band_energy_share(post_data, int(post_sr), high_hz)
+    return LowEndRestoreDiagnostics(
+        attempted=True,
+        reason=f"boosted {low_hz:.0f}–{high_hz:.0f} Hz by {boost:.1f} dB",
+        boost_db=boost,
+        low_hz=low_hz,
+        high_hz=high_hz,
+        pre_low_band_energy_share=pre,
+        post_low_band_energy_share=post,
+    )
+
+
+def _low_band_energy_share(data: np.ndarray, sr: int, cutoff_hz: float) -> float:
+    mono = _to_mono(data)
+    total = float(np.sqrt(np.mean(np.square(mono)) + 1e-12))
+    if total < 1e-9:
+        return 0.0
+    return _lowpass_rms(mono, sr, cutoff_hz) / total
+
+
 def _noop_progress(stage: str, message: str) -> None:
     pass
 
@@ -977,6 +1529,8 @@ def _run_demucs_model(
                 demucs_out,
                 device=cfg.device,
                 quality=cfg.quality,
+                segment=effective_demucs_segment(model, cfg.demucs_segment),
+                jobs=max(1, int(cfg.demucs_jobs)),
             )
             return
         except Exception as exc:
@@ -1007,12 +1561,70 @@ def _run_demucs_model(
     run_demucs(demucs_args)
 
 
+def _run_separation_backend(
+    audio_path: Path,
+    demucs_out: Path,
+    cfg: IsolateConfig,
+    *,
+    model: str,
+    allow_guitar_ft: bool,
+    progress: ProgressCallback,
+) -> None:
+    """Run Demucs or an opt-in RoFormer backend into ``demucs_out``."""
+    if model in ROFORMER_MODELS:
+        progress("separate", separate_progress_message(cfg.device))
+        run_roformer_model(audio_path, demucs_out, model=model, device=cfg.device)
+        return
+    _run_demucs_model(
+        audio_path,
+        demucs_out,
+        cfg,
+        model=model,
+        allow_guitar_ft=allow_guitar_ft,
+        progress=progress,
+    )
+
+
+def _maybe_refine_guitar(
+    artifacts: dict[str, Path],
+    cfg: IsolateConfig,
+    progress: ProgressCallback,
+) -> None:
+    """Opt-in MelBand guitar specialist; skip (with warning) if extra missing."""
+    if not cfg.guitar_refine or "guitar" not in artifacts:
+        return
+    progress("guitar_refine", "Refining guitar stem")
+    if not is_guitar_refine_available():
+        logger.warning(
+            "guitar refine requested but no RoFormer extra is installed; skipping. %s",
+            ROFORMER_INSTALL_HINT,
+        )
+        return
+    try:
+        residual = artifacts.get("other")
+        ensure_guitar_prerefine_backup(artifacts["guitar"])
+        run_guitar_refine(
+            artifacts["guitar"],
+            artifacts["guitar"],
+            residual_path=residual if residual is not None and residual.is_file() else None,
+            device=cfg.device,
+        )
+        save_guitar_refined_backup(artifacts["guitar"])
+    except Exception as exc:
+        logger.warning("guitar refine failed; keeping first-pass guitar stem: %s", exc)
+    progress("guitar_refine", "Refining guitar stem")
+
+
 def separate_stems(
     audio_path: str | Path,
     output_dir: str | Path,
     config: IsolateConfig | None = None,
     *,
     on_progress: ProgressCallback | None = None,
+    should_abort: Callable[[], bool] | None = None,
+    checkpoint_dir: str | Path | None = None,
+    completed_stages: set[str] | frozenset[str] | list[str] | None = None,
+    on_stage_complete: StageCompleteCallback | None = None,
 ) -> dict[str, Path]:
     """
     Separate an audio file into instrument stems using Demucs.
@@ -1021,15 +1633,20 @@ def separate_stems(
     CPU separation is slow (~track length or longer); quality presets multiply time.
     CUDA (NVIDIA GPU) is used when ``config.device`` is ``cuda`` and Torch can see it.
     """
-    if not is_demucs_available():
-        raise RuntimeError(
-            f"Demucs is not installed. {DEMUCS_INSTALL_HINT}"
-        )
-
     cfg = config or IsolateConfig()
     if cfg.model not in SUPPORTED_MODELS:
         raise ValueError(
             f"Unsupported model {cfg.model!r}. Choose from: {', '.join(SUPPORTED_MODELS)}"
+        )
+
+    needs_demucs = cfg.model in DEMUCS_MODELS or cfg.two_pass
+    if needs_demucs and not is_demucs_available():
+        raise RuntimeError(
+            f"Demucs is not installed. {DEMUCS_INSTALL_HINT}"
+        )
+    if cfg.model in ROFORMER_MODELS and not is_roformer_backend_available():
+        raise RuntimeError(
+            f"RoFormer backend is not installed. {ROFORMER_INSTALL_HINT}"
         )
 
     ensure_cuda_available(cfg.device)
@@ -1042,11 +1659,15 @@ def separate_stems(
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = Path(tmp)
+    completed = set(completed_stages or ())
+    ckpt_root = Path(checkpoint_dir) if checkpoint_dir else None
+    if ckpt_root is not None:
+        ckpt_root.mkdir(parents=True, exist_ok=True)
 
+    def _ingest_trimmed(work: Path) -> Path:
+        _abort_if(should_abort)
         progress("ingest", "Preparing audio")
-        normalized = normalize_audio(src, tmp_path / "normalized.wav")
+        normalized = normalize_audio(src, work / "normalized.wav")
         trim_length = cfg.max_duration_sec
         trim_start = cfg.start_sec
         if trim_length is None and trim_start <= 0:
@@ -1062,15 +1683,15 @@ def separate_stems(
                 trim_message = "Using full audio"
         logger.debug("isolate trim: %s", trim_message)
         progress("ingest", "Preparing audio")
-        trimmed = _trim_audio(normalized, trim_length, start_sec=trim_start)
+        return _trim_audio(normalized, trim_length, start_sec=trim_start)
 
-        progress("separate", separate_progress_message(cfg.device))
-        demucs_out = tmp_path / "demucs_out"
+    def _run_separate_stage(trimmed: Path, work: Path) -> Path:
+        demucs_out = work / "demucs_out"
         demucs_out.mkdir(parents=True, exist_ok=True)
-
+        progress("separate", separate_progress_message(cfg.device))
         if cfg.two_pass:
-            pass1_out = tmp_path / "pass1"
-            pass2_out = tmp_path / "pass2"
+            pass1_out = work / "pass1"
+            pass2_out = work / "pass2"
             _run_demucs_model(
                 trimmed,
                 pass1_out,
@@ -1083,7 +1704,7 @@ def separate_stems(
             other = pass1.get("other")
             if other is None or not other.is_file():
                 logger.warning("two-pass missing other stem; falling back to single-pass 6s")
-                _run_demucs_model(
+                _run_separation_backend(
                     trimmed,
                     demucs_out,
                     cfg,
@@ -1104,7 +1725,7 @@ def separate_stems(
                 pass2 = _collect_stem_wavs(pass2_out)
                 merge_two_pass_stems(pass1, pass2, demucs_out)
         else:
-            _run_demucs_model(
+            _run_separation_backend(
                 trimmed,
                 demucs_out,
                 cfg,
@@ -1112,131 +1733,244 @@ def separate_stems(
                 allow_guitar_ft=True,
                 progress=progress,
             )
+        return demucs_out
 
+    def _copy_demucs_checkpoint(demucs_out: Path) -> None:
+        if ckpt_root is None:
+            return
+        dest = ckpt_root / "demucs_out"
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(demucs_out, dest)
+
+    def _restore_demucs_checkpoint(work: Path) -> Path:
+        demucs_out = work / "demucs_out"
+        if demucs_out.exists():
+            shutil.rmtree(demucs_out)
+        shutil.copytree(ckpt_root / "demucs_out", demucs_out)
+        return demucs_out
+
+    def _collect_into_out_dir(demucs_out: Path) -> dict[str, Path]:
+        artifacts_ckpt = (ckpt_root / "artifacts.json") if ckpt_root else None
+        if (
+            _stage_done(completed, "collect")
+            and artifacts_ckpt is not None
+            and artifacts_ckpt.is_file()
+        ):
+            loaded = json.loads(artifacts_ckpt.read_text(encoding="utf-8"))
+            collected = {k: Path(v) for k, v in loaded.items() if Path(v).is_file()}
+            if not collected:
+                raise FileNotFoundError("Checkpoint artifacts missing on disk")
+            return collected
+
+        _abort_if(should_abort)
         progress("collect", "Separating tracks")
         stem_files = list(demucs_out.rglob("*.wav"))
         if not stem_files:
             raise FileNotFoundError("Demucs did not produce any stem wav files.")
 
-        artifacts: dict[str, Path] = {}
+        collected = {}
         for stem_path in stem_files:
-            name = stem_path.stem  # e.g. vocals, drums
+            name = stem_path.stem
             dest = out_dir / f"{name}.wav"
             shutil.copy2(stem_path, dest)
-            artifacts[name] = dest
+            collected[name] = dest
 
-        if not artifacts:
+        if not collected:
             raise FileNotFoundError("No stems could be collected from Demucs output.")
 
-        if cfg.fold_other_into_guitar:
-            fold_other_into_guitar(artifacts)
-        apply_emit_stems(artifacts, cfg.emit_stems)
-
-        if "guitar" in artifacts:
-            progress("bass_bleed", "Separating tracks")
-            bass_bleed_diag = analyze_bass_bleed(artifacts["guitar"])
-            if bass_bleed_diag.flagged and cfg.bass_bleed_mitigation:
-                mitigated_path = apply_bass_bleed_mitigation(artifacts["guitar"], artifacts["guitar"])
-                artifacts["guitar"] = mitigated_path
-                bass_bleed_diag = BassBleedDiagnostics(
-                    attempted=bass_bleed_diag.attempted,
-                    flagged=bass_bleed_diag.flagged,
-                    reason=bass_bleed_diag.reason
-                    + f"; partial high-pass mitigation applied (<{BASS_BLEED_HPF_CUTOFF_HZ:.0f} Hz "
-                    "attenuated — does not remove bleed above the cutoff or fix the label)",
-                    low_band_energy_share=bass_bleed_diag.low_band_energy_share,
-                    low_band_cutoff_hz=bass_bleed_diag.low_band_cutoff_hz,
-                    mitigation_applied=True,
-                )
-            bass_bleed_path = bass_bleed_diag.write_json(out_dir / "bass_bleed_diagnostics.json")
-            artifacts["bass_bleed_diagnostics"] = bass_bleed_path
-            logger.debug("bass bleed: %s", bass_bleed_diag.reason)
-            competing = {
-                name: artifacts[name]
-                for name in ("bass", "piano", "drums", "vocals")
-                if name in artifacts
-            }
-            quality_diag = analyze_guitar_stem_quality(
-                artifacts["guitar"],
-                competing_stems=competing or None,
+        if ckpt_root is not None and artifacts_ckpt is not None:
+            artifacts_ckpt.write_text(
+                json.dumps({k: str(v) for k, v in collected.items()}, indent=2),
+                encoding="utf-8",
             )
-            quality_path = quality_diag.write_json(out_dir / "guitar_stem_quality.json")
-            artifacts["guitar_stem_quality_diagnostics"] = quality_path
-            logger.debug("guitar stem quality: %s", quality_diag.reason)
-            progress("bass_bleed", "Separating tracks")
+        _mark_stage_complete("collect", on_stage_complete)
+        _abort_if(should_abort)
+        return collected
 
-        lead_rhythm_diag = None
-        # Default isolate path: one combined Guitar stem. Lead/Rhythm only when
-        # explicitly opted in (CLI/eval via lead_rhythm / dual_guitar).
-        run_lead_rhythm = bool(cfg.lead_rhythm or cfg.dual_guitar)
-        if "guitar" not in artifacts:
-            if run_lead_rhythm:
-                logger.debug("Lead/Rhythm skipped — no guitar stem")
-                progress("guitar_split", "Separating tracks")
-        elif run_lead_rhythm:
-            from audio_to_tab.lead_rhythm import split_lead_rhythm_guitar
+    if ckpt_root is not None:
+        work = ckpt_root / "work"
+        work.mkdir(parents=True, exist_ok=True)
+        trimmed_ckpt = ckpt_root / "trimmed.wav"
+        if _stage_done(completed, "ingest") and trimmed_ckpt.is_file():
+            trimmed = trimmed_ckpt
+        else:
+            trimmed = _ingest_trimmed(work)
+            shutil.copy2(trimmed, trimmed_ckpt)
+            _mark_stage_complete("ingest", on_stage_complete)
+            _abort_if(should_abort)
 
-            emit_mode = resolve_lead_rhythm_mode(
-                cfg.lead_rhythm_mode,
-                lead_rhythm=cfg.lead_rhythm,
-            )
-            progress("guitar_split", "Separating tracks")
-            extra, lead_rhythm_diag = split_lead_rhythm_guitar(
-                artifacts["guitar"],
-                out_dir,
-                thresholds=cfg.lead_rhythm_thresholds,
-                emit_mode=emit_mode,
-            )
-            artifacts.update(extra)
-            logger.debug("lead/rhythm: %s", lead_rhythm_diag.reason)
-            progress("guitar_split", "Separating tracks")
+        if _stage_done(completed, "separate") and (ckpt_root / "demucs_out").is_dir():
+            demucs_out = _restore_demucs_checkpoint(work)
+        else:
+            _abort_if(should_abort)
+            demucs_out = _run_separate_stage(trimmed, work)
+            _copy_demucs_checkpoint(demucs_out)
+            _mark_stage_complete("separate", on_stage_complete)
+            _abort_if(should_abort)
+        artifacts = _collect_into_out_dir(demucs_out)
+    else:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            trimmed = _ingest_trimmed(work)
+            _abort_if(should_abort)
+            demucs_out = _run_separate_stage(trimmed, work)
+            artifacts = _collect_into_out_dir(demucs_out)
 
-        progress("presence", "Finishing")
-        stem_wav_paths = {
-            name: path
-            for name, path in artifacts.items()
-            if not name.endswith("_diagnostics") and Path(path).suffix.lower() == ".wav"
-        }
-        presence = detect_present_stems(stem_wav_paths)
-        lr_emitted = "lead_guitar" in artifacts and "rhythm_guitar" in artifacts
-        if (
-            lead_rhythm_diag is not None
-            and lead_rhythm_diag.outcome == "lead_rhythm"
-            and lr_emitted
-            and "guitar" in presence
-        ):
-            guitar_presence = presence["guitar"]
-            presence["guitar"] = StemPresence(
-                present=False,
-                confidence=guitar_presence.confidence,
-                mean_dbfs=guitar_presence.mean_dbfs,
-                energy_share=guitar_presence.energy_share,
-                reason="superseded by lead_guitar/rhythm_guitar",
-            )
-            for derived in ("lead_guitar", "rhythm_guitar"):
-                if derived in presence:
-                    sp = presence[derived]
-                    presence[derived] = StemPresence(
-                        present=True,
-                        confidence=max(sp.confidence, 0.6),
-                        mean_dbfs=sp.mean_dbfs,
-                        energy_share=sp.energy_share,
-                        reason=(
-                            "Lead/Rhythm split emitted from guitar stem"
-                            + (
-                                " (best-effort, low confidence)"
-                                if lead_rhythm_diag.low_confidence
-                                else ""
-                            )
-                        ),
-                    )
+    if not _stage_done(completed, "guitar_refine"):
+        _abort_if(should_abort)
+        _maybe_refine_guitar(artifacts, cfg, progress)
+        if ckpt_root is not None and "guitar" in artifacts and artifacts["guitar"].is_file():
+            shutil.copy2(artifacts["guitar"], ckpt_root / "guitar.wav")
+        _mark_stage_complete("guitar_refine", on_stage_complete)
+        _abort_if(should_abort)
+    elif (
+        ckpt_root is not None
+        and (ckpt_root / "guitar.wav").is_file()
+        and "guitar" in artifacts
+    ):
+        shutil.copy2(ckpt_root / "guitar.wav", artifacts["guitar"])
 
-        presence_path = out_dir / "stem_presence.json"
-        presence_path.write_text(
-            json.dumps({name: sp.to_dict() for name, sp in presence.items()}, indent=2),
-            encoding="utf-8",
+    if cfg.fold_other_into_guitar and "guitar" in artifacts:
+        artifacts, fold_diag = apply_fold_other_into_guitar(
+            artifacts, mode=cfg.fold_other_mode
         )
-        artifacts["stem_presence_diagnostics"] = presence_path
+        fold_path = fold_diag.write_json(out_dir / "fold_other_diagnostics.json")
+        artifacts["fold_other_diagnostics"] = fold_path
+        logger.debug("fold other: %s", fold_diag.reason)
+    bass_path_for_recovery = artifacts.get("bass")
+    drums_path_for_recovery = artifacts.get("drums")
+    apply_emit_stems(artifacts, cfg.emit_stems)
 
-        progress("done", "Finish")
-        return artifacts
+    if "guitar" in artifacts:
+        progress("bass_bleed", "Separating tracks")
+        bass_bleed_diag = analyze_bass_bleed(artifacts["guitar"])
+        if bass_bleed_diag.flagged and cfg.bass_bleed_mitigation:
+            mitigated_path = apply_bass_bleed_mitigation(artifacts["guitar"], artifacts["guitar"])
+            artifacts["guitar"] = mitigated_path
+            bass_bleed_diag = BassBleedDiagnostics(
+                attempted=bass_bleed_diag.attempted,
+                flagged=bass_bleed_diag.flagged,
+                reason=bass_bleed_diag.reason
+                + f"; partial high-pass mitigation applied (<{BASS_BLEED_HPF_CUTOFF_HZ:.0f} Hz "
+                "attenuated — does not remove bleed above the cutoff or fix the label)",
+                low_band_energy_share=bass_bleed_diag.low_band_energy_share,
+                low_band_cutoff_hz=bass_bleed_diag.low_band_cutoff_hz,
+                mitigation_applied=True,
+            )
+        bass_bleed_path = bass_bleed_diag.write_json(out_dir / "bass_bleed_diagnostics.json")
+        artifacts["bass_bleed_diagnostics"] = bass_bleed_path
+        logger.debug("bass bleed: %s", bass_bleed_diag.reason)
+        if cfg.sub_bass_debleed or cfg.low_end_restore_db:
+            recovery_diag = apply_guitar_low_end_recovery(
+                artifacts["guitar"],
+                artifacts["guitar"],
+                bass_path=bass_path_for_recovery,
+                drums_path=drums_path_for_recovery,
+                sub_bass_debleed=cfg.sub_bass_debleed,
+                boost_db=cfg.low_end_restore_db,
+            )
+            recovery_path = recovery_diag.write_json(
+                out_dir / "low_end_recovery_diagnostics.json"
+            )
+            artifacts["low_end_recovery_diagnostics"] = recovery_path
+            if recovery_diag.harmonic_restore_applied:
+                restore_only = LowEndRestoreDiagnostics(
+                    attempted=True,
+                    reason=recovery_diag.reason,
+                    boost_db=recovery_diag.harmonic_restore_db,
+                    pre_low_band_energy_share=recovery_diag.pre_low_band_energy_share,
+                    post_low_band_energy_share=recovery_diag.post_low_band_energy_share,
+                )
+                restore_only.write_json(out_dir / "low_end_restore_diagnostics.json")
+                artifacts["low_end_restore_diagnostics"] = out_dir / "low_end_restore_diagnostics.json"
+            logger.debug("low-end recovery: %s", recovery_diag.reason)
+        competing = {
+            name: artifacts[name]
+            for name in ("bass", "piano", "drums", "vocals")
+            if name in artifacts
+        }
+        quality_diag = analyze_guitar_stem_quality(
+            artifacts["guitar"],
+            competing_stems=competing or None,
+        )
+        quality_path = quality_diag.write_json(out_dir / "guitar_stem_quality.json")
+        artifacts["guitar_stem_quality_diagnostics"] = quality_path
+        logger.debug("guitar stem quality: %s", quality_diag.reason)
+        progress("bass_bleed", "Separating tracks")
+
+    lead_rhythm_diag = None
+    # Default isolate path: one combined Guitar stem. Lead/Rhythm only when
+    # explicitly opted in (CLI/eval via lead_rhythm / dual_guitar).
+    run_lead_rhythm = bool(cfg.lead_rhythm or cfg.dual_guitar)
+    if "guitar" not in artifacts:
+        if run_lead_rhythm:
+            logger.debug("Lead/Rhythm skipped — no guitar stem")
+            progress("guitar_split", "Separating tracks")
+    elif run_lead_rhythm:
+        from audio_to_tab.lead_rhythm import split_lead_rhythm_guitar
+
+        emit_mode = resolve_lead_rhythm_mode(
+            cfg.lead_rhythm_mode,
+            lead_rhythm=cfg.lead_rhythm,
+        )
+        progress("guitar_split", "Separating tracks")
+        extra, lead_rhythm_diag = split_lead_rhythm_guitar(
+            artifacts["guitar"],
+            out_dir,
+            thresholds=cfg.lead_rhythm_thresholds,
+            emit_mode=emit_mode,
+        )
+        artifacts.update(extra)
+        logger.debug("lead/rhythm: %s", lead_rhythm_diag.reason)
+        progress("guitar_split", "Separating tracks")
+
+    progress("presence", "Finishing")
+    stem_wav_paths = {
+        name: path
+        for name, path in artifacts.items()
+        if not name.endswith("_diagnostics") and Path(path).suffix.lower() == ".wav"
+    }
+    presence = detect_present_stems(stem_wav_paths)
+    lr_emitted = "lead_guitar" in artifacts and "rhythm_guitar" in artifacts
+    if (
+        lead_rhythm_diag is not None
+        and lead_rhythm_diag.outcome == "lead_rhythm"
+        and lr_emitted
+        and "guitar" in presence
+    ):
+        guitar_presence = presence["guitar"]
+        presence["guitar"] = StemPresence(
+            present=False,
+            confidence=guitar_presence.confidence,
+            mean_dbfs=guitar_presence.mean_dbfs,
+            energy_share=guitar_presence.energy_share,
+            reason="superseded by lead_guitar/rhythm_guitar",
+        )
+        for derived in ("lead_guitar", "rhythm_guitar"):
+            if derived in presence:
+                sp = presence[derived]
+                presence[derived] = StemPresence(
+                    present=True,
+                    confidence=max(sp.confidence, 0.6),
+                    mean_dbfs=sp.mean_dbfs,
+                    energy_share=sp.energy_share,
+                    reason=(
+                        "Lead/Rhythm split emitted from guitar stem"
+                        + (
+                            " (best-effort, low confidence)"
+                            if lead_rhythm_diag.low_confidence
+                            else ""
+                        )
+                    ),
+                )
+
+    presence_path = out_dir / "stem_presence.json"
+    presence_path.write_text(
+        json.dumps({name: sp.to_dict() for name, sp in presence.items()}, indent=2),
+        encoding="utf-8",
+    )
+    artifacts["stem_presence_diagnostics"] = presence_path
+
+    progress("done", "Finish")
+    return artifacts

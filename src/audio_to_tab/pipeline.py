@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from audio_to_tab.ingest import download_youtube_audio, normalize_audio
+from audio_to_tab.isolate import analyze_guitar_stem_quality
 from audio_to_tab.midi_cleanup import CleanupConfig, mix_aware_cleanup_config, solo_guitar_cleanup_config
 from audio_to_tab.pdf_render import render_structured_tab_pdf
 from audio_to_tab.rhythm import quantize_tab_document
@@ -34,6 +35,14 @@ class PipelineConfig:
     separate_stems: bool = True
     demucs_quality: str = "balanced"
     demucs_device: str = "cpu"
+    model: str = "htdemucs_6s"
+    guitar_checkpoint: str | None = None
+    guitar_refine: bool = False
+    demucs_segment: int | None = 8
+    demucs_jobs: int = 1
+    fold_other_mode: str | None = None
+    low_end_restore_db: float = 0.0
+    sub_bass_debleed: bool = False
     mix_aware_filtering: bool = True
     onset_threshold: float = 0.5
     frame_threshold: float = 0.3
@@ -53,6 +62,15 @@ ProgressCallback = Callable[[str, str], None]  # stage, message
 
 def _noop_progress(stage: str, message: str) -> None:
     pass
+
+
+def _separate_progress_label(cfg: PipelineConfig) -> str:
+    model = (cfg.model or "htdemucs_6s").lower()
+    if model in {"bs_roformer_sw", "melband_roformer_guitar"}:
+        return "Isolating guitar stem with BS-RoFormer"
+    if cfg.guitar_checkpoint:
+        return "Isolating guitar stem with guitar-ft Demucs"
+    return "Isolating guitar stem"
 
 
 def _trim_audio(input_path: Path, max_duration_sec: float | None) -> Path:
@@ -133,15 +151,31 @@ def run_pipeline(
         transcribe_input = work_audio
         tempo_audio_source = work_audio
         if cfg.separate_stems:
-            progress("separate", "Isolating guitar stem with Demucs")
+            progress("separate", _separate_progress_label(cfg))
             stem_path = output_dir / "guitar_stem.wav"
             try:
+                recovery_diag_path = (
+                    output_dir / "low_end_recovery_diagnostics.json"
+                    if cfg.sub_bass_debleed or cfg.low_end_restore_db
+                    else None
+                )
                 separate_guitar_stem(
                     work_audio,
                     stem_path,
+                    model=cfg.model,
                     device=cfg.demucs_device,
                     quality=cfg.demucs_quality,
+                    demucs_segment=cfg.demucs_segment,
+                    demucs_jobs=cfg.demucs_jobs,
+                    guitar_refine=cfg.guitar_refine,
+                    guitar_checkpoint=cfg.guitar_checkpoint,
+                    fold_other_mode=cfg.fold_other_mode,
+                    sub_bass_debleed=cfg.sub_bass_debleed,
+                    low_end_restore_db=cfg.low_end_restore_db,
+                    recovery_diagnostics_path=recovery_diag_path,
                 )
+                quality_diag = analyze_guitar_stem_quality(stem_path)
+                quality_diag.write_json(output_dir / "guitar_stem_quality.json")
                 transcribe_input = stem_path
                 tempo_audio_source = stem_path
             except (RuntimeError, FileNotFoundError) as exc:
