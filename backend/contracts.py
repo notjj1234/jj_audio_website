@@ -72,6 +72,10 @@ class IsolateJobCreateRequest(BaseModel):
     dual_guitar: bool = False  # deprecated alias for lead_rhythm
     # Optional stage-1 guitar checkpoint when model is htdemucs_6s.
     guitar_checkpoint: str | None = Field(default=None, max_length=64)
+    # Opt-in 4-stem then 6-stem residual pass (htdemucs_6s only).
+    two_pass: bool = False
+    emit_stems: list[str] | None = Field(default=None)
+    fold_other_into_guitar: bool = True
 
     @model_validator(mode="after")
     def _alias_dual_guitar(self) -> IsolateJobCreateRequest:

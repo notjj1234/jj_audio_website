@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import logging
 import shutil
 import sys
 import time
 import uuid
-import zipfile
 from pathlib import Path
 
 import streamlit as st
@@ -35,6 +33,7 @@ from ui.isolate_state import (
     WORKSPACE_TABS,
     ISOLATE_UI_STATE_FILENAME,
     ISOLATE_USER_ID_FILENAME,
+    ISOLATE_EXPORT_DIR_KEY,
     LISTEN_PICKER_KEY,
     LISTEN_PICKER_NEXT_KEY,
     apply_listen_picker_pending,
@@ -48,17 +47,19 @@ from ui.isolate_state import (
     format_source_title,
     infer_source_kind,
     isolate_ui_state_payload,
+    jobs_needing_os_notify,
     listen_picker_default,
     load_persist_isolate_user_id,
+    os_notify_message,
     partition_queue_jobs,
     pending_audio_needs_resave,
     pending_upload_fp_for_stale,
     plan_isolate_job_poll,
-    queue_clear_youtube_url,
     queue_reopen_output_name,
     queue_youtube_url,
     read_isolate_ui_state,
     recent_runs_with_owner_fallback,
+    reset_new_tab_source,
     resolve_custom_separation,
     resolve_separation_preset,
     resolve_speed_preset,
@@ -89,6 +90,15 @@ from ui.isolate_jobs import (
     remove_job,
 )
 from ui.media import ensure_mixer_audio_paths, ensure_region_preview_wav, stem_media_urls
+from ui.desktop_export import (
+    choose_export_dir,
+    copy_mix_to_folder,
+    copy_tracks_to_folder,
+    default_export_dir,
+    export_song_dir,
+    open_path_in_os,
+)
+from ui.desktop_notify import notify as desktop_notify
 from ui.stem_mixer_component import component_build_available, stem_mixer
 
 ensure_src_path()
@@ -150,19 +160,18 @@ def _close_youtube_search_dialog() -> None:
 def _youtube_search_dialog() -> None:
     """Centered modal: search public videos, pick one to fill the URL field."""
     st.caption("Find a public video, then use Download audio on the New tab.")
-    search_q = st.text_input(
-        "Song or artist",
-        key="isolate_youtube_search_query",
-        placeholder="e.g. artist — song title",
-    )
-    search_cols = st.columns([1, 1, 1])
-    with search_cols[0]:
-        do_search = st.button(
+    with st.form("isolate_youtube_search_form", clear_on_submit=False, border=False):
+        search_q = st.text_input(
+            "Song or artist",
+            key="isolate_youtube_search_query",
+            placeholder="e.g. artist — song title",
+        )
+        do_search = st.form_submit_button(
             "Search",
-            key="isolate_youtube_search_go",
             use_container_width=True,
         )
-    with search_cols[1]:
+    action_cols = st.columns([1, 1])
+    with action_cols[0]:
         if st.button(
             "Clear results",
             key="isolate_youtube_search_clear",
@@ -171,7 +180,7 @@ def _youtube_search_dialog() -> None:
             st.session_state.pop("isolate_youtube_search_hits", None)
             st.session_state.pop("isolate_youtube_search_error", None)
             st.rerun()
-    with search_cols[2]:
+    with action_cols[1]:
         if st.button(
             "Close",
             key="isolate_youtube_search_close",
@@ -246,6 +255,16 @@ def _youtube_search_dialog() -> None:
                     st.session_state.pop("isolate_youtube_search_error", None)
                     _close_youtube_search_dialog()
                     st.rerun()
+            with st.expander(
+                "Preview",
+                expanded=False,
+                key=f"isolate_youtube_preview_{vid}",
+            ):
+                if url:
+                    st.video(url)
+                    st.markdown(f"[Open on YouTube]({url})")
+                else:
+                    st.caption("No preview URL for this result.")
 
 
 def _stateful_expander(label: str, *, key: str, default: bool = False):
@@ -258,7 +277,7 @@ def _stateful_expander(label: str, *, key: str, default: bool = False):
     ``label`` must stay constant across reruns or the widget identity changes
     and the state is lost.
     """
-    return st.expander(label, expanded=default, key=key, on_change="rerun")
+    return st.expander(label, expanded=default, key=key)
 
 
 def _get_browser_user_id() -> str:
@@ -317,15 +336,6 @@ def _stem_paths_from_artifacts(artifacts_map: dict) -> dict[str, Path]:
         )
         and Path(path).suffix.lower() == ".wav"
     }
-
-
-def _increment_upload_key() -> None:
-    st.session_state["isolate_upload_key"] = st.session_state.get("isolate_upload_key", 0) + 1
-    st.session_state.pop("isolate_upload_fp", None)
-    st.session_state.pop("isolate_pending_audio_path", None)
-    st.session_state.pop("isolate_pending_fp", None)
-    st.session_state.pop("isolate_duration_sec", None)
-    st.session_state.pop("isolate_duration_fp", None)
 
 
 def _clear_pending_source() -> None:
@@ -437,6 +447,17 @@ def default_isolate_selected_stems(
     }
 
 
+def _resolved_export_dir() -> Path:
+    raw = st.session_state.get(ISOLATE_EXPORT_DIR_KEY)
+    if raw:
+        path = Path(str(raw)).expanduser()
+        if path.exists() or path.parent.exists():
+            return path
+    path = default_export_dir()
+    st.session_state[ISOLATE_EXPORT_DIR_KEY] = str(path)
+    return path
+
+
 def _render_stem_presence_selector(
     stem_paths: dict[str, Path],
     presence: dict,
@@ -447,7 +468,7 @@ def _render_stem_presence_selector(
     cols_per_row = 3
     for row_start in range(0, len(stem_names), cols_per_row):
         row_names = stem_names[row_start : row_start + cols_per_row]
-        cols = st.columns(len(row_names))
+        cols = st.columns(cols_per_row)
         for col, name in zip(cols, row_names):
             with col:
                 label = stem_display_name(name)
@@ -468,30 +489,6 @@ def _render_stem_presence_selector(
                     help=help_text,
                 )
                 selected[name] = checked
-
-
-def _cached_zip_bytes(
-    stem_paths: dict[str, Path],
-    base_name: str,
-    run_dir: Path,
-) -> bytes:
-    """Build zip only when the selected-stem set changes (cached on disk)."""
-    fingerprint = _selection_fingerprint(stem_paths)
-    zip_name = f"{base_name}_stems.zip"
-    zip_path = run_dir / zip_name
-    cache_key = st.session_state.get("isolate_zip_fp")
-    if cache_key == fingerprint and zip_path.is_file():
-        return zip_path.read_bytes()
-
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for name, path in sorted(stem_paths.items()):
-            zf.writestr(f"{name}.wav", path.read_bytes())
-    data = buf.getvalue()
-    zip_path.write_bytes(data)
-    st.session_state["isolate_zip_fp"] = fingerprint
-    st.session_state["isolate_zip_name"] = zip_name
-    return data
 
 
 def _build_current_mix(
@@ -521,7 +518,11 @@ def _build_current_mix(
 
 
 def _render_live_mixer(
-    stem_paths: dict[str, Path], *, track_title: str = "", base_name: str = "stems"
+    stem_paths: dict[str, Path],
+    *,
+    track_title: str = "",
+    base_name: str = "stems",
+    run_dir: Path | None = None,
 ) -> dict | None:
     if not component_build_available():
         st.error(
@@ -539,8 +540,6 @@ def _render_live_mixer(
 
     try:
         urls = stem_media_urls(mixer_paths)
-        # Registered separately (full-quality originals) so per-track downloads inside
-        # the mixer are never the downsampled browser-preview audio.
         download_urls = stem_media_urls(stem_paths, coord_prefix="isolate.download")
     except Exception as exc:
         st.error(f"Could not prepare track audio for the mixer: {exc}")
@@ -551,6 +550,9 @@ def _render_live_mixer(
     for name in stem_names:
         volumes.setdefault(name, DB_DEFAULT)
     master_db = float(st.session_state.setdefault("isolate_master_volume_db", DB_DEFAULT))
+    saved = st.session_state.get("isolate_mixer_state") or {}
+    saved_muted = saved.get("muted") or {}
+    saved_soloed = saved.get("soloed") or {}
 
     safe_base = (base_name or "stems").strip() or "stems"
     stems_arg = [
@@ -566,15 +568,16 @@ def _render_live_mixer(
         for name in stem_names
         if name in urls
     ]
-    fingerprint = _artifact_fingerprint(stem_paths)
+    key_src = str(run_dir.resolve()) if run_dir is not None else _artifact_fingerprint(stem_paths)
+    mixer_key = "stem_mixer_run_" + hashlib.sha256(key_src.encode()).hexdigest()[:16]
     return stem_mixer(
         stems_arg,
         initial_volumes_db={n: float(volumes.get(n, DB_DEFAULT)) for n in stem_names},
-        initial_muted={n: False for n in stem_names},
-        initial_soloed={n: False for n in stem_names},
+        initial_muted={n: bool(saved_muted.get(n, False)) for n in stem_names},
+        initial_soloed={n: bool(saved_soloed.get(n, False)) for n in stem_names},
         initial_master_volume_db=master_db,
         track_title=track_title,
-        key=f"stem_mixer_{fingerprint}",
+        key=mixer_key,
     )
 
 
@@ -779,7 +782,7 @@ def _render_separation_controls() -> dict:
     apply_youtube_output_name_sync(st.session_state)
     if "isolate_separation_preset" not in st.session_state:
         st.session_state["isolate_separation_preset"] = DEFAULT_SEPARATION_PRESET
-    if "isolate_speed_preset" not in st.session_state:
+    if st.session_state.get("isolate_speed_preset") not in SPEED_PRESETS:
         st.session_state["isolate_speed_preset"] = DEFAULT_SPEED_PRESET
 
     persist = _persist_kwargs()
@@ -868,9 +871,7 @@ def _render_separation_controls() -> dict:
         )
 
     if st.button("New file", key="isolate_new_file"):
-        _increment_upload_key()
-        st.session_state.pop("carry_over_audio_path", None)
-        st.session_state.pop("carry_over_audio_name", None)
+        reset_new_tab_source(st.session_state)
         st.rerun()
 
     carry_over_path = st.session_state.get("carry_over_audio_path")
@@ -932,12 +933,13 @@ def _render_separation_controls() -> dict:
         horizontal=True,
         **persist,
     )
-    speed = resolve_speed_preset(speed_id, probe)
+    speed = resolve_speed_preset(speed_id, probe, model=resolved["model"])
     if speed["help"]:
         st.caption(speed["help"])
 
-    if st.session_state.get("isolate_speed_applied") != speed["id"]:
-        st.session_state["isolate_speed_applied"] = speed["id"]
+    applied = f"{speed['id']}:{resolved['model']}"
+    if st.session_state.get("isolate_speed_applied") != applied:
+        st.session_state["isolate_speed_applied"] = applied
         st.session_state["isolate_quality"] = speed["quality"]
         st.session_state["isolate_device"] = speed["device"]
 
@@ -984,6 +986,17 @@ def _render_separation_controls() -> dict:
             key="isolate_guitar_ft",
             **persist,
         )
+        if resolved["model"] == "htdemucs_6s":
+            st.checkbox(
+                "Two-pass guitar isolation (experimental)",
+                help=(
+                    "Runs a 4-stem split first, then isolates guitar from the leftover mix. "
+                    "About twice as slow. Can reduce competing vocals/drums/bass in the "
+                    "guitar stem. Stay opt-in until the stage-1 listen pass."
+                ),
+                key="isolate_two_pass",
+                **persist,
+            )
         st.markdown("**Section (optional)**")
         start_sec, max_duration_sec, region_label = _render_region_controls(audio_path)
 
@@ -996,6 +1009,9 @@ def _render_separation_controls() -> dict:
     guitar_checkpoint = None
     if st.session_state.get("isolate_guitar_ft") and resolved["model"] == "htdemucs_6s":
         guitar_checkpoint = "htdemucs_6s_guitar_ft"
+    two_pass = bool(
+        st.session_state.get("isolate_two_pass") and resolved["model"] == "htdemucs_6s"
+    )
     return {
         "model": resolved["model"],
         "two_stems": resolved["two_stems"],
@@ -1009,6 +1025,9 @@ def _render_separation_controls() -> dict:
         "output_name": output_name,
         "region_label": region_label,
         "guitar_checkpoint": guitar_checkpoint,
+        "two_pass": two_pass,
+        "emit_stems": list(resolved["emit_stems"]) if resolved.get("emit_stems") else None,
+        "fold_other_into_guitar": bool(resolved.get("fold_other_into_guitar", True)),
         "youtube_url": youtube_url.strip() if youtube_enabled else "",
         "tracks_label": resolved.get("tracks") or "",
         "preset_label": resolved.get("label") or "",
@@ -1066,9 +1085,8 @@ def _render_running_progress(status: dict) -> None:
     st.progress(min(1.0, max(0.0, float(view["percent"]))))
     bits = [str(view.get("label") or ""), str(view.get("eta_line") or "")]
     st.markdown(" · ".join(b for b in bits if b))
-    if view.get("message"):
-        st.caption(view["message"])
-    st.markdown(view["checklist_md"])
+    if view.get("hint"):
+        st.caption(view["hint"])
 
 
 def _job_source_title(job: dict) -> str:
@@ -1245,9 +1263,27 @@ def _poll_running_jobs() -> None:
             st.session_state["isolate_listen_applied_dir"] = fresh.get("run_dir")
             _open_mixer_workspace()
             applied = True
-        if plan["rerun"] and applied:
-            _persist_isolate_ui_state()
-            st.rerun()
+
+    if "isolate_notified_job_ids" not in st.session_state:
+        notified_ids = None
+    else:
+        notified_ids = list(st.session_state.get("isolate_notified_job_ids") or [])
+    notified_ids, pending_notify = jobs_needing_os_notify(jobs, notified_ids)
+    st.session_state["isolate_notified_job_ids"] = notified_ids
+    failed_flash = False
+    for nj in pending_notify:
+        message = os_notify_message(nj)
+        if message is None:
+            continue
+        desktop_notify(message[0], message[1])
+        if nj.get("status") == "failed" and not applied:
+            fail_title = nj.get("title") or "track"
+            st.session_state["isolate_flash"] = f"**{fail_title}** failed — see Queue."
+            failed_flash = True
+
+    if (plan["rerun"] and applied) or failed_flash:
+        _persist_isolate_ui_state()
+        st.rerun()
 
     _render_status_strip(jobs)
 
@@ -1259,14 +1295,32 @@ def _queue_tab_fragment() -> None:
 
 @st.fragment
 def _mixer_and_downloads_fragment(
-    selected_stem_paths: dict[str, Path],
+    stem_paths: dict[str, Path],
     *,
+    presence: dict,
     base_name: str,
     run_dir: Path,
 ) -> None:
-    """Isolate mute/solo/volume reruns to this fragment (not the whole page)."""
+    """Track picker, mixer, and downloads — fragment-scoped so checkboxes do not remount the page."""
+    with _stateful_expander(
+        "Choose tracks for the mixer and downloads",
+        key="isolate_track_picker_expanded",
+        default=False,
+    ):
+        _render_stem_presence_selector(
+            stem_paths, presence, _artifact_fingerprint(stem_paths)
+        )
+
+    selected_stems = st.session_state.get("isolate_selected_stems", {})
+    selected_stem_paths = {
+        name: path for name, path in stem_paths.items() if selected_stems.get(name, True)
+    }
+    mixer_paths = selected_stem_paths if selected_stem_paths else stem_paths
     mixer_state = _render_live_mixer(
-        selected_stem_paths, track_title=base_name, base_name=base_name
+        mixer_paths,
+        track_title=base_name,
+        base_name=base_name,
+        run_dir=run_dir,
     )
     if mixer_state:
         st.session_state["isolate_mixer_state"] = mixer_state
@@ -1279,14 +1333,13 @@ def _mixer_and_downloads_fragment(
                 mixer_state["masterVolumeDb"]
             )
 
+    st.subheader("Downloads")
     if not selected_stem_paths:
-        st.subheader("Downloads")
         st.info(
             'Select at least one track under "Choose tracks for the mixer and downloads".'
         )
         return
 
-    zip_bytes = _cached_zip_bytes(selected_stem_paths, base_name, run_dir)
     stem_names = sort_stem_names(selected_stem_paths.keys())
     state = st.session_state.get("isolate_mixer_state") or {}
     volumes_db = state.get("volumesDb") or st.session_state.get("isolate_volumes_db") or {}
@@ -1323,25 +1376,90 @@ def _mixer_and_downloads_fragment(
             ready = None
             st.warning(f"Could not build current mix export: {exc}")
 
-    st.subheader("Downloads")
-    st.download_button(
-        label="Download all tracks (.zip)",
-        data=zip_bytes,
-        file_name=st.session_state.get("isolate_zip_name", f"{base_name}_stems.zip"),
-        mime="application/zip",
-        key="dl_zip",
-        type="primary",
+    _render_downloads_panel(
+        selected_stem_paths,
+        base_name=base_name,
+        ready=ready,
     )
 
-    if ready:
-        st.download_button(
-            label="Download current mix",
-            data=Path(ready).read_bytes(),
-            file_name=f"{base_name}_current_mix.wav",
-            mime="audio/wav",
-            key="dl_current_mix",
-            help="Uses the live mixer's current volume / mute / solo settings.",
-        )
+
+def _save_all_tracks(selected_stem_paths: dict[str, Path], export_root: Path, base_name: str) -> None:
+    dest = export_song_dir(export_root, str(base_name))
+    copy_tracks_to_folder(selected_stem_paths, dest, str(base_name))
+    st.session_state["isolate_last_export_path"] = str(dest)
+    st.success(f"Download finished — saved to {dest}")
+
+
+def _save_current_mix(ready: str, export_root: Path, base_name: str) -> None:
+    dest_file = copy_mix_to_folder(
+        Path(ready),
+        export_song_dir(export_root, str(base_name)),
+        f"{base_name}_current_mix.wav",
+    )
+    st.session_state["isolate_last_export_path"] = str(dest_file.parent)
+    st.success(f"Download finished — saved to {dest_file}")
+
+
+def _render_downloads_panel(
+    selected_stem_paths: dict[str, Path],
+    *,
+    base_name: str,
+    ready: str | None,
+) -> None:
+    """Save location and export to folder — equal-width button rows."""
+    export_root = _resolved_export_dir()
+    with st.container(border=True):
+        st.caption(f"Save to: {export_root}")
+        choose_col, open_col = st.columns(2)
+        with choose_col:
+            if st.button(
+                "Choose folder",
+                key="isolate_choose_export_dir",
+                use_container_width=True,
+            ):
+                picked = choose_export_dir()
+                if picked:
+                    st.session_state[ISOLATE_EXPORT_DIR_KEY] = str(picked)
+                    _persist_isolate_ui_state()
+                else:
+                    st.caption("Folder picker was cancelled or is not available.")
+        with open_col:
+            if st.button(
+                "Open folder",
+                key="isolate_open_export_dir",
+                use_container_width=True,
+            ):
+                last = st.session_state.get("isolate_last_export_path")
+                target = Path(str(last)) if last else export_root
+                if not open_path_in_os(target):
+                    st.warning("Could not open that folder.")
+
+        st.divider()
+        if ready:
+            save_col, mix_col = st.columns(2)
+            with save_col:
+                if st.button(
+                    "Save all tracks",
+                    type="primary",
+                    key="isolate_save_tracks",
+                    use_container_width=True,
+                ):
+                    _save_all_tracks(selected_stem_paths, export_root, str(base_name))
+            with mix_col:
+                if st.button(
+                    "Save current mix",
+                    key="isolate_save_mix",
+                    use_container_width=True,
+                ):
+                    _save_current_mix(str(ready), export_root, str(base_name))
+        else:
+            if st.button(
+                "Save all tracks",
+                type="primary",
+                key="isolate_save_tracks",
+                use_container_width=True,
+            ):
+                _save_all_tracks(selected_stem_paths, export_root, str(base_name))
 
 
 def _resolve_audio_for_job(choice: dict) -> tuple[Path | None, str | None]:
@@ -1460,6 +1578,9 @@ def _enqueue_confirmed_job(choice: dict, audio_path: Path) -> None:
         max_duration_sec=max_duration_sec,
         two_stems=choice.get("two_stems"),
         guitar_checkpoint=choice.get("guitar_checkpoint"),
+        two_pass=bool(choice.get("two_pass")),
+        emit_stems=list(choice["emit_stems"]) if choice.get("emit_stems") else None,
+        fold_other_into_guitar=bool(choice.get("fold_other_into_guitar", True)),
         custom_stems=list(choice.get("custom_stems") or []),
         source_fingerprint=str(source_fp) if source_fp else None,
         source_kind=source_kind,
@@ -1471,11 +1592,8 @@ def _enqueue_confirmed_job(choice: dict, audio_path: Path) -> None:
     )
     st.session_state["isolate_last_custom_stems"] = list(choice.get("custom_stems") or [])
     st.session_state["isolate_results_source_fp"] = source_fp
-    # Clear carry-over once queued so it doesn't linger.
-    st.session_state.pop("carry_over_audio_path", None)
-    st.session_state.pop("carry_over_audio_name", None)
     enqueue_job(spec)
-    queue_clear_youtube_url(st.session_state)
+    reset_new_tab_source(st.session_state)
     st.session_state["isolate_flash"] = f"Queued **{resolved_name}**."
     if job_audio_sec:
         st.session_state["isolate_last_job_timing"] = {
@@ -1483,6 +1601,7 @@ def _enqueue_confirmed_job(choice: dict, audio_path: Path) -> None:
             "quality": choice["quality"],
             "device": choice["device"],
             "model": choice["model"],
+            "two_pass": bool(choice.get("two_pass")),
         }
     _open_queue_workspace()
     st.rerun()
@@ -1546,7 +1665,6 @@ def _clear_loaded_mixer() -> None:
         "isolate_mixer_state",
         "isolate_mix_ready",
         "isolate_mix_fp",
-        "isolate_zip_fp",
         "isolate_selected_stems",
         "isolate_results_fp",
         "isolate_source_audio_path",
@@ -1744,28 +1862,20 @@ def _render_mixer_workspace(browser_id: str | None) -> None:
 
     _render_mixer_region_caption(base_name)
 
-    with _stateful_expander(
-        "Choose tracks for the mixer and downloads",
-        key="isolate_track_picker_expanded",
-        default=False,
-    ):
-        _render_stem_presence_selector(
-            stem_paths, presence, _artifact_fingerprint(stem_paths)
-        )
-
-    selected_stems = st.session_state.get("isolate_selected_stems", {})
-    selected_stem_paths = {
-        name: path for name, path in stem_paths.items() if selected_stems.get(name, True)
-    }
     run_dir = Path(
         st.session_state.get("isolate_run_dir", next(iter(stem_paths.values())).parent)
     )
     _mixer_and_downloads_fragment(
-        selected_stem_paths, base_name=base_name, run_dir=run_dir
+        stem_paths,
+        presence=presence,
+        base_name=base_name,
+        run_dir=run_dir,
     )
 
     source_audio_path = st.session_state.get("isolate_source_audio_path")
     if source_audio_path and Path(source_audio_path).exists():
+        st.divider()
+        st.caption("Other tools")
         if st.button("Make a tab PDF from this →"):
             st.session_state["carry_over_audio_path"] = source_audio_path
             st.session_state["carry_over_audio_name"] = Path(source_audio_path).name

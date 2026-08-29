@@ -473,3 +473,5 @@ def test_isolate_default_stage1_model_is_htdemucs_6s():
     assert IsolateConfig().model == "htdemucs_6s"
     assert "htdemucs_6s" in SUPPORTED_MODELS
     assert SEPARATION_PRESETS[DEFAULT_SEPARATION_PRESET]["model"] == "htdemucs_6s"
+    assert SEPARATION_PRESETS[DEFAULT_SEPARATION_PRESET]["track_count"] == 4
+    assert "Piano" not in SEPARATION_PRESETS[DEFAULT_SEPARATION_PRESET]["tracks"]

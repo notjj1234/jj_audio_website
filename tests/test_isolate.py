@@ -14,6 +14,7 @@ from audio_to_tab.isolate import (
     BASS_BLEED_ENERGY_SHARE_FLOOR,
     BASS_BLEED_HPF_CUTOFF_HZ,
     BASS_BLEED_LOW_BAND_HZ,
+    GUITAR_HIGH_END_HZ,
     IsolateConfig,
     MIN_REGION_SEC,
     RegionError,
@@ -22,14 +23,19 @@ from audio_to_tab.isolate import (
     STEM_PRESENCE_FLOOR_DB,
     _trim_audio,
     analyze_bass_bleed,
+    analyze_guitar_stem_quality,
     apply_bass_bleed_mitigation,
     detect_present_stems,
     effective_demucs_segment,
+    effective_isolation_quality,
     fold_other_into_guitar,
+    apply_emit_stems,
     format_region_label,
+    merge_two_pass_stems,
     probe_duration_sec,
     resolve_region,
     separate_stems,
+    si_sdr,
 )
 from audio_to_tab.subprocess_util import subprocess_run_kwargs
 
@@ -73,6 +79,113 @@ def test_fold_other_into_guitar_keeps_other_without_guitar(tmp_path: Path):
     fold_other_into_guitar(artifacts)
     assert artifacts["other"] == other
     assert other.exists()
+
+
+def test_apply_emit_stems_drops_unlisted_wavs_keeps_diagnostics(tmp_path: Path):
+    guitar = tmp_path / "guitar.wav"
+    piano = tmp_path / "piano.wav"
+    diag = tmp_path / "bass_bleed_diagnostics.json"
+    _write_silent_wav(guitar)
+    _write_silent_wav(piano)
+    diag.write_text("{}", encoding="utf-8")
+    artifacts = {
+        "guitar": guitar,
+        "piano": piano,
+        "bass_bleed_diagnostics": diag,
+    }
+    apply_emit_stems(artifacts, ("vocals", "drums", "bass", "guitar"))
+    assert "piano" not in artifacts
+    assert not piano.exists()
+    assert artifacts["guitar"] == guitar
+    assert artifacts["bass_bleed_diagnostics"] == diag
+
+
+def test_separate_stems_emit_stems_drops_piano(tmp_path: Path):
+    audio = tmp_path / "song.wav"
+    audio.write_bytes(b"fake-wav")
+    out_dir = tmp_path / "stems"
+
+    def fake_normalize(src, dest=None):
+        dest = Path(dest) if dest else tmp_path / "norm.wav"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"norm")
+        return dest
+
+    def fake_run(cmd, capture_output=True, text=True, **_kwargs):
+        demucs_out = Path(cmd[cmd.index("-o") + 1])
+        track_dir = demucs_out / "htdemucs_6s" / "normalized"
+        track_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("vocals", "drums", "bass", "piano"):
+            (track_dir / f"{name}.wav").write_bytes(b"stem-" + name.encode())
+        _write_silent_wav(track_dir / "other.wav")
+        sf.write(str(track_dir / "guitar.wav"), np.zeros((256, 2), dtype=np.float32), 44100)
+        return MagicMock(returncode=0, stderr="", stdout="")
+
+    with (
+        patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
+        patch("audio_to_tab.isolate.normalize_audio", side_effect=fake_normalize),
+        patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
+        patch("audio_to_tab.separate.subprocess.run", side_effect=fake_run),
+    ):
+        artifacts = separate_stems(
+            audio,
+            out_dir,
+            IsolateConfig(
+                model="htdemucs_6s",
+                quality="fast",
+                max_duration_sec=15,
+                emit_stems=("vocals", "drums", "bass", "guitar"),
+            ),
+        )
+
+    assert {"vocals", "drums", "bass", "guitar"} <= set(artifacts)
+    assert "piano" not in artifacts
+    assert "other" not in artifacts
+    assert not (out_dir / "piano.wav").exists()
+
+
+def test_separate_stems_keeps_other_when_fold_disabled(tmp_path: Path):
+    audio = tmp_path / "song.wav"
+    audio.write_bytes(b"fake-wav")
+    out_dir = tmp_path / "stems"
+
+    def fake_normalize(src, dest=None):
+        dest = Path(dest) if dest else tmp_path / "norm.wav"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"norm")
+        return dest
+
+    def fake_run(cmd, capture_output=True, text=True, **_kwargs):
+        demucs_out = Path(cmd[cmd.index("-o") + 1])
+        track_dir = demucs_out / "htdemucs_6s" / "normalized"
+        track_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("vocals", "drums", "bass", "piano"):
+            (track_dir / f"{name}.wav").write_bytes(b"stem-" + name.encode())
+        _write_silent_wav(track_dir / "other.wav")
+        sf.write(str(track_dir / "guitar.wav"), np.zeros((256, 2), dtype=np.float32), 44100)
+        return MagicMock(returncode=0, stderr="", stdout="")
+
+    with (
+        patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
+        patch("audio_to_tab.isolate.normalize_audio", side_effect=fake_normalize),
+        patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
+        patch("audio_to_tab.separate.subprocess.run", side_effect=fake_run),
+    ):
+        artifacts = separate_stems(
+            audio,
+            out_dir,
+            IsolateConfig(
+                model="htdemucs_6s",
+                quality="fast",
+                max_duration_sec=15,
+                fold_other_into_guitar=False,
+            ),
+        )
+
+    assert "other" in artifacts
+    assert artifacts["other"].exists()
+    assert "guitar" in artifacts
+    assert "piano" in artifacts
 
 
 def test_is_demucs_available_does_not_import_torch(monkeypatch):
@@ -865,6 +978,11 @@ def test_guitar_ft_fallback_to_stock_demucs_on_load_failure(tmp_path: Path):
     def fake_split(guitar, out, **_kw):
         return real_split(guitar, out, use_basic_pitch=False, **_kw)
 
+    seen: list[str] = []
+
+    def capture(_stage: str, message: str) -> None:
+        seen.append(message)
+
     with (
         patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
         patch("audio_to_tab.isolate.normalize_audio", side_effect=_fake_normalize_factory(tmp_path)),
@@ -881,9 +999,15 @@ def test_guitar_ft_fallback_to_stock_demucs_on_load_failure(tmp_path: Path):
                 max_duration_sec=15,
                 guitar_checkpoint="htdemucs_6s_guitar_ft",
             ),
+            on_progress=capture,
         )
 
     assert "guitar" in artifacts
+    assert not any("mock missing" in msg for msg in seen)
+    assert not any("guitar-ft unavailable" in msg for msg in seen)
+    isolate = Path(__file__).resolve().parents[1] / "src" / "audio_to_tab" / "isolate.py"
+    src = isolate.read_text(encoding="utf-8")
+    assert "guitar-ft unavailable" not in src
 
 
 def test_probe_duration_sec_ffmpeg_stderr_fallback(tmp_path: Path):
@@ -906,3 +1030,156 @@ def test_probe_duration_sec_ffmpeg_stderr_fallback(tmp_path: Path):
     ):
         dur = probe_duration_sec(audio)
     assert dur == pytest.approx(125.5, abs=0.01)
+
+
+def _tone_wav(path: Path, freq: float, sr: int = 44100, seconds: float = 0.5, amp: float = 0.2) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    t = np.linspace(0, seconds, int(sr * seconds), endpoint=False)
+    y = (amp * np.sin(2 * np.pi * freq * t)).astype(np.float32)
+    sf.write(str(path), np.column_stack([y, y]), sr)
+    return path
+
+
+def test_effective_isolation_quality_floors_fast_for_six_stem_except_faster():
+    assert effective_isolation_quality("fast", model="htdemucs_6s") == "balanced"
+    assert effective_isolation_quality("fast", model="htdemucs_6s", speed_id="balanced") == "balanced"
+    assert effective_isolation_quality("fast", model="htdemucs_6s", speed_id="faster") == "fast"
+    assert effective_isolation_quality("high", model="htdemucs_6s") == "high"
+    assert effective_isolation_quality("fast", model="htdemucs") == "fast"
+    assert IsolateConfig().quality == "fast"
+
+
+def test_si_sdr_identical_signals_is_high():
+    t = np.linspace(0, 1, 2048, endpoint=False)
+    y = np.sin(2 * np.pi * 440 * t)
+    assert si_sdr(y, y) > 40.0
+
+
+def test_analyze_guitar_stem_quality_high_end_and_low_band(tmp_path: Path):
+    bright = _tone_wav(tmp_path / "bright.wav", 6000.0)
+    dark = _tone_wav(tmp_path / "dark.wav", 120.0)
+    bright_diag = analyze_guitar_stem_quality(bright)
+    dark_diag = analyze_guitar_stem_quality(dark)
+    assert bright_diag.attempted is True
+    assert bright_diag.high_end_cutoff_hz == GUITAR_HIGH_END_HZ
+    assert bright_diag.high_end_energy_share is not None
+    assert dark_diag.high_end_energy_share is not None
+    assert bright_diag.high_end_energy_share > dark_diag.high_end_energy_share
+    assert dark_diag.low_band_energy_share is not None
+    assert dark_diag.low_band_energy_share > bright_diag.low_band_energy_share
+
+
+def test_analyze_guitar_stem_quality_preservation_and_overlap(tmp_path: Path):
+    ref = _tone_wav(tmp_path / "ref.wav", 6000.0, amp=0.3)
+    dull = _tone_wav(tmp_path / "dull.wav", 200.0, amp=0.3)
+    piano = _tone_wav(tmp_path / "piano.wav", 6000.0, amp=0.3)
+    bass = _tone_wav(tmp_path / "bass.wav", 80.0, amp=0.3)
+    vs_self = analyze_guitar_stem_quality(ref, reference_path=ref)
+    vs_dull = analyze_guitar_stem_quality(dull, reference_path=ref)
+    assert vs_self.high_end_preservation is not None
+    assert vs_dull.high_end_preservation is not None
+    assert vs_self.high_end_preservation > vs_dull.high_end_preservation
+    assert vs_self.si_sdr is not None and vs_self.si_sdr > 20.0
+    overlap = analyze_guitar_stem_quality(
+        ref,
+        competing_stems={"piano": piano, "bass": bass},
+    )
+    assert overlap.competitor_overlap is not None
+    assert overlap.competitor_overlap["piano"] > overlap.competitor_overlap["bass"]
+
+
+def test_merge_two_pass_keeps_pass1_rhythm_and_pass2_guitar(tmp_path: Path):
+    pass1 = tmp_path / "p1"
+    pass2 = tmp_path / "p2"
+    dest = tmp_path / "merged"
+    _tone_wav(pass1 / "vocals.wav", 800.0, amp=0.15)
+    _tone_wav(pass1 / "drums.wav", 200.0, amp=0.15)
+    _tone_wav(pass1 / "bass.wav", 60.0, amp=0.2)
+    _tone_wav(pass1 / "other.wav", 400.0, amp=0.1)
+    _tone_wav(pass2 / "guitar.wav", 900.0, amp=0.25)
+    _tone_wav(pass2 / "piano.wav", 1200.0, amp=0.1)
+    _tone_wav(pass2 / "other.wav", 300.0, amp=0.05)
+    leftover = _tone_wav(pass2 / "vocals.wav", 1000.0, amp=0.05)
+    merged = merge_two_pass_stems(
+        {"vocals": pass1 / "vocals.wav", "drums": pass1 / "drums.wav", "bass": pass1 / "bass.wav", "other": pass1 / "other.wav"},
+        {
+            "guitar": pass2 / "guitar.wav",
+            "piano": pass2 / "piano.wav",
+            "other": pass2 / "other.wav",
+            "vocals": leftover,
+        },
+        dest,
+    )
+    assert set(merged) >= {"vocals", "drums", "bass", "guitar", "piano", "other"}
+    v1, _ = sf.read(str(pass1 / "vocals.wav"))
+    v_out, _ = sf.read(str(merged["vocals"]))
+    assert np.allclose(v1, v_out)
+    g2, _ = sf.read(str(pass2 / "guitar.wav"))
+    g_out, _ = sf.read(str(merged["guitar"]))
+    assert np.allclose(g2, g_out)
+    assert merged["vocals"] != leftover
+
+
+def test_two_pass_ignored_with_karaoke_split():
+    cfg = IsolateConfig(model="htdemucs", two_stems="vocals", two_pass=True)
+    assert cfg.two_pass is False
+
+
+def test_two_pass_disabled_on_four_stem_model():
+    cfg = IsolateConfig(model="htdemucs", two_pass=True)
+    assert cfg.two_pass is False
+
+
+def test_separate_stems_two_pass_runs_htdemucs_then_six_stem(tmp_path: Path):
+    audio = tmp_path / "song.wav"
+    audio.write_bytes(b"fake-wav")
+    out_dir = tmp_path / "stems"
+    seen: list[list[str]] = []
+
+    def fake_normalize(src, dest=None):
+        dest = Path(dest) if dest else tmp_path / "norm.wav"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"norm")
+        return dest
+
+    def fake_run(cmd, capture_output=True, text=True, **_kwargs):
+        seen.append(list(cmd))
+        model = cmd[cmd.index("-n") + 1]
+        src = Path(cmd[-1])
+        demucs_out = Path(cmd[cmd.index("-o") + 1])
+        track_dir = demucs_out / model / src.stem
+        track_dir.mkdir(parents=True, exist_ok=True)
+        if model == "htdemucs":
+            for name, freq in (("vocals", 700.0), ("drums", 180.0), ("bass", 70.0), ("other", 400.0)):
+                _tone_wav(track_dir / f"{name}.wav", freq)
+        else:
+            for name, freq in (
+                ("vocals", 710.0),
+                ("drums", 190.0),
+                ("bass", 75.0),
+                ("guitar", 900.0),
+                ("piano", 1100.0),
+                ("other", 300.0),
+            ):
+                _tone_wav(track_dir / f"{name}.wav", freq)
+        return MagicMock(returncode=0, stderr="", stdout="")
+
+    with (
+        patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
+        patch("audio_to_tab.isolate.normalize_audio", side_effect=fake_normalize),
+        patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
+        patch("audio_to_tab.separate.subprocess.run", side_effect=fake_run),
+    ):
+        artifacts = separate_stems(
+            audio,
+            out_dir,
+            IsolateConfig(model="htdemucs_6s", quality="fast", two_pass=True, max_duration_sec=15),
+        )
+
+    models = [cmd[cmd.index("-n") + 1] for cmd in seen]
+    assert models == ["htdemucs", "htdemucs_6s"]
+    assert {"vocals", "drums", "bass", "guitar", "piano"} <= set(artifacts)
+    assert "guitar_stem_quality_diagnostics" in artifacts
+    quality = json.loads(Path(artifacts["guitar_stem_quality_diagnostics"]).read_text(encoding="utf-8"))
+    assert quality["attempted"] is True
+    assert "high_end_energy_share" in quality

@@ -89,6 +89,14 @@ def main() -> None:
         help="Optional stage-1 checkpoint id (htdemucs_6s only): htdemucs_6s_guitar_ft",
     )
     parser.add_argument(
+        "--two-pass",
+        action="store_true",
+        help=(
+            "Opt-in: run 4-stem htdemucs first, then htdemucs_6s on the leftover mix. "
+            "About 2× slower. Ignored unless --model htdemucs_6s."
+        ),
+    )
+    parser.add_argument(
         "--dual-guitar",
         action="store_true",
         help="Deprecated and ignored alias for --lead-rhythm (split is now automatic)",
@@ -156,6 +164,7 @@ def main() -> None:
             else args.lead_rhythm_mode
         ),
         guitar_checkpoint=args.guitar_checkpoint,
+        two_pass=bool(args.two_pass),
         lead_rhythm_thresholds=thr if has_thr_override else None,
     )
 

@@ -185,12 +185,11 @@ def resolve_desktop_speed(
     gpu = "cuda" if "cuda" in options else "cpu"
 
     if speed_id not in ("faster", "balanced", "best"):
-        rec = desktop_recommend(probe, platform=platform)
         return {
-            "id": "auto",
-            "label": "Auto",
-            "quality": rec["quality"],
-            "device": rec["device"],
+            "id": "balanced",
+            "label": "Balanced",
+            "quality": "balanced",
+            "device": gpu,
             "help": "",
         }
 

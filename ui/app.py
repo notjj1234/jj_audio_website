@@ -146,6 +146,16 @@ st.markdown(
         animation: none !important;
       }
 
+      /* Streamlit 1.55+ stale-element fade (real click/rerun dim, not .stApp) */
+      [data-testid="stElementContainer"][data-stale="true"],
+      .stElementContainer[data-stale="true"],
+      [data-stale="true"] {
+        opacity: 1 !important;
+        filter: none !important;
+        transition: none !important;
+        animation: none !important;
+      }
+
       /* Running overlay must not steal mixer clicks */
       [data-testid="stAppViewContainer"][data-test-script-state="running"]::before,
       .stApp[data-test-script-state="running"]::before,
@@ -206,7 +216,7 @@ st.markdown(
         justify-content: flex-end;
       }
 
-      /* Tighter Isolate/Tab page type: fewer stacked captions, quieter tabs */
+      /* Tighter Isolate/Tab page type: fewer stacked captions */
       section.main h1 {
         padding-top: 0.25rem;
         margin-bottom: 0.45rem;
@@ -215,8 +225,17 @@ st.markdown(
         margin-top: 0.15rem;
         margin-bottom: 0.15rem;
       }
+      /* New / Mixer / Queue: large enough to find and click */
       section.main [data-testid="stTabs"] button {
         font-weight: 600;
+        font-size: 1.25rem !important;
+        line-height: 1.3 !important;
+        min-height: 44px !important;
+        padding: 0.7rem 1.35rem !important;
+      }
+      section.main [data-testid="stTabs"] [data-baseweb="tab-highlight"],
+      section.main [data-testid="stTabs"] [data-baseweb="tab-border"] {
+        height: 3px !important;
       }
     </style>
     """,

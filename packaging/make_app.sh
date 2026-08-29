@@ -39,7 +39,7 @@ else
   exit 1
 fi
 
-APP_VERSION="${AUDIO_TOOLS_VERSION:-0.1.1}"
+APP_VERSION="${AUDIO_TOOLS_VERSION:-0.1.2}"
 APP_DIR="dist/AudioTools.app"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Frameworks" "$APP_DIR/Contents/Resources"

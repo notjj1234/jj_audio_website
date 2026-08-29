@@ -416,6 +416,9 @@ async def create_isolate_job(
             lead_rhythm=body.lead_rhythm,
             lead_rhythm_mode=body.lead_rhythm_mode,
             guitar_checkpoint=body.guitar_checkpoint,
+            two_pass=body.two_pass,
+            emit_stems=body.emit_stems,
+            fold_other_into_guitar=body.fold_other_into_guitar,
             dual_guitar=body.dual_guitar,
         )
     except FileNotFoundError as exc:

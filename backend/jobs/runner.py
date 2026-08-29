@@ -158,6 +158,8 @@ async def _run_isolate_job_async(job_manager: JobManager, job_id: str) -> None:
         future.result(timeout=60)
 
     timeout = settings.job_timeout_for_quality(job.isolate_quality)
+    if job.isolate_two_pass:
+        timeout *= 2
 
     try:
         config = IsolateConfig(
@@ -170,6 +172,9 @@ async def _run_isolate_job_async(job_manager: JobManager, job_id: str) -> None:
             lead_rhythm=job.isolate_lead_rhythm or job.isolate_dual_guitar,
             lead_rhythm_mode=job.isolate_lead_rhythm_mode,
             guitar_checkpoint=job.isolate_guitar_checkpoint,
+            two_pass=job.isolate_two_pass,
+            emit_stems=tuple(job.isolate_emit_stems) if job.isolate_emit_stems else None,
+            fold_other_into_guitar=job.isolate_fold_other_into_guitar,
         )
 
         artifacts = await asyncio.wait_for(

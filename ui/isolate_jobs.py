@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import threading
 import time
@@ -42,6 +43,9 @@ class IsolateJobSpec:
     max_duration_sec: float | None = None
     two_stems: str | None = None
     guitar_checkpoint: str | None = None
+    two_pass: bool = False
+    emit_stems: list[str] | None = None
+    fold_other_into_guitar: bool = True
     custom_stems: list[str] = field(default_factory=list)
     source_fingerprint: str | None = None
     source_kind: str | None = None
@@ -58,6 +62,9 @@ class IsolateJobSpec:
     def from_dict(cls, data: dict[str, Any]) -> IsolateJobSpec:
         known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
         filtered = {k: v for k, v in data.items() if k in known}
+        raw_emit = filtered.get("emit_stems")
+        if raw_emit is not None:
+            filtered["emit_stems"] = list(raw_emit)
         return cls(**filtered)
 
 
@@ -117,8 +124,14 @@ def jobs_status_signature(jobs: list[dict[str, Any]]) -> tuple[tuple[str, str], 
     return tuple((str(job.get("id") or ""), str(job.get("status") or "")) for job in jobs)
 
 
+_ABS_PATH_RE = re.compile(
+    r"(?:[A-Za-z]:\\|/(?:Users|home|Applications|opt|usr|Library|private)/)\S+"
+)
+_ERROR_MAX_CHARS = 160
+
+
 def format_job_error(error: str | None) -> str:
-    """Surface the real Demucs failure; drop Hugging Face hub rate-limit noise."""
+    """One short user-facing sentence. Drop HF hub noise and filesystem paths."""
     text = (error or "").strip()
     if not text:
         return "Separation failed"
@@ -130,8 +143,12 @@ def format_job_error(error: str | None) -> str:
         if "HF_TOKEN" in line or "unauthenticated requests to the HF Hub" in line:
             continue
         cleaned_lines.append(line)
-    cleaned = "\n".join(cleaned_lines).strip()
-    return cleaned or text
+    cleaned = " ".join(cleaned_lines).strip() or text
+    cleaned = _ABS_PATH_RE.sub("", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" :;-")
+    if len(cleaned) > _ERROR_MAX_CHARS:
+        cleaned = cleaned[: _ERROR_MAX_CHARS - 1].rstrip() + "…"
+    return cleaned or "Separation failed"
 
 
 def write_status(job_id: str, **updates: Any) -> dict[str, Any]:
@@ -402,6 +419,7 @@ def _run_one_job(job_id: str) -> None:
         last_run=spec.prior_timing,
         model=spec.model,
         expects_guitar=guitar_job,
+        two_pass=spec.two_pass,
     )
     started = time.time()
     eta_fields = {
@@ -446,6 +464,9 @@ def _run_one_job(job_id: str) -> None:
         max_duration_sec=spec.max_duration_sec,
         two_stems=spec.two_stems,
         guitar_checkpoint=spec.guitar_checkpoint,
+        two_pass=spec.two_pass,
+        emit_stems=tuple(spec.emit_stems) if spec.emit_stems else None,
+        fold_other_into_guitar=spec.fold_other_into_guitar,
         # Default isolate path: never emit lead/rhythm.
         lead_rhythm=False,
         lead_rhythm_mode="confident",
@@ -568,7 +589,6 @@ _MIXER_RESET_KEYS = (
     "isolate_mixer_state",
     "isolate_mix_ready",
     "isolate_mix_fp",
-    "isolate_zip_fp",
 )
 
 

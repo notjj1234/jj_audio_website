@@ -11,7 +11,7 @@ For the website stack (FastAPI + React + Caddy), see [`DEPLOY.md`](DEPLOY.md) �
 
 | Item | Notes |
 |------|--------|
-| RAM | **16 GB preferred**. **8 GB minimum** — use short clips (≤90 s) and speed **Auto** / **Faster**. |
+| RAM | **16 GB preferred**. **8 GB minimum** — use short clips (≤90 s) and speed **Balanced** or **Faster**. |
 | GPU | Optional **NVIDIA CUDA** on Windows. Download the **NVIDIA** Setup only if you have an NVIDIA GPU. Mac isolation is CPU-only. |
 | Python | **3.10–3.12 only** (3.11 recommended). Not 3.13. |
 | ffmpeg | Full/shared build on PATH (Homebrew, apt, or Windows Gyan.FFmpeg — not essentials-only). Installer builds bundle ffmpeg. |
@@ -55,7 +55,7 @@ Contributor install (tests/eval extras): `make install` / `./scripts/dev.sh inst
 
 1. **pip / PyTorch** — first install can download ~2 GB (CPU wheels on Windows/Linux).
 2. **Demucs weights** — `tester` prewarms `htdemucs_6s` (default 6-stem model). Extra models download if you pick other track presets. Optional **guitar-ft** weights (~330 MB) download on first use when that Advanced checkbox is on; they cache as `$TORCH_HOME/checkpoints/guitar_htdemucs_6s.pt`. Meta’s pretrained Demucs weights are provided for scientific/research use (code is MIT; see facebookresearch/demucs#327).
-3. Open **Audio Isolation**, upload a **≤90 s** clip first, leave Quality on **fast**, click **Separate tracks**.
+3. Open **Audio Isolation**, upload a **≤90 s** clip first, leave speed on **Balanced**, click **Separate tracks**. Full band emits 4 tracks (Vocals, Drums, Bass, Guitar). Piano and Other are available under Custom.
 4. Use the live mixer; download stems or a mix.
 
 CPU separation often takes about as long as the song (or longer). Streamlit **Stop** may abort the page run, but a heavy Demucs child process can keep running until it finishes.
@@ -142,7 +142,7 @@ Missing window? Install [WebView2](https://go.microsoft.com/fwlink/p/?LinkId=212
 ## Installer first run
 
 1. First launch needs internet once to download Demucs weights (several minutes). Later runs reuse the cache.
-2. Open **Audio Isolation**, upload a **≤90 s** clip, leave speed on **Auto**, click **Separate tracks**.
+2. Open **Audio Isolation**, upload a **≤90 s** clip, leave speed on **Balanced**, click **Separate tracks**.
 3. Confirm the live mixer stays open when you mute/solo; try **Custom** under “What to separate”; download a stem or zip.
 
 CPU separation often takes about as long as the song (or longer). The **NVIDIA** Windows edition is typically faster on a compatible GPU.
@@ -161,11 +161,11 @@ Installer data dirs (not the same as `make tester`):
 |----------|-------|-----------|
 | M-series Mac | arm64 pkg | Native window opens; upload ≤90 s; Separate tracks; mixer stays open; Custom preset; downloads work |
 | Intel Mac | x64 pkg | Same as above |
-| Win10 x64 | cpu-setup.exe | Native window **Audio Tools (CPU)**; Auto recommends Faster/CPU; SmartScreen; WebView2 |
-| Win10 x64 NVIDIA | cuda-setup.exe | Native window **Audio Tools (NVIDIA)**; Auto can use CUDA; wizard may warn if no NVIDIA adapter |
+| Win10 x64 | cpu-setup.exe | Native window **Audio Tools (CPU)**; default speed is Balanced/CPU; SmartScreen; WebView2 |
+| Win10 x64 NVIDIA | cuda-setup.exe | Native window **Audio Tools (NVIDIA)**; Balanced can use CUDA; wizard may warn if no NVIDIA adapter |
 | Win11 x64 | cpu-setup.exe and/or cuda-setup.exe | Same as Win10 rows |
 
-Known limitations to tell testers: macOS Gatekeeper blocks a downloaded `.pkg` unless it was Developer ID signed and notarized; first-run model download; **16 GB RAM preferred** (8 GB: short clips + Auto/Faster). GPU acceleration is **NVIDIA-only** (Windows).
+Known limitations to tell testers: macOS Gatekeeper blocks a downloaded `.pkg` unless it was Developer ID signed and notarized; first-run model download; **16 GB RAM preferred** (8 GB: short clips + Balanced/Faster). GPU acceleration is **NVIDIA-only** (Windows).
 
 ## Model cache path (run from source)
 

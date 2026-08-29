@@ -490,3 +490,17 @@ def test_format_job_error_keeps_demucs_segment_message():
     assert "HF_TOKEN" not in cleaned
     assert "unauthenticated" not in cleaned
     assert "Maximum segment is: 7.8" in cleaned
+
+
+def test_format_job_error_is_one_short_sentence_without_app_paths():
+    raw = (
+        "guitar-ft unavailable (RuntimeError: Could not load libtorchcodec "
+        "from /Applications/AudioTools.app/Contents/Frameworks/libavutil.59.dylib "
+        "because FFmpeg 7 is missing); using stock htdemucs_6s\n"
+        + ("x" * 400)
+    )
+    cleaned = format_job_error(raw)
+    assert "/Applications/AudioTools.app" not in cleaned
+    assert "libavutil" not in cleaned
+    assert len(cleaned) <= 160
+    assert cleaned

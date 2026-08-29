@@ -90,12 +90,14 @@ def test_resolve_balanced_stays_cpu_on_mac():
     assert resolved["device"] == "cpu"
 
 
-def test_resolve_auto_and_unknown_match_recommend():
+def test_resolve_unknown_speed_is_balanced():
     auto = resolve_desktop_speed("auto", CUDA_HIGH, platform="win32")
-    assert auto["id"] == "auto"
+    assert auto["id"] == "balanced"
+    assert auto["quality"] == "balanced"
     assert auto["device"] == "cuda"
     unknown = resolve_desktop_speed("nope", CPU_MID, platform="win32")
-    assert unknown["id"] == "auto"
+    assert unknown["id"] == "balanced"
+    assert unknown["quality"] == "balanced"
     assert unknown["device"] == "cpu"
 
 

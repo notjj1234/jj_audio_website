@@ -45,6 +45,9 @@ class JobRecord:
     isolate_lead_rhythm: bool = False
     isolate_lead_rhythm_mode: str = "confident"
     isolate_guitar_checkpoint: str | None = None
+    isolate_two_pass: bool = False
+    isolate_emit_stems: list[str] | None = None
+    isolate_fold_other_into_guitar: bool = True
     isolate_dual_guitar: bool = False
     isolate_start_sec: float = 0.0
     cancel_requested: bool = False
@@ -196,6 +199,9 @@ class JobManager:
         lead_rhythm: bool = False,
         lead_rhythm_mode: str | None = None,
         guitar_checkpoint: str | None = None,
+        two_pass: bool = False,
+        emit_stems: list[str] | None = None,
+        fold_other_into_guitar: bool = True,
         dual_guitar: bool = False,
     ) -> JobRecord:
         if not upload_key:
@@ -220,8 +226,11 @@ class JobManager:
             "lead_rhythm": effective_lr,
             "lead_rhythm_mode": mode,
             "guitar_checkpoint": guitar_checkpoint,
+            "two_pass": two_pass,
+            "emit_stems": list(emit_stems) if emit_stems else None,
+            "fold_other_into_guitar": fold_other_into_guitar,
             "dual_guitar": dual_guitar,
-            "timeout_sec": settings.job_timeout_for_quality(quality),
+            "timeout_sec": settings.job_timeout_for_quality(quality) * (2 if two_pass else 1),
         }
         db = db_module.SessionLocal()
         try:
@@ -283,6 +292,9 @@ class JobManager:
             isolate_lead_rhythm=bool(cfg.get("lead_rhythm", False)),
             isolate_lead_rhythm_mode=str(cfg.get("lead_rhythm_mode", "confident")),
             isolate_guitar_checkpoint=cfg.get("guitar_checkpoint"),
+            isolate_two_pass=bool(cfg.get("two_pass", False)),
+            isolate_emit_stems=list(cfg["emit_stems"]) if cfg.get("emit_stems") else None,
+            isolate_fold_other_into_guitar=bool(cfg.get("fold_other_into_guitar", True)),
             isolate_dual_guitar=bool(cfg.get("dual_guitar", False)),
             isolate_start_sec=float(cfg.get("start_sec", 0.0)),
             cancel_requested=bool(row.cancel_requested),

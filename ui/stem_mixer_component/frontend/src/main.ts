@@ -90,6 +90,15 @@ class StemMixerEngine {
     );
   }
 
+  /** Create a context for decode only. Never resume — pywebview blocks that without a click. */
+  createContextForDecode(): AudioContext {
+    if (!this.ctx) {
+      this.ctx = new AudioContext();
+    }
+    this.ensureMasterBus();
+    return this.ctx;
+  }
+
   async ensureContext(): Promise<AudioContext> {
     if (!this.ctx) {
       this.ctx = new AudioContext();
@@ -131,8 +140,9 @@ class StemMixerEngine {
     this.playing = false;
     this.duration = 0;
 
-    const ctx = await this.ensureContext();
-    this.ensureMasterBus();
+    // Decode without starting playback. Create context but don't resume until Play —
+    // pywebview/WKWebView leaves output silent if resume() runs without a user gesture.
+    const ctx = this.createContextForDecode();
     const errors: string[] = [];
     let loaded = 0;
     const total = stems.length;
@@ -316,14 +326,9 @@ function restoreTransport(): void {
     };
     if (data.stemKey !== lastStemKey) return;
     const offset = Number(data.offset) || 0;
-    wantPlaying = !!data.playing;
-    setPlayPauseLabel(wantPlaying);
-    void engine.seek(offset).then(() => {
-      if (data.playing) {
-        transportPending = "play";
-        applyTransport();
-      }
-    });
+    if (offset > 0) {
+      void engine.seek(offset);
+    }
   } catch {
     /* ignore */
   }
@@ -400,6 +405,10 @@ function applyTransport(): void {
     .catch(() => {
       wantPlaying = engine.isPlaying();
       setPlayPauseLabel(wantPlaying);
+      const el = document.getElementById("status");
+      if (el && wantPlaying === false) {
+        el.textContent = "Tap Play again to start audio";
+      }
     })
     .finally(() => {
       transportBusy = false;
@@ -742,6 +751,17 @@ async function onRender(event: Event): Promise<void> {
   }
 
   if (key !== lastStemKey) {
+    try {
+      const raw = sessionStorage.getItem(TRANSPORT_STORAGE_KEY);
+      if (raw) {
+        const stored = JSON.parse(raw) as { stemKey?: string };
+        if (stored.stemKey !== key) {
+          sessionStorage.removeItem(TRANSPORT_STORAGE_KEY);
+        }
+      }
+    } catch {
+      /* ignore */
+    }
     lastStemKey = key;
     wantPlaying = false;
     transportBusy = false;

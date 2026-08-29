@@ -62,7 +62,7 @@ def desktop_app_version() -> str:
 
         return str(__version__)
     except Exception:
-        return "0.1.1"
+        return "0.1.2"
 
 
 def desktop_demo_blurb(version: str | None = None, edition: str | None = None) -> str:

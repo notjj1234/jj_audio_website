@@ -5,13 +5,13 @@
 
 .EXAMPLE
   .\packaging\make_windows_installer.ps1 -Flavor cpu -CopyToDownloads
-  .\packaging\make_windows_installer.ps1 -Flavor cuda -AppVersion 0.1.1 -CopyToDownloads
+  .\packaging\make_windows_installer.ps1 -Flavor cuda -AppVersion 0.1.2 -CopyToDownloads
 #>
 [CmdletBinding()]
 param(
     [string]$DistDir = "",
     [string]$OutputDir = "",
-    [string]$AppVersion = "0.1.1",
+    [string]$AppVersion = "0.1.2",
     [ValidateSet("cpu", "cuda")]
     [string]$Flavor = "cpu",
     [switch]$CopyToDownloads

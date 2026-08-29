@@ -11,11 +11,11 @@ import soundfile as sf
 
 from audio_to_tab.subprocess_util import subprocess_run_kwargs
 
-# Prefer original WAVs under this duration; longer tracks use downsampled previews.
+# Mixer plays original 44.1 kHz stems. Do not downsample — 22.05 kHz strips highs.
 PREVIEW_DURATION_THRESHOLD_SEC = 90.0
 # ~21 MB/min/stem float32 stereo @ 44.1kHz; 400MB ≈ ~3.2 stem-minutes at full rate.
 PREVIEW_RAM_BUDGET_BYTES = 400 * 1024 * 1024
-PREVIEW_SAMPLE_RATE = 22050
+PREVIEW_SAMPLE_RATE = 44100
 BYTES_PER_SEC_FULL = 44100 * 2 * 4  # float32 stereo estimate for RAM budgeting
 
 
@@ -51,55 +51,14 @@ def should_use_previews(stem_paths: dict[str, Path]) -> bool:
     return est_ram > PREVIEW_RAM_BUDGET_BYTES
 
 
-def _encode_preview_ffmpeg(src: Path, dest: Path) -> bool:
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        return False
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        [
-            ffmpeg,
-            "-y",
-            "-i",
-            str(src),
-            "-ac",
-            "2",
-            "-ar",
-            str(PREVIEW_SAMPLE_RATE),
-            str(dest),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        **subprocess_run_kwargs(),
-    )
-    return result.returncode == 0 and dest.exists()
-
-
 def ensure_mixer_audio_paths(stem_paths: dict[str, Path]) -> dict[str, Path]:
     """
     Return paths suitable for the browser mixer.
 
-    Uses original WAVs when short; otherwise writes ``preview/<stem>.wav``
-    (22.05 kHz stereo) once via ffmpeg. Falls back to originals if encode fails.
+    Always uses the original stem WAVs (44.1 kHz). Downsampled 22.05 kHz
+    previews stripped high end; do not bring them back.
     """
-    if not should_use_previews(stem_paths):
-        return dict(stem_paths)
-
-    run_dir = next(iter(stem_paths.values())).parent
-    preview_dir = run_dir / "preview"
-    preview_dir.mkdir(parents=True, exist_ok=True)
-    out: dict[str, Path] = {}
-    for name, path in stem_paths.items():
-        dest = preview_dir / f"{name}.wav"
-        if dest.exists() and dest.stat().st_mtime >= path.stat().st_mtime:
-            out[name] = dest
-            continue
-        if _encode_preview_ffmpeg(path, dest):
-            out[name] = dest
-        else:
-            out[name] = path
-    return out
+    return dict(stem_paths)
 
 
 def media_url_for_file(path: Path, *, coordinates: str) -> str:

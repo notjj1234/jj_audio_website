@@ -38,6 +38,33 @@ audio-isolate --audio CLIP --output ./eval/lead_rhythm/out_gft \
 
 A/B `guitar.wav` in the mixer (or SI-SDR / SIR vs guitar GT when you have it). First guitar-ft run downloads ~330 MB to `$TORCH_HOME/checkpoints/guitar_htdemucs_6s.pt`.
 
+Cover at least: solo guitar, guitar+orchestra, guitar+bass, dense rock. Score energy bands and high-end (and SI-SDR when GT exists):
+
+```bash
+python eval/lead_rhythm/score_guitar_stage1.py \
+  --dirs stock=./eval/lead_rhythm/out_stock guitar_ft=./eval/lead_rhythm/out_gft \
+  --gt-guitar /path/to/gt_guitar.wav \
+  --note "rock full band"
+```
+
+Each isolate run also writes `guitar_stem_quality.json` (low/mid/high-end shares, competitor overlap).
+
+### Two-pass A/B (4-stem → 6-stem on residual)
+
+Stay Advanced **opt-in**. About 2× wall time vs single-pass `htdemucs_6s`.
+
+```bash
+export PYTHONPATH=src:.
+audio-isolate --audio CLIP --output ./eval/lead_rhythm/out_two_pass \
+  --model htdemucs_6s --quality fast --two-pass
+python eval/lead_rhythm/score_guitar_stage1.py \
+  --dirs stock=./eval/lead_rhythm/out_stock two_pass=./eval/lead_rhythm/out_two_pass
+```
+
+Pass only if guitar SIR / listening beats stock on the same clips without a worse piano-bleed regression.
+
+## Stage 2 — Lead / Rhythm post-process
+
 ## Stage 2 — Lead / Rhythm post-process
 
 ### Binary pass (challenger vs current DSP)

@@ -54,3 +54,31 @@ def test_stem_mixer_accepts_master_volume():
     assert "initial_master_volume_db" in params
     assert params["initial_master_volume_db"].default == 0.0
 
+
+def _mixer_main_ts() -> str:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "ui"
+        / "stem_mixer_component"
+        / "frontend"
+        / "src"
+        / "main.ts"
+    ).read_text(encoding="utf-8")
+
+
+def test_load_stems_creates_context_without_resume():
+    text = _mixer_main_ts()
+    load = text[text.find("async loadStems(") : text.find("applyGains(")]
+    assert "createContextForDecode" in load
+    assert "ensureContext()" not in load
+    assert ".resume()" not in load
+    assert "createContextForDecode(): AudioContext" in text
+
+
+def test_restore_transport_does_not_auto_play():
+    text = _mixer_main_ts()
+    restore = text[text.find("function restoreTransport") : text.find("function statePayload")]
+    assert "applyTransport" not in restore
+    assert "wantPlaying" not in restore
+    assert "engine.seek" in restore
+

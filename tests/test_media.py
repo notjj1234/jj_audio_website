@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 from ui.media import (
     PREVIEW_DURATION_THRESHOLD_SEC,
+    PREVIEW_SAMPLE_RATE,
     cleanup_mix_artifacts,
     ensure_mixer_audio_paths,
     ensure_region_preview_wav,
@@ -49,6 +50,18 @@ def test_should_use_previews_long(tmp_path: Path):
     p = tmp_path / "a.wav"
     _write_tone(p, PREVIEW_DURATION_THRESHOLD_SEC + 5.0)
     assert should_use_previews({"a": p}) is True
+
+
+def test_mixer_preview_rate_is_full_quality():
+    assert PREVIEW_SAMPLE_RATE == 44100
+
+
+def test_ensure_mixer_audio_paths_long_uses_original(tmp_path: Path):
+    p = tmp_path / "vocals.wav"
+    _write_tone(p, PREVIEW_DURATION_THRESHOLD_SEC + 5.0)
+    out = ensure_mixer_audio_paths({"vocals": p})
+    assert out["vocals"] == p
+    assert not (tmp_path / "preview").exists()
 
 
 def test_ensure_mixer_audio_paths_short_uses_original(tmp_path: Path):

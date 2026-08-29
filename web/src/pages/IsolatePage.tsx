@@ -23,19 +23,25 @@ const STEM_LABELS: Record<string, string> = {
 
 const SEPARATION_PRESETS = {
   full_band: {
-    label: "Full band — Vocals, Drums, Bass, Guitar, Piano (5 tracks)",
+    label: "Full band — Vocals, Drums, Bass, Guitar (4 tracks)",
     model: "htdemucs_6s",
     two_stems: null as string | null,
+    emit_stems: ["vocals", "drums", "bass", "guitar"] as string[],
+    fold_other_into_guitar: true,
   },
   essential: {
     label: "Essential tracks — Vocals, Drums, Bass, Other (4 tracks)",
     model: "htdemucs",
     two_stems: null,
+    emit_stems: ["vocals", "drums", "bass", "other"] as string[],
+    fold_other_into_guitar: true,
   },
   vocals_music: {
     label: "Vocals & music — Vocals, Instrumental (2 tracks)",
     model: "htdemucs",
     two_stems: "vocals",
+    emit_stems: null as string[] | null,
+    fold_other_into_guitar: true,
   },
 } as const;
 
@@ -70,7 +76,7 @@ function readAdvancedOpen(): boolean {
 export function IsolatePage() {
   const [file, setFile] = useState<File | null>(null);
   const [preset, setPreset] = useState<PresetId>("full_band");
-  const [processingMode, setProcessingMode] = useState("auto");
+  const [processingMode, setProcessingMode] = useState("balanced");
   const [capabilities, setCapabilities] = useState<api.SystemCapabilities | null>(null);
   const [duration, setDuration] = useState<number | null>(null);
   const [useRegion, setUseRegion] = useState(false);
@@ -168,8 +174,7 @@ export function IsolatePage() {
     const picked = modes.find((m) => m.id === processingMode);
     if (picked) return picked;
     if (processingMode === "auto") {
-      const rec = capabilities?.recommended_mode ?? "fast_cpu";
-      return modes.find((m) => m.id === rec) ?? modes.find((m) => m.id === "fast_cpu");
+      return modes.find((m) => m.id === "balanced") ?? modes.find((m) => m.id === "fast_cpu");
     }
     return modes.find((m) => m.id === processingMode);
   }, [capabilities, processingMode]);
@@ -255,6 +260,10 @@ export function IsolatePage() {
     if (presetCfg.two_stems) {
       body.two_stems = presetCfg.two_stems;
     }
+    if (presetCfg.emit_stems) {
+      body.emit_stems = [...presetCfg.emit_stems];
+    }
+    body.fold_other_into_guitar = presetCfg.fold_other_into_guitar;
     if (useRegion) {
       body.start_sec = regionStart;
       body.end_sec = regionEnd;

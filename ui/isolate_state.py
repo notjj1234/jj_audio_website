@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 from audio_to_tab.hardware import HostProbe, resolve_desktop_speed
+from audio_to_tab.isolate import effective_isolation_quality
 
 ISOLATION_STAGE_ORDER = (
     "ingest",
@@ -29,13 +30,13 @@ STAGE_WEIGHTS: dict[str, float] = {
     "done": 0.02,
 }
 
-# Checklist labels (short). Header copy for the current stage stays in isolate.py.
+# One-line user labels. Behind-the-scenes stages reuse "Separate tracks".
 STAGE_CHECKLIST_LABELS: dict[str, str] = {
     "ingest": "Prepare audio",
     "separate": "Separate tracks",
-    "collect": "Collect tracks",
-    "bass_bleed": "Check guitar",
-    "presence": "Check which tracks have sound",
+    "collect": "Separate tracks",
+    "bass_bleed": "Separate tracks",
+    "presence": "Separate tracks",
     "done": "Finish",
 }
 
@@ -53,15 +54,17 @@ _GUITAR_MODEL_MARKERS = ("6s", "guitar")
 # Keys are stable UI ids; labels/descriptions are user-facing.
 SEPARATION_PRESETS: dict[str, dict[str, Any]] = {
     # Stage-1 default stays htdemucs_6s (only official Demucs checkpoint with a
-    # guitar stem). Do not swap to htdemucs_ft for Full band — see
-    # eval/lead_rhythm/RESEARCH.md.
+    # guitar stem). Built-in presets emit at most 4 stems; piano/6-stem output
+    # is Custom (and CLI/eval). See eval/lead_rhythm/RESEARCH.md.
     "full_band": {
         "label": "Full band",
-        "tracks": "Vocals, Drums, Bass, Guitar, Piano",
-        "track_count": 5,
+        "tracks": "Vocals, Drums, Bass, Guitar",
+        "track_count": 4,
         "model": "htdemucs_6s",
         "two_stems": None,
-        "caveat": "Guitar/piano less accurate.",
+        "emit_stems": ("vocals", "drums", "bass", "guitar"),
+        "fold_other_into_guitar": True,
+        "caveat": "Guitar isolation is less accurate than vocals/drums/bass.",
     },
     "essential": {
         "label": "Essential tracks",
@@ -69,6 +72,8 @@ SEPARATION_PRESETS: dict[str, dict[str, Any]] = {
         "track_count": 4,
         "model": "htdemucs",
         "two_stems": None,
+        "emit_stems": ("vocals", "drums", "bass", "other"),
+        "fold_other_into_guitar": True,
         "caveat": "",
     },
     "vocals_music": {
@@ -77,6 +82,8 @@ SEPARATION_PRESETS: dict[str, dict[str, Any]] = {
         "track_count": 2,
         "model": "htdemucs",
         "two_stems": "vocals",
+        "emit_stems": None,
+        "fold_other_into_guitar": True,
         "caveat": "",
     },
     "custom": {
@@ -85,6 +92,8 @@ SEPARATION_PRESETS: dict[str, dict[str, Any]] = {
         "track_count": None,
         "model": "htdemucs",
         "two_stems": None,
+        "emit_stems": None,
+        "fold_other_into_guitar": True,
         "caveat": "",
     },
 }
@@ -98,6 +107,7 @@ CUSTOM_STEM_CHOICES: dict[str, str] = {
     "bass": "Bass",
     "guitar": "Guitar",
     "piano": "Piano",
+    "other": "Other",
 }
 
 CUSTOM_STEM_OUTPUTS: dict[str, tuple[str, ...]] = {
@@ -106,20 +116,14 @@ CUSTOM_STEM_OUTPUTS: dict[str, tuple[str, ...]] = {
     "bass": ("bass",),
     "guitar": ("guitar",),
     "piano": ("piano",),
+    "other": ("other",),
 }
 
 DEFAULT_CUSTOM_STEMS = ("vocals", "guitar")
 
 CUSTOM_CAVEAT = ""
 
-# Auto is the default: quality/device come from audio_to_tab.hardware on this PC.
 SPEED_PRESETS: dict[str, dict[str, Any]] = {
-    "auto": {
-        "label": "Auto",
-        "quality": "fast",
-        "device": "cpu",
-        "help": "",
-    },
     "faster": {
         "label": "Faster",
         "quality": "fast",
@@ -140,7 +144,7 @@ SPEED_PRESETS: dict[str, dict[str, Any]] = {
     },
 }
 
-DEFAULT_SPEED_PRESET = "auto"
+DEFAULT_SPEED_PRESET = "balanced"
 
 
 def resolve_isolate_user_id(session: MutableMapping[str, Any], stored: str | None) -> str:
@@ -161,16 +165,31 @@ def resolve_isolate_user_id(session: MutableMapping[str, Any], stored: str | Non
     return user_id
 
 
-def resolve_speed_preset(preset_id: str, probe=None, *, platform: str | None = None) -> dict[str, Any]:
-    """Map a UI speed preset id to Demucs quality + device for this host."""
+def resolve_speed_preset(
+    preset_id: str,
+    probe=None,
+    *,
+    platform: str | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Map a UI speed preset id to Demucs quality + device for this host.
+
+    Unknown ids fall back to Balanced. Faster keeps ``fast`` quality even on
+    ``htdemucs_6s``; other speeds floor 6-stem jobs to Balanced.
+    """
     host = probe if probe is not None else HostProbe(cuda=False, mps=False, ram_gb=None)
     resolved = resolve_desktop_speed(preset_id, host, platform=platform)
-    known = preset_id if preset_id in SPEED_PRESETS else DEFAULT_SPEED_PRESET
+    known = resolved["id"] if resolved["id"] in SPEED_PRESETS else DEFAULT_SPEED_PRESET
     label = SPEED_PRESETS[known]["label"]
+    quality = resolved["quality"]
+    if model:
+        quality = effective_isolation_quality(
+            quality, model=model, speed_id=resolved["id"]
+        )
     return {
-        "id": resolved["id"],
+        "id": known,
         "label": label,
-        "quality": resolved["quality"],
+        "quality": quality,
         "device": resolved["device"],
         "help": resolved.get("help", ""),
     }
@@ -214,6 +233,8 @@ def resolve_separation_preset(preset_id: str) -> dict[str, Any]:
         "track_count": preset["track_count"],
         "model": preset["model"],
         "two_stems": preset["two_stems"],
+        "emit_stems": preset.get("emit_stems"),
+        "fold_other_into_guitar": bool(preset.get("fold_other_into_guitar", True)),
         "caveat": preset["caveat"],
     }
 
@@ -238,6 +259,12 @@ def resolve_custom_separation(stems: Any) -> dict[str, Any]:
     else:
         model, two_stems = "htdemucs", None
 
+    emit: list[str] = []
+    for pick in picked:
+        for name in CUSTOM_STEM_OUTPUTS.get(pick, ()):
+            if name not in emit:
+                emit.append(name)
+
     return {
         "id": "custom",
         "label": SEPARATION_PRESETS["custom"]["label"],
@@ -246,6 +273,8 @@ def resolve_custom_separation(stems: Any) -> dict[str, Any]:
         "model": model,
         "two_stems": two_stems,
         "stems": picked,
+        "emit_stems": tuple(emit),
+        "fold_other_into_guitar": "other" not in wanted,
         "caveat": CUSTOM_CAVEAT,
     }
 
@@ -434,6 +463,32 @@ def apply_pending_youtube_url(session: MutableMapping[str, object]) -> str | Non
     return value
 
 
+def reset_new_tab_source(session: MutableMapping[str, object]) -> None:
+    """Remount the uploader and clear New-tab source after a job is queued.
+
+    Does not delete staged audio on disk. Must not write widget-bound
+    ``isolate_output_name`` / ``isolate_youtube_url`` keys — those go through
+    pending keys so the next run can apply them before the widgets mount.
+    """
+    try:
+        current = int(session.get("isolate_upload_key") or 0)
+    except (TypeError, ValueError):
+        current = 0
+    session["isolate_upload_key"] = current + 1
+    for key in (
+        "isolate_upload_fp",
+        "isolate_pending_audio_path",
+        "isolate_pending_fp",
+        "isolate_duration_sec",
+        "isolate_duration_fp",
+        "carry_over_audio_path",
+        "carry_over_audio_name",
+    ):
+        session.pop(key, None)
+    queue_clear_youtube_url(session)
+    queue_reopen_output_name(session, "")
+
+
 def should_hide_stale_results(
     *,
     pending_upload_fp: str | None,
@@ -459,6 +514,7 @@ WORKSPACE_TABS = ("New", "Mixer", "Queue")
 WORKSPACE_NEXT_KEY = "_isolate_workspace_next"
 LISTEN_PICKER_KEY = "isolate_listen_picker"
 LISTEN_PICKER_NEXT_KEY = "_isolate_listen_picker_next"
+ISOLATE_EXPORT_DIR_KEY = "isolate_export_dir"
 
 
 def apply_workspace_tab(session: MutableMapping[str, Any], *, has_artifacts: bool) -> str:
@@ -576,10 +632,12 @@ def isolate_ui_state_payload(session: MutableMapping[str, Any]) -> dict[str, Any
     workspace = tab if tab in WORKSPACE_TABS else "New"
     viewing = session.get("isolate_viewing_run_dir")
     run_dir = session.get("isolate_run_dir")
+    export_dir = session.get(ISOLATE_EXPORT_DIR_KEY)
     return {
         "workspace": workspace,
         "viewing_run_dir": str(viewing) if viewing else None,
         "run_dir": str(run_dir) if run_dir else None,
+        "export_dir": str(export_dir) if export_dir else None,
     }
 
 
@@ -597,6 +655,8 @@ def apply_stored_isolate_ui_state(
         session["isolate_viewing_run_dir"] = str(stored["viewing_run_dir"])
     if not session.get("isolate_run_dir") and stored.get("run_dir"):
         session["isolate_run_dir"] = str(stored["run_dir"])
+    if not session.get(ISOLATE_EXPORT_DIR_KEY) and stored.get("export_dir"):
+        session[ISOLATE_EXPORT_DIR_KEY] = str(stored["export_dir"])
 
 
 def read_isolate_ui_state(path: Path) -> dict[str, Any]:
@@ -627,6 +687,57 @@ def seed_consumed_job_ids(jobs: list[dict[str, Any]]) -> list[str]:
         if jid:
             ids.append(jid)
     return ids
+
+
+_OS_NOTIFY_STATUSES = frozenset({"succeeded", "failed"})
+_OS_NOTIFY_APP_TITLE = "Audio Isolation"
+
+
+def seed_notified_job_ids(jobs: list[dict[str, Any]]) -> list[str]:
+    """Succeeded/failed ids already on disk — treat as seen so launch does not toast."""
+    ids: list[str] = []
+    for job in jobs:
+        if job.get("status") not in _OS_NOTIFY_STATUSES:
+            continue
+        jid = str(job.get("id") or "").strip()
+        if jid:
+            ids.append(jid)
+    return ids
+
+
+def os_notify_message(job: dict[str, Any]) -> tuple[str, str] | None:
+    """App title and body for a terminal job, or None if it should not toast."""
+    status = job.get("status")
+    title = str(job.get("title") or "track").strip() or "track"
+    if len(title) > 80:
+        title = title[:77] + "..."
+    if status == "succeeded":
+        return _OS_NOTIFY_APP_TITLE, f"Separated: {title}"
+    if status == "failed":
+        return _OS_NOTIFY_APP_TITLE, f"Needs attention: {title} failed"
+    return None
+
+
+def jobs_needing_os_notify(
+    jobs: list[dict[str, Any]],
+    notified_ids: list[str] | None,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Return ``(updated_ids, jobs_to_toast)``. First call (``None``) seeds without toasting."""
+    if notified_ids is None:
+        return seed_notified_job_ids(jobs), []
+    seen = {str(item) for item in notified_ids if item}
+    updated = [str(item) for item in notified_ids if item]
+    pending: list[dict[str, Any]] = []
+    for job in jobs:
+        if job.get("status") not in _OS_NOTIFY_STATUSES:
+            continue
+        jid = str(job.get("id") or "").strip()
+        if not jid or jid in seen:
+            continue
+        pending.append(job)
+        seen.add(jid)
+        updated.append(jid)
+    return updated, pending
 
 
 def next_unconsumed_succeeded_job(
@@ -925,11 +1036,13 @@ def estimate_job_seconds(
     last_run: dict[str, Any] | None = None,
     model: str | None = None,
     expects_guitar: bool | None = None,
+    two_pass: bool = False,
 ) -> tuple[float | None, str]:
     """Predicted wall time for the whole job.
 
     Uses a prior run when quality/device/model match (confidence ``high``),
     otherwise a clip-length × quality × device heuristic (``low``).
+    Two-pass isolation is about 2× the Demucs ``separate`` stage.
     """
     if last_run:
         same_setup = (
@@ -937,6 +1050,7 @@ def estimate_job_seconds(
             and last_run.get("device") == device
             and (model is None or last_run.get("model") == model)
             and (expects_guitar is None or bool(last_run.get("expects_guitar")) == bool(expects_guitar))
+            and bool(last_run.get("two_pass")) == bool(two_pass)
         )
         last_audio = float(last_run.get("audio_sec") or 0.0)
         last_wall = float(last_run.get("wall_sec") or 0.0)
@@ -954,7 +1068,8 @@ def estimate_job_seconds(
 
     q = _QUALITY_TIME_FACTOR.get(quality, 1.0)
     d = _DEVICE_REALTIME.get(device, _DEVICE_REALTIME["cpu"])
-    separate_sec = audio_duration_sec * q * d
+    pass_factor = 2.0 if two_pass else 1.0
+    separate_sec = audio_duration_sec * q * d * pass_factor
     sep_w = STAGE_WEIGHTS["separate"]
     active_w = sum(STAGE_WEIGHTS.get(s, 0.0) for s in stages)
     if sep_w <= 0 or active_w <= 0:
@@ -1033,6 +1148,15 @@ def format_checklist_markdown(items: list[dict[str, str]]) -> str:
     return "\n\n".join(lines)
 
 
+def user_progress_hint(stage: str, message: str = "") -> str | None:
+    """Short user-facing caption for the status strip. Never the raw worker message."""
+    if stage != "separate":
+        return None
+    if "NVIDIA GPU" in (message or ""):
+        return "Separating tracks — this can take a while on NVIDIA GPU"
+    return "Separating tracks — this can take a while on CPU"
+
+
 def format_progress_label(
     percent: float, message: str, *, estimated: bool = False
 ) -> str:
@@ -1101,7 +1225,7 @@ def running_progress_view(status: dict[str, Any], now: float) -> dict[str, Any]:
         total_estimate=total_est,
         confidence=confidence,
     )
-    human = STAGE_CHECKLIST_LABELS.get(stage, message or stage)
+    human = STAGE_CHECKLIST_LABELS.get(stage, "Separate tracks")
     label = format_progress_label(percent, human, estimated=intra_estimated and confidence == "low")
     items = checklist_items(stages, stage)
     return {
@@ -1109,6 +1233,6 @@ def running_progress_view(status: dict[str, Any], now: float) -> dict[str, Any]:
         "label": label,
         "eta_line": format_eta_line(elapsed, remaining, confidence=rem_conf),
         "checklist_md": format_checklist_markdown(items),
-        "message": message or human,
+        "hint": user_progress_hint(stage, message),
         "estimated": intra_estimated,
     }

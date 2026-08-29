@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import * as api from "../api";
 
 const FALLBACK_MODES: api.ProcessingModeInfo[] = [
-  { id: "auto", label: "Auto", enabled: true, reason: null, device: "cpu", max_duration_sec: 90 },
   { id: "fast_cpu", label: "Fast (CPU)", enabled: true, reason: null, device: "cpu", max_duration_sec: 90 },
   { id: "balanced", label: "Balanced", enabled: true, reason: null, device: "cpu", max_duration_sec: 300 },
   {
@@ -38,10 +37,10 @@ function helperText(
   const ram = caps.ram_gb != null ? ` · ~${caps.ram_gb} GB RAM` : "";
   const detected = deviceLabel(caps.detected_device);
   const selected =
-    caps.modes.find((m) => m.id === mode) ?? caps.modes.find((m) => m.id === "auto");
+    caps.modes.find((m) => m.id === mode) ?? caps.modes.find((m) => m.id === "balanced");
   const using = deviceLabel(selected?.device ?? "cpu");
-  if (caps.detected_device === "mps" && mode === "auto") {
-    return `Detected: ${detected}${ram}. Auto uses CPU; Balanced may use MPS.`;
+  if (caps.detected_device === "mps" && mode === "balanced") {
+    return `Detected: ${detected}${ram}. Balanced may use MPS.`;
   }
   return `Detected: ${detected}${ram}. This job will use ${using}.`;
 }
@@ -65,13 +64,14 @@ export function ProcessingModeSelect({ value, onChange }: Props) {
     };
   }, []);
 
-  const modes = caps?.modes ?? FALLBACK_MODES;
+  const modes = (caps?.modes ?? FALLBACK_MODES).filter((m) => m.id !== "auto");
+  const selectValue = value === "auto" ? "balanced" : value;
 
   return (
     <label className="field">
       Processing mode
       <select
-        value={value}
+        value={selectValue}
         onChange={(e) => onChange(e.target.value)}
         aria-label="Processing mode"
       >

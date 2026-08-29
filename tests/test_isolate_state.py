@@ -53,18 +53,23 @@ from ui.isolate_state import (
     queue_youtube_url,
     read_isolate_ui_state,
     recent_runs_with_owner_fallback,
+    reset_new_tab_source,
     resolve_custom_separation,
     resolve_isolate_user_id,
     resolve_separation_preset,
     resolve_speed_preset,
     running_progress_view,
     seed_consumed_job_ids,
+    seed_notified_job_ids,
+    os_notify_message,
+    jobs_needing_os_notify,
     select_rehydrate_row,
     session_mixer_artifacts_ok,
     should_auto_apply_job,
     staged_audio_for_new_tab,
     should_hide_stale_results,
     stage_progress_percent,
+    user_progress_hint,
     youtube_label_from_url,
     youtube_video_id,
     sync_output_name_on_upload,
@@ -166,6 +171,37 @@ def test_apply_pending_youtube_url_noop_without_pending():
     assert session[ISOLATE_YOUTUBE_URL_KEY] == "keep"
 
 
+def test_reset_new_tab_source_remounts_uploader_without_touching_widget_keys():
+    session: dict[str, object] = {
+        "isolate_upload_key": 3,
+        "isolate_upload_fp": "a.wav:1",
+        "isolate_pending_audio_path": "/tmp/a.wav",
+        "isolate_pending_fp": "a.wav:1",
+        "isolate_duration_sec": 12.0,
+        "isolate_duration_fp": "a.wav:1",
+        "carry_over_audio_path": "/tmp/c.wav",
+        "carry_over_audio_name": "c.wav",
+        ISOLATE_OUTPUT_NAME_KEY: "Song A",
+        ISOLATE_YOUTUBE_URL_KEY: "https://youtu.be/abc",
+    }
+    reset_new_tab_source(session)
+    assert session["isolate_upload_key"] == 4
+    assert "isolate_pending_audio_path" not in session
+    assert "isolate_pending_fp" not in session
+    assert "isolate_upload_fp" not in session
+    assert "isolate_duration_sec" not in session
+    assert "carry_over_audio_path" not in session
+    assert "carry_over_audio_name" not in session
+    assert session[ISOLATE_OUTPUT_NAME_KEY] == "Song A"
+    assert session[ISOLATE_YOUTUBE_URL_KEY] == "https://youtu.be/abc"
+    assert session[ISOLATE_YOUTUBE_URL_PENDING_KEY] == ""
+    assert session[ISOLATE_OUTPUT_NAME_PENDING_KEY] == ""
+    apply_pending_output_name(session)
+    apply_pending_youtube_url(session)
+    assert session[ISOLATE_OUTPUT_NAME_KEY] == ""
+    assert session[ISOLATE_YOUTUBE_URL_KEY] == ""
+
+
 def test_youtube_video_id_from_common_urls():
     assert youtube_video_id("https://www.youtube.com/watch?v=BaW_jenozKc") == "BaW_jenozKc"
     assert youtube_video_id("https://youtu.be/abc123XYZ_-") == "abc123XYZ_-"
@@ -232,6 +268,64 @@ def test_apply_youtube_output_name_sync_queues_before_widget():
     assert ISOLATE_OUTPUT_NAME_PENDING_KEY not in session
 
 
+def test_stem_presence_selector_uses_fixed_three_columns():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    fn_src = source[
+        source.find("def _render_stem_presence_selector") : source.find("def _build_current_mix")
+    ]
+    assert "cols_per_row = 3" in fn_src
+    assert "st.columns(cols_per_row)" in fn_src
+    assert "st.columns(len(row_names))" not in fn_src
+
+
+def test_running_progress_renderer_is_barebones():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    fn_src = source[
+        source.find("def _render_running_progress") : source.find("def _job_source_title")
+    ]
+    assert 'st.caption(view["message"])' not in fn_src
+    assert "checklist_md" not in fn_src
+    assert 'view.get("hint")' in fn_src
+
+
+def test_mixer_picker_lives_in_fragment_with_stable_run_key():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    frag = source[
+        source.find("def _mixer_and_downloads_fragment") : source.find(
+            "def _resolve_audio_for_job"
+        )
+    ]
+    assert "_render_stem_presence_selector" in frag
+    assert "stem_mixer_run_" in source
+    assert 'key=f"stem_mixer_{fingerprint}"' not in source
+    mixer_ws = source[
+        source.find("def _render_mixer_workspace") : source.find("def _render_file_ready_banner")
+    ]
+    assert "_render_stem_presence_selector" not in mixer_ws
+    assert "Save all tracks" in frag
+    assert "Open folder" in frag
+    assert "Download finished" in frag
+    assert "ISOLATE_EXPORT_DIR_KEY" in frag
+    panel = source[
+        source.find("def _render_downloads_panel") : source.find("def _resolve_audio_for_job")
+    ]
+    assert "st.container(border=True" in panel
+    assert 'use_container_width=True' in panel
+    assert 'key="isolate_choose_export_dir"' in panel
+    assert 'key="isolate_open_export_dir"' in panel
+    assert 'key="isolate_save_tracks"' in panel
+    assert "Browser download (zip)" not in panel
+    assert "st.download_button" not in panel
+    assert "isolate_save_as" not in panel
+    assert "Make a tab PDF from this" not in panel
+    assert "Make a tab PDF from this" in mixer_ws
+    assert 'st.caption("Other tools")' in mixer_ws
+    assert "st.divider()" in mixer_ws
+
+
 def test_isolate_reopen_handler_uses_pending_not_direct_widget_write():
     page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
     source = page.read_text(encoding="utf-8")
@@ -242,9 +336,16 @@ def test_isolate_reopen_handler_uses_pending_not_direct_widget_write():
     assert 'st.session_state["isolate_output_name"] = path.stem' not in source
     assert "apply_pending_output_name(st.session_state)" in source
     assert "apply_pending_youtube_url(st.session_state)" in source
-    assert "queue_clear_youtube_url(st.session_state)" in source
+    assert "reset_new_tab_source(st.session_state)" in source
     assert "queue_youtube_url(st.session_state" in source
     assert '@st.dialog("Search YouTube"' in source
+    assert "st.form(" in source
+    assert "st.form_submit_button(" in source
+    assert "st.video(" in source
+    assert "Open on YouTube" in source
+    assert "desktop_notify(" in source
+    assert "jobs_needing_os_notify" in source
+    assert "_increment_upload_key" not in source
     assert "st.popover(" not in source
     assert "search_youtube_videos" in source
     assert "thumbnail_url" in source
@@ -289,6 +390,26 @@ def test_isolate_reopen_handler_uses_pending_not_direct_widget_write():
     assert "apply_now=False" in resolve_src
     assert "choice[\"output_name\"]" in resolve_src or "choice['output_name']" in resolve_src
     assert "queue_output_name_if_empty" not in resolve_src
+    enqueue_src = source[
+        source.find("def _enqueue_confirmed_job") : source.find("def _library_status_row")
+    ]
+    enq_at = enqueue_src.find("enqueue_job(spec)")
+    reset_at = enqueue_src.find("reset_new_tab_source(st.session_state)")
+    assert enq_at != -1 and reset_at != -1 and enq_at < reset_at
+    yt_dlg = source[
+        source.find("def _youtube_search_dialog") : source.find("def _stateful_expander")
+    ]
+    form_at = yt_dlg.find("st.form(")
+    submit_at = yt_dlg.find("st.form_submit_button(")
+    clear_at = yt_dlg.find("isolate_youtube_search_clear")
+    video_at = yt_dlg.find("st.video(")
+    assert form_at != -1 and submit_at != -1 and form_at < submit_at < clear_at
+    assert video_at != -1 and video_at > submit_at
+    poll_src = source[
+        source.find("def _poll_running_jobs") : source.find("def _queue_tab_fragment")
+    ]
+    assert "jobs_needing_os_notify" in poll_src
+    assert "desktop_notify(" in poll_src
     main_src = source[source.find("def main()") :]
     uid_at = main_src.find("browser_id = _get_browser_user_id()")
     rehydrate_at = main_src.find("_rehydrate_artifacts_from_disk(browser_id)")
@@ -562,6 +683,16 @@ def test_isolate_ui_state_payload_prefers_next_tab():
     assert payload["viewing_run_dir"] == "/runs/a"
 
 
+def test_isolate_ui_state_payload_includes_export_dir():
+    payload = isolate_ui_state_payload(
+        {
+            WORKSPACE_KEY: "Mixer",
+            "isolate_export_dir": "/Users/me/Downloads",
+        }
+    )
+    assert payload["export_dir"] == "/Users/me/Downloads"
+
+
 def test_isolate_ui_state_round_trip(tmp_path):
     path = tmp_path / "isolate_ui_state.json"
     session = {
@@ -634,6 +765,41 @@ def test_poll_defers_new_success_until_form_is_drawn():
     )
     assert settled["apply_job"] is None
     assert settled["rerun"] is False
+
+
+def test_os_notify_seeds_historical_jobs_and_fires_for_new_terminal():
+    jobs = [
+        {"id": "old-ok", "status": "succeeded", "title": "A"},
+        {"id": "old-fail", "status": "failed", "title": "B"},
+        {"id": "run", "status": "running", "title": "C"},
+        {"id": "wait", "status": "queued", "title": "D"},
+    ]
+    assert seed_notified_job_ids(jobs) == ["old-ok", "old-fail"]
+    ids, pending = jobs_needing_os_notify(jobs, None)
+    assert pending == []
+    assert ids == ["old-ok", "old-fail"]
+    later = jobs + [{"id": "new-ok", "status": "succeeded", "title": "Hangar 18"}]
+    ids, pending = jobs_needing_os_notify(later, ids)
+    assert [row["id"] for row in pending] == ["new-ok"]
+    later = later + [{"id": "new-fail", "status": "failed", "title": "Nope"}]
+    ids, pending = jobs_needing_os_notify(later, ids)
+    assert [row["id"] for row in pending] == ["new-fail"]
+    later = later + [{"id": "gone", "status": "cancelled", "title": "Z"}]
+    ids, pending = jobs_needing_os_notify(later, ids)
+    assert pending == []
+
+
+def test_os_notify_message_copy():
+    assert os_notify_message({"status": "succeeded", "title": "Hangar 18"}) == (
+        "Audio Isolation",
+        "Separated: Hangar 18",
+    )
+    assert os_notify_message({"status": "failed", "title": "Nope"}) == (
+        "Audio Isolation",
+        "Needs attention: Nope failed",
+    )
+    assert os_notify_message({"status": "queued", "title": "Soon"}) is None
+    assert os_notify_message({"status": "running", "title": "Soon"}) is None
 
 
 def test_load_persist_isolate_user_id_round_trip(tmp_path):
@@ -845,6 +1011,15 @@ def test_running_progress_view_has_label_elapsed_eta_and_checklist():
     assert "Elapsed" in view["eta_line"]
     assert "[now]" in view["checklist_md"]
     assert "Prepare audio" in view["checklist_md"]
+    assert view["hint"] == "Separating tracks — this can take a while on CPU"
+    assert "Check guitar" not in view["checklist_md"]
+    assert "Check which tracks have sound" not in view["checklist_md"]
+
+
+def test_user_progress_hint_never_echoes_raw_worker_text():
+    assert user_progress_hint("ingest", "libtorchcodec exploded") is None
+    assert "libtorchcodec" not in (user_progress_hint("separate", "libtorchcodec exploded") or "")
+    assert "NVIDIA GPU" in (user_progress_hint("separate", "Separating tracks — this can take a while on NVIDIA GPU") or "")
 
 
 def test_running_progress_view_estimating_without_job_estimate():
@@ -874,9 +1049,12 @@ def test_resolve_separation_preset_full_band():
     resolved = resolve_separation_preset("full_band")
     assert resolved["model"] == "htdemucs_6s"
     assert resolved["two_stems"] is None
-    assert resolved["track_count"] == 5
+    assert resolved["track_count"] == 4
     assert "Guitar" in resolved["tracks"]
+    assert "Piano" not in resolved["tracks"]
     assert "Other" not in resolved["tracks"]
+    assert resolved["emit_stems"] == ("vocals", "drums", "bass", "guitar")
+    assert resolved["fold_other_into_guitar"] is True
 
 
 def test_resolve_separation_preset_essential():
@@ -884,6 +1062,7 @@ def test_resolve_separation_preset_essential():
     assert resolved["model"] == "htdemucs"
     assert resolved["two_stems"] is None
     assert resolved["track_count"] == 4
+    assert resolved["emit_stems"] == ("vocals", "drums", "bass", "other")
 
 
 def test_resolve_separation_preset_vocals_music():
@@ -919,6 +1098,15 @@ def test_resolve_custom_separation_guitar_needs_six_stem_model():
     resolved = resolve_custom_separation(["guitar"])
     assert resolved["model"] == "htdemucs_6s"
     assert resolved["two_stems"] is None
+    assert resolved["emit_stems"] == ("guitar",)
+    assert resolved["fold_other_into_guitar"] is True
+
+
+def test_resolve_custom_separation_guitar_and_other_keeps_other():
+    resolved = resolve_custom_separation(["guitar", "other"])
+    assert resolved["model"] == "htdemucs_6s"
+    assert resolved["emit_stems"] == ("guitar", "other")
+    assert resolved["fold_other_into_guitar"] is False
 
 
 def test_resolve_custom_separation_drums_and_bass_use_four_stem_model():
@@ -944,9 +1132,10 @@ def test_resolve_custom_separation_has_no_caveat():
     assert resolve_custom_separation(["vocals"])["caveat"] == ""
 
 
-def test_custom_stem_choices_omit_other():
-    assert "other" not in CUSTOM_STEM_CHOICES
+def test_custom_stem_choices_include_other():
+    assert "other" in CUSTOM_STEM_CHOICES
     assert "guitar" in CUSTOM_STEM_CHOICES
+    assert "piano" in CUSTOM_STEM_CHOICES
 
 
 def test_custom_selected_stems_only_turns_on_requested_instruments():
@@ -986,6 +1175,39 @@ def test_custom_selected_stems_falls_back_to_all_when_nothing_matches():
     assert selected == {"vocals": True, "no_vocals": True}
 
 
+def test_resolve_speed_preset_unknown_and_auto_become_balanced():
+    from audio_to_tab.hardware import HostProbe
+
+    probe = HostProbe(cuda=False, mps=False, ram_gb=16.0)
+    six = resolve_speed_preset("auto", probe, platform="darwin", model="htdemucs_6s")
+    four = resolve_speed_preset("auto", probe, platform="darwin", model="htdemucs")
+    faster = resolve_speed_preset("faster", probe, platform="darwin", model="htdemucs_6s")
+    assert six["id"] == "balanced"
+    assert six["quality"] == "balanced"
+    assert four["id"] == "balanced"
+    assert four["quality"] == "balanced"
+    assert faster["quality"] == "fast"
+
+
+def test_estimate_job_seconds_two_pass_is_double_separate():
+    stages = isolation_stages_for_job(expects_guitar=True)
+    one, _ = estimate_job_seconds(
+        audio_duration_sec=60.0,
+        quality="fast",
+        device="cpu",
+        stages=stages,
+    )
+    two, _ = estimate_job_seconds(
+        audio_duration_sec=60.0,
+        quality="fast",
+        device="cpu",
+        stages=stages,
+        two_pass=True,
+    )
+    assert one is not None and two is not None
+    assert two == pytest.approx(one * 2.0)
+
+
 def test_resolve_speed_preset_faster():
     resolved = resolve_speed_preset("faster")
     assert resolved["quality"] == "fast"
@@ -1010,17 +1232,18 @@ def test_resolve_speed_preset_unknown_falls_back():
     assert resolved["id"] == DEFAULT_SPEED_PRESET
 
 
-def test_default_speed_preset_is_auto():
-    assert DEFAULT_SPEED_PRESET == "auto"
-    assert "auto" in SPEED_PRESETS
+def test_default_speed_preset_is_balanced():
+    assert DEFAULT_SPEED_PRESET == "balanced"
+    assert "auto" not in SPEED_PRESETS
+    assert "balanced" in SPEED_PRESETS
 
 
-def test_resolve_speed_preset_auto_uses_cuda_probe_on_windows():
+def test_resolve_speed_preset_balanced_uses_cuda_probe_on_windows():
     from audio_to_tab.hardware import HostProbe
 
     probe = HostProbe(cuda=True, mps=False, ram_gb=24.0)
-    resolved = resolve_speed_preset("auto", probe, platform="win32")
-    assert resolved["id"] == "auto"
+    resolved = resolve_speed_preset("balanced", probe, platform="win32")
+    assert resolved["id"] == "balanced"
     assert resolved["device"] == "cuda"
     assert resolved["quality"] == "balanced"
 

@@ -120,3 +120,5 @@ def test_guitar_ft_stays_opt_in_until_listen_pass():
     assert "~330 MB" in source
     # Invert this checkbox only after eval/lead_rhythm 3-clip listen beats stock.
     assert "Use stock Meta 6s weights" not in source
+    assert 'key="isolate_two_pass"' in source
+    assert "Two-pass guitar isolation (experimental)" in source
