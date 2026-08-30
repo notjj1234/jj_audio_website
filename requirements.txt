@@ -1,3 +1,9 @@
+# Desktop-only runtime pins (Windows/macOS .exe/.pkg build and local dev).
+# Deliberately NOT the full project runtime: hosted backend deps (SQLAlchemy,
+# redis, arq, boto3, slowapi, python-jose, passlib, ...) are excluded because
+# the desktop freeze must not ship backend/. See pyproject.toml
+# [project.dependencies] for the canonical runtime list, and the packages
+# managed by the dependencies above.
 basic-pitch[onnx]>=0.3.0
 setuptools>=68,<81
 onnxruntime>=1.16

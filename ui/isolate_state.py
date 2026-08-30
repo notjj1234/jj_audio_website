@@ -148,6 +148,29 @@ def normalize_guitar_track_selection(guitar: str, *, roformer_available: bool) -
     return "none"
 
 
+def default_guitar_track_option(*, roformer_available: bool) -> str:
+    """Preferred guitar engine for a fresh session (better model wins when present)."""
+    return "guitar_roformer" if roformer_available else "guitar_demucs_6s"
+
+
+def promote_default_guitar_option(
+    options: list[str] | tuple[str, ...],
+    *,
+    roformer_available: bool,
+) -> list[str]:
+    """Swap the default Demucs guitar pick for BS-RoFormer when the backend exists.
+
+    Used only when seeding UI state for a brand-new session; persisted user
+    picks are never rewritten by this helper (``normalize_guitar_track_selection``
+    is the downgrade path, this is the upgrade path).
+    """
+    promoted = default_guitar_track_option(roformer_available=roformer_available)
+    out = [str(x) for x in options]
+    if "guitar_demucs_6s" in out and promoted == "guitar_roformer":
+        out[out.index("guitar_demucs_6s")] = promoted
+    return out
+
+
 def tracks_picker_help(*, roformer_available: bool) -> str:
     if roformer_available:
         return TRACKS_PICKER_HELP
@@ -518,6 +541,21 @@ def youtube_video_id(url: str) -> str | None:
 def youtube_label_from_url(url: str) -> str:
     """Default Output name from a pasted URL (id until the file is downloaded)."""
     return youtube_video_id(url) or "youtube_audio"
+
+
+def resolve_youtube_job_name(output_name: str, youtube_url: str, audio_stem: str) -> str:
+    """Resolve the human-readable title used for a job and its run.
+
+    Empty names fall back to the stem of the audio file on disk (for YouTube
+    that is the real video title). For a YouTube source, a name that is still
+    the video-id auto default is replaced with that title; user-edited names
+    are preserved.
+    """
+    name = (output_name or "").strip()
+    url = (youtube_url or "").strip()
+    if url and (not name or name == youtube_label_from_url(url)):
+        return audio_stem or name
+    return name or audio_stem
 
 
 def sync_output_name_on_youtube(

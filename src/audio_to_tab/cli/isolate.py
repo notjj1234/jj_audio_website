@@ -11,12 +11,21 @@ from pathlib import Path
 
 from audio_to_tab.isolate import (
     DEMUCS_INSTALL_HINT,
-    IsolateConfig,
     SUPPORTED_MODELS,
+    IsolateConfig,
     separate_stems,
 )
 from audio_to_tab.lead_rhythm import LeadRhythmThresholds
-from audio_to_tab.roformer import ROFORMER_INSTALL_HINT, ROFORMER_MODELS, is_roformer_backend_available
+from audio_to_tab.roformer import (
+    ROFORMER_INSTALL_HINT,
+    ROFORMER_MODELS,
+    is_roformer_backend_available,
+)
+from audio_to_tab.scnet import (
+    SCNET_INSTALL_HINT,
+    SCNET_MODELS,
+    is_scnet_available,
+)
 from audio_to_tab.separate import is_demucs_available
 
 
@@ -31,7 +40,8 @@ def main() -> None:
             "Models: htdemucs_6s (6 stems: drums/bass/other/vocals/guitar/piano; "
             "piano quality is limited), htdemucs / htdemucs_ft (4 stems), "
             "bs_roformer_sw (opt-in 6-stem BS-RoFormer-SW), "
-            "melband_roformer_guitar (opt-in 2-stem guitar specialist). "
+            "melband_roformer_guitar (opt-in 2-stem guitar specialist), "
+            "guitar_scnet (opt-in 4-stem SCNet, guitar from its other stem). "
             f"{DEMUCS_INSTALL_HINT}"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -51,7 +61,12 @@ def main() -> None:
         default="fast",
         help="Quality preset (affects shifts/overlap; higher = much slower)",
     )
-    parser.add_argument("--device", default="cpu", help="Demucs device: cpu or cuda")
+    parser.add_argument(
+        "--device",
+        choices=["cpu", "cuda"],
+        default="cpu",
+        help="Demucs device: cpu or cuda",
+    )
     parser.add_argument(
         "--max-duration",
         type=float,
@@ -125,6 +140,31 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--bleed-gate",
+        action="store_true",
+        help=(
+            "Opt-in: competitive spectral scrub of bass/cymbal flutter on the guitar "
+            "stem after separation (default off)."
+        ),
+    )
+    parser.add_argument(
+        "--adaptive-fold-gain",
+        action="store_true",
+        help=(
+            "Opt-in: search the Other→Guitar fold mix gain instead of the fixed 0.5 "
+            "(default off)."
+        ),
+    )
+    parser.add_argument(
+        "--guitar-ensemble",
+        action="store_true",
+        help=(
+            "Opt-in: also run BS-RoFormer-SW on top of the primary Demucs run and "
+            "per-band blend the two guitar stems (requires the [roformer] extra; "
+            "much slower; default off)."
+        ),
+    )
+    parser.add_argument(
         "--low-end-recovery",
         action="store_true",
         help=(
@@ -179,6 +219,9 @@ def main() -> None:
     if args.model in ROFORMER_MODELS:
         if not is_roformer_backend_available():
             raise SystemExit(f"RoFormer backend is not installed. {ROFORMER_INSTALL_HINT}")
+    elif args.model in SCNET_MODELS:
+        if not is_scnet_available():
+            raise SystemExit(f"SCNet backend is not installed. {SCNET_INSTALL_HINT}")
     elif not is_demucs_available():
         raise SystemExit(f"Demucs is not installed. {DEMUCS_INSTALL_HINT}")
 
@@ -222,6 +265,9 @@ def main() -> None:
         lead_rhythm_thresholds=thr if has_thr_override else None,
         low_end_restore_db=low_end_restore_db,
         sub_bass_debleed=sub_bass_debleed,
+        bleed_gate=bool(args.bleed_gate),
+        adaptive_fold_gain=bool(args.adaptive_fold_gain),
+        guitar_ensemble=bool(args.guitar_ensemble),
     )
 
     def progress(stage: str, msg: str) -> None:

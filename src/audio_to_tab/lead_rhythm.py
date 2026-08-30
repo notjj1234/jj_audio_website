@@ -669,9 +669,9 @@ def extract_role_features(
 ) -> RoleFeatures:
     """Run Basic Pitch on mono (first + last analyze windows) and extract features."""
     thr = thresholds or LeadRhythmThresholds()
+    import pretty_midi
     from basic_pitch import ICASSP_2022_MODEL_PATH
     from basic_pitch.inference import predict
-    import pretty_midi
 
     window = int(thr.analyze_window_sec * sr)
     n = len(audio_mono)
@@ -871,12 +871,12 @@ def split_lead_rhythm_guitar(
     if best.pitch_evidence is not None:
         feat_detail["pitch_evidence"] = best.pitch_evidence
 
-    # If scores are identical (margin ~0), default Mid/high → lead for midside/register.
+    # If scores are identical (margin ~0), default stream A to lead. Stream A is
+    # the primary slot in every pair builder — midside (mid → lead), register
+    # (high → lead), spatial (left-channel source) — so a_lead is the intended
+    # default for all methods here.
     if assignment == "ambiguous" or margin < 1e-9:
-        if best.method == "midside":
-            assignment = "a_lead"  # Mid → lead, Side → rhythm
-        else:
-            assignment = "a_lead"
+        assignment = "a_lead"
         feat_detail["defaulted_assignment"] = True
 
     low_role = margin < role_floor

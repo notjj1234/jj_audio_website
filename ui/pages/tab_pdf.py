@@ -30,6 +30,7 @@ from audio_to_tab.roformer import is_roformer_backend_available  # noqa: E402
 from audio_to_tab.separate import guitar_ft_weights_path, is_demucs_available  # noqa: E402
 from ui.isolate_state import (  # noqa: E402
     TRACK_OPTIONS,
+    default_guitar_track_option,
     guitar_track_radio_ids,
     normalize_guitar_track_selection,
 )
@@ -101,6 +102,9 @@ def main() -> None:
         tab_guitar_checkpoint = None
         tab_low_end_restore_db = 0.0
         tab_sub_bass_debleed = False
+        tab_bleed_gate = False
+        tab_adaptive_fold_gain = False
+        tab_guitar_ensemble = False
         if separate_stems and can_separate:
             if "tab_low_end_restore_db" not in st.session_state:
                 st.session_state["tab_low_end_restore_db"] = 0.0
@@ -112,7 +116,12 @@ def main() -> None:
                 for oid in radio_ids
                 if oid != "none"
             }
-            current_engine = str(st.session_state.get("tab_guitar_engine") or "guitar_demucs_6s")
+            promoted_default = default_guitar_track_option(
+                roformer_available=roformer_ok
+            )
+            current_engine = str(
+                st.session_state.get("tab_guitar_engine") or promoted_default
+            )
             if current_engine not in guitar_labels:
                 st.session_state["tab_guitar_engine"] = normalize_guitar_track_selection(
                     current_engine,
@@ -166,6 +175,31 @@ def main() -> None:
                 help=(
                     "Subtracts scaled bass/drum energy below ~150 Hz from the guitar stem "
                     "before transcription. Opt-in; default off."
+                ),
+            )
+            tab_bleed_gate = st.checkbox(
+                "Spectral bleed gate",
+                key="tab_bleed_gate",
+                help=(
+                    "Scrubs leftover bass/cymbal flutter from the guitar stem when the "
+                    "separator's competitor stems dominate it. Opt-in; default off."
+                ),
+            )
+            tab_adaptive_fold_gain = st.checkbox(
+                "Adaptive fold gain",
+                key="tab_adaptive_fold_gain",
+                help=(
+                    "Searches the Other→Guitar mix gain instead of the fixed 0.5. "
+                    "Opt-in; default off."
+                ),
+            )
+            tab_guitar_ensemble = st.checkbox(
+                "Cross-model guitar ensemble",
+                key="tab_guitar_ensemble",
+                help=(
+                    "Also runs BS-RoFormer-SW and per-band blends the two guitar "
+                    "stems. Much slower; requires the [roformer] extra; opt-in "
+                    "(default off)."
                 ),
             )
         with st.expander("Advanced transcription settings"):
@@ -255,6 +289,9 @@ def main() -> None:
                 guitar_checkpoint=tab_guitar_checkpoint,
                 low_end_restore_db=tab_low_end_restore_db,
                 sub_bass_debleed=tab_sub_bass_debleed,
+                bleed_gate=tab_bleed_gate,
+                adaptive_fold_gain=tab_adaptive_fold_gain,
+                guitar_ensemble=tab_guitar_ensemble,
             )
 
             # Known, fixed stage order the pipeline reports via on_progress — used only to
@@ -381,4 +418,5 @@ def main() -> None:
             st.switch_page(str(Path(__file__).with_name("isolate.py")))
 
 
-main()
+if __name__ == "__main__":
+    main()

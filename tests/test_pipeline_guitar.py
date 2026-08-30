@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 import soundfile as sf
 
 from audio_to_tab.isolate import (
@@ -31,13 +32,45 @@ def test_pipeline_config_quality_backend_defaults():
     assert cfg.demucs_segment == 8
     assert cfg.demucs_jobs == 1
     assert cfg.fold_other_mode is None
+    assert cfg.max_duration_sec is None
     assert cfg.low_end_restore_db == 0.0
     assert cfg.sub_bass_debleed is False
+    assert cfg.bleed_gate is False
+    assert cfg.adaptive_fold_gain is False
+    assert cfg.guitar_ensemble is False
 
 
 def test_isolate_config_sub_bass_debleed_defaults_off():
     assert IsolateConfig().sub_bass_debleed is False
     assert IsolateConfig().low_end_restore_db == 0.0
+
+
+def test_pipeline_trim_zero_or_negative_is_noop(tmp_path):
+    from audio_to_tab.pipeline import _trim_audio
+
+    src = tmp_path / "in.wav"
+    src.write_bytes(b"x")
+    assert _trim_audio(src, None) == src
+    assert _trim_audio(src, 0.0) == src
+    assert _trim_audio(src, -1.0) == src
+
+
+def test_pipeline_trim_raises_on_ffmpeg_failure(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from audio_to_tab.pipeline import _trim_audio
+
+    src = tmp_path / "in.wav"
+    src.write_bytes(b"x")
+
+    def boom(cmd, capture_output=True, check=False, **kw):
+        Path(cmd[-1]).write_bytes(b"partial")
+        return MagicMock(returncode=1, stderr="kaboom", stdout="")
+
+    monkeypatch.setattr("audio_to_tab.pipeline.shutil.which", lambda _name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr("subprocess.run", boom)
+    with pytest.raises(RuntimeError, match="ffmpeg trim failed"):
+        _trim_audio(src, 30.0)
 
 
 def test_isolate_config_clamps_low_end_restore_db():
@@ -92,7 +125,78 @@ def test_separate_guitar_stem_passes_residual_to_refine(tmp_path: Path, monkeypa
     assert captured["residual_bytes"] == b"other-bytes"
 
 
-def test_separate_guitar_stem_skips_guitar_ft_when_uncached(tmp_path: Path, monkeypatch):
+def test_separate_guitar_stem_ensemble_blends_when_requested(tmp_path: Path, monkeypatch):
+    audio = tmp_path / "mix.wav"
+    audio.write_bytes(b"mix")
+    out = tmp_path / "guitar_stem.wav"
+    captured: dict[str, object] = {}
+
+    def fake_roformer(src, dest_dir, *, model, device="cpu"):
+        (dest_dir / "guitar.wav").write_bytes(b"roformer-guitar")
+
+    def fake_blend(primary, secondary, output_path):
+        captured["primary"] = primary
+        captured["secondary"] = secondary
+        Path(output_path).write_bytes(Path(secondary).read_bytes())
+        from audio_to_tab.isolate import EnsembleGuitarDiagnostics
+
+        return EnsembleGuitarDiagnostics(
+            attempted=True, reason=f"blended {secondary}", blended=True
+        )
+
+    monkeypatch.setattr("audio_to_tab.separate.is_demucs_available", lambda: True)
+    monkeypatch.setattr("audio_to_tab.separate.run_demucs", _write_stems_from_demucs_args)
+    monkeypatch.setattr("audio_to_tab.roformer.is_roformer_backend_available", lambda: True)
+    monkeypatch.setattr("audio_to_tab.roformer.run_roformer_model", fake_roformer)
+    monkeypatch.setattr("audio_to_tab.isolate.blend_guitar_stems", fake_blend)
+
+    result = separate_guitar_stem(
+        audio,
+        out,
+        model="htdemucs_6s",
+        guitar_ensemble=True,
+    )
+    assert result == out
+    assert out.read_bytes() == b"roformer-guitar"
+    assert captured["secondary"].name == "guitar.wav"
+
+
+def test_separate_guitar_stem_folds_other_into_guitar(tmp_path: Path, monkeypatch):
+    audio = tmp_path / "mix.wav"
+    audio.write_bytes(b"mix")
+    out = tmp_path / "guitar_stem.wav"
+    captured: dict[str, object] = {}
+
+    def fake_fold(artifacts, *, mode, adaptive_gain=False):
+        captured["guitar"] = Path(artifacts["guitar"])
+        captured["other"] = Path(artifacts["other"]).read_bytes()
+        captured["mode"] = mode
+        captured["adaptive_gain"] = adaptive_gain
+        return artifacts, None
+
+    monkeypatch.setattr("audio_to_tab.separate.is_demucs_available", lambda: True)
+    monkeypatch.setattr("audio_to_tab.separate.run_demucs", _write_stems_from_demucs_args)
+    monkeypatch.setattr("audio_to_tab.isolate.apply_fold_other_into_guitar", fake_fold)
+
+    result = separate_guitar_stem(audio, out, fold_other_mode="band_limited")
+    assert result == out
+    assert out.read_bytes() == b"guitar-bytes"
+    assert captured["mode"] == "band_limited"
+    assert captured["guitar"] == out
+    assert captured["other"] == b"other-bytes"
+
+
+def test_separate_guitar_stem_rejects_unknown_fold_mode(tmp_path: Path, monkeypatch):
+    audio = tmp_path / "mix.wav"
+    audio.write_bytes(b"mix")
+    out = tmp_path / "guitar_stem.wav"
+    monkeypatch.setattr("audio_to_tab.separate.is_demucs_available", lambda: True)
+
+    with pytest.raises(ValueError, match="fold_other_mode"):
+        separate_guitar_stem(audio, out, fold_other_mode="bogus")
+
+
+def test_separate_guitar_stem_raises_when_guitar_ft_uncached(tmp_path: Path, monkeypatch):
     audio = tmp_path / "mix.wav"
     audio.write_bytes(b"mix")
     out = tmp_path / "guitar_stem.wav"
@@ -110,10 +214,10 @@ def test_separate_guitar_stem_skips_guitar_ft_when_uncached(tmp_path: Path, monk
     monkeypatch.setattr("audio_to_tab.separate.run_demucs_guitar_ft_inprocess", fake_ft)
     monkeypatch.setattr("audio_to_tab.separate.run_demucs", fake_cli)
 
-    separate_guitar_stem(audio, out, guitar_checkpoint=GUITAR_FT_CHECKPOINT_ID)
+    with pytest.raises(RuntimeError, match="not falling back to stock"):
+        separate_guitar_stem(audio, out, guitar_checkpoint=GUITAR_FT_CHECKPOINT_ID)
     assert called["ft"] is False
-    assert called["cli"] is True
-    assert out.read_bytes() == b"guitar-bytes"
+    assert called["cli"] is False
 
 
 def test_separate_guitar_stem_uses_guitar_ft_when_cached(tmp_path: Path, monkeypatch):
@@ -141,7 +245,7 @@ def test_separate_guitar_stem_uses_guitar_ft_when_cached(tmp_path: Path, monkeyp
     assert out.read_bytes() == b"ft-guitar"
 
 
-def test_separate_guitar_stem_roformer_falls_back_without_backend(tmp_path: Path, monkeypatch):
+def test_separate_guitar_stem_roformer_raises_without_backend(tmp_path: Path, monkeypatch):
     audio = tmp_path / "mix.wav"
     audio.write_bytes(b"mix")
     out = tmp_path / "guitar_stem.wav"
@@ -159,9 +263,10 @@ def test_separate_guitar_stem_roformer_falls_back_without_backend(tmp_path: Path
     monkeypatch.setattr("audio_to_tab.separate.is_demucs_available", lambda: True)
     monkeypatch.setattr("audio_to_tab.separate.run_demucs", fake_cli)
 
-    separate_guitar_stem(audio, out, model="bs_roformer_sw")
+    with pytest.raises(RuntimeError, match="RoFormer backend"):
+        separate_guitar_stem(audio, out, model="bs_roformer_sw")
     assert called["roformer"] is False
-    assert called["cli"] is True
+    assert called["cli"] is False
 
 
 def test_guitar_ft_weights_cached_false_when_missing(tmp_path: Path, monkeypatch):

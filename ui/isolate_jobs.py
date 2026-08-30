@@ -661,6 +661,12 @@ def _run_one_job(job_id: str) -> None:
             stages_done.append(stage)
         write_status(job_id, completed_stages=stages_done)
 
+    # Cap each long-running Demucs subprocess so a wedged child cannot block the
+    # worker forever; 2.5× the (already generous) job estimate + 300s slack keeps
+    # legit slow CPU runs safe while still catching true hangs. The abort path
+    # (pause/stop) also terminates the child mid-run via the Popen handle.
+    subprocess_timeout_sec = (job_estimate * 2.5 + 300.0) if job_estimate and job_estimate > 0 else None
+
     try:
         artifacts = separate_stems(
             audio_path=Path(spec.audio_path),
@@ -671,6 +677,7 @@ def _run_one_job(job_id: str) -> None:
             checkpoint_dir=_checkpoint_dir(job_id),
             completed_stages=completed_stages,
             on_stage_complete=on_stage_complete,
+            subprocess_timeout_sec=subprocess_timeout_sec,
         )
         cleanup_mix_artifacts(Path(spec.output_dir))
         artifact_map = {k: str(v) for k, v in artifacts.items()}

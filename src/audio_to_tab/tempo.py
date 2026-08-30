@@ -62,7 +62,7 @@ def estimate_tempo_from_midi_robust(pm: pretty_midi.PrettyMIDI) -> float:
             pass
         return 120.0
 
-    starts = sorted(set(round(s, 3) for s in starts))
+    starts = sorted({round(s, 3) for s in starts})
     intervals = [starts[i + 1] - starts[i] for i in range(len(starts) - 1)]
     intervals = [iv for iv in intervals if iv >= 0.1]  # reject drum doubles <100ms
     if not intervals:

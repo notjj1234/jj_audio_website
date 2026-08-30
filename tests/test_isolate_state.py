@@ -27,6 +27,7 @@ from ui.isolate_state import (
     checklist_items,
     clamp_region_bounds,
     custom_selected_stems,
+    default_guitar_track_option,
     default_region_end,
     estimate_job_seconds,
     estimate_remaining_seconds,
@@ -50,6 +51,7 @@ from ui.isolate_state import (
     pending_upload_fp_for_stale,
     pick_library_row,
     plan_isolate_job_poll,
+    promote_default_guitar_option,
     queue_clear_youtube_url,
     queue_output_name_if_empty,
     queue_reopen_output_name,
@@ -62,6 +64,7 @@ from ui.isolate_state import (
     resolve_separation_preset,
     resolve_speed_preset,
     resolve_track_selection,
+    resolve_youtube_job_name,
     running_progress_view,
     normalize_guitar_track_selection,
     tracks_picker_help,
@@ -222,6 +225,32 @@ def test_youtube_video_id_from_common_urls():
     assert youtube_label_from_url("not-a-url") == "youtube_audio"
 
 
+def test_resolve_youtube_job_name_empty_prefers_downloaded_stem():
+    assert (
+        resolve_youtube_job_name("", "https://youtu.be/BaW_jenozKc", "ACDC - Back in Black")
+        == "ACDC - Back in Black"
+    )
+
+
+def test_resolve_youtube_job_name_upgrades_video_id_default_to_real_title():
+    assert (
+        resolve_youtube_job_name("BaW_jenozKc", "https://youtu.be/BaW_jenozKc", "ACDC - Back in Black")
+        == "ACDC - Back in Black"
+    )
+
+
+def test_resolve_youtube_job_name_keeps_user_edited_name():
+    assert (
+        resolve_youtube_job_name("My custom mix", "https://youtu.be/BaW_jenozKc", "ACDC - Back in Black")
+        == "My custom mix"
+    )
+
+
+def test_resolve_youtube_job_name_non_youtube_falls_back_to_stem():
+    assert resolve_youtube_job_name("", "https://example.com/song.wav", "song") == "song"
+    assert resolve_youtube_job_name("my song", "", "song") == "my song"
+
+
 def test_sync_output_name_on_youtube_new_url_replaces_old_title():
     name, named, auto, changed = sync_output_name_on_youtube(
         youtube_url="https://youtu.be/newvid",
@@ -324,7 +353,7 @@ def test_mixer_picker_lives_in_fragment_with_stable_run_key():
         source.find("def _render_downloads_panel") : source.find("def _resolve_audio_for_job")
     ]
     assert "st.container(border=True" in panel
-    assert 'use_container_width=True' in panel
+    assert 'width="stretch"' in panel
     assert 'key="isolate_choose_export_dir"' in panel
     assert 'key="isolate_open_export_dir"' in panel
     assert 'key="isolate_save_tracks"' in panel
@@ -1158,6 +1187,29 @@ def test_tracks_picker_help_mentions_install_when_roformer_missing():
     missing = tracks_picker_help(roformer_available=False)
     assert "bs-roformer-infer" in missing
     assert tracks_picker_help(roformer_available=True) != missing
+
+
+def test_default_guitar_track_option_promotes_roformer_when_available():
+    assert default_guitar_track_option(roformer_available=True) == "guitar_roformer"
+    assert default_guitar_track_option(roformer_available=False) == "guitar_demucs_6s"
+
+
+def test_promote_default_guitar_option_swaps_only_fresh_defaults():
+    base = ["vocals_demucs", "guitar_demucs_6s"]
+    assert promote_default_guitar_option(
+        base, roformer_available=True
+    ) == ["vocals_demucs", "guitar_roformer"]
+    assert promote_default_guitar_option(
+        base, roformer_available=False
+    ) == ["vocals_demucs", "guitar_demucs_6s"]
+    kept = ["guitar_demucs_6s"]
+    assert promote_default_guitar_option(kept, roformer_available=False) == [
+        "guitar_demucs_6s"
+    ]
+    explicit = ["guitar_roformer_refine"]
+    assert promote_default_guitar_option(
+        explicit, roformer_available=True
+    ) == ["guitar_roformer_refine"]
 
 
 def test_job_requires_roformer_backend():

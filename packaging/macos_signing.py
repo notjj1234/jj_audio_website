@@ -45,7 +45,7 @@ cannot be notarized and does not silence the malware dialog.
    Developer ID Application and Developer ID Installer.
 3. Store notary credentials once:
    xcrun notarytool store-credentials audio-tools-notary
-4. Re-run: AUDIO_TOOLS_VERSION=0.1.2 ./packaging/make_pkg.sh
+4. Re-run: AUDIO_TOOLS_VERSION=0.1.3 ./packaging/make_pkg.sh
 
 Optional env: AUDIO_TOOLS_SIGN_APPLICATION, AUDIO_TOOLS_SIGN_INSTALLER,
 AUDIO_TOOLS_NOTARY_PROFILE, AUDIO_TOOLS_REQUIRE_NOTARIZE=1

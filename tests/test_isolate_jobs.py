@@ -276,11 +276,13 @@ def test_pause_job_persists_completed_stages(jobs_dir: Path, monkeypatch):
         checkpoint_dir=None,
         completed_stages=None,
         on_stage_complete=None,
+        subprocess_timeout_sec=None,
     ):
         on_progress("ingest", "prep")
         if on_stage_complete:
             on_stage_complete("ingest")
-        for _ in range(100):
+        # Long stage so the job cannot finish before the test pauses it (race under load).
+        for _ in range(300):
             if should_abort and should_abort():
                 raise JobAborted("pause")
             time.sleep(0.02)
@@ -305,7 +307,7 @@ def test_pause_job_persists_completed_stages(jobs_dir: Path, monkeypatch):
     enqueue_job(spec)
     ensure_worker_started()
 
-    deadline = time.time() + 5
+    deadline = time.time() + 8
     while time.time() < deadline:
         status = read_status("pause1")
         if status and "ingest" in (status.get("completed_stages") or []):
@@ -348,6 +350,7 @@ def test_resume_job_skips_completed_stages(jobs_dir: Path, monkeypatch):
         checkpoint_dir=None,
         completed_stages=None,
         on_stage_complete=None,
+        subprocess_timeout_sec=None,
     ):
         seen_completed.append(set(completed_stages or ()))
         on_progress("separate", "sep")

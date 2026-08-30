@@ -132,6 +132,7 @@ class StemMixerEngine {
     onProgress: (loaded: number, total: number, message: string) => void
   ): Promise<{ errors: string[] }> {
     await this.stopSources(false);
+    for (const gain of this.gains.values()) gain.disconnect();
     this.buffers.clear();
     this.gains.clear();
     this.sources.clear();

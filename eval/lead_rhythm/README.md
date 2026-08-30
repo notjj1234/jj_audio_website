@@ -2,7 +2,7 @@
 
 Use short, rights-cleared multitracks (local only; do not commit large audio). Place clips under `clips/` (gitignored).
 
-**Research decisions (keep stage-1 `htdemucs_6s`; second-stage lead/rhythm path):** see [RESEARCH.md](RESEARCH.md).
+**Research decisions (keep stage-1 `htdemucs_6s`; second-stage lead/rhythm path):** see [RESEARCH.md](RESEARCH.md) (local-only, gitignored).
 
 ## Stage 1 — guitar stem quality (from the mix)
 
@@ -196,7 +196,7 @@ python eval/lead_rhythm/score_lead_rhythm.py --no-basic-pitch --note "synthetic 
 - **Always emit** `lead_guitar` + `rhythm_guitar` whenever a Demucs `guitar` stem exists (best-effort). Low-confidence / forced emits set `forced_emit` / `low_confidence` in diagnostics; labels may be inaccurate.
 - Long HPSS/register tails are **silence-padded**, never duplicated mono into both streams.
 - Quality presets affect Demucs only; Lead/Rhythm post-process is independent of quality.
-- Threshold changes require a new row in [RESULTS.md](RESULTS.md).
+- Threshold changes require a new row in [RESULTS.md](RESULTS.md) (local-only, gitignored).
 - Demucs itself never produces two guitar stems — Lead/Rhythm is always post-process on the single `guitar` stem.
 
 ### Mild-pan pitch-divergence rescue (2026-07-17, new)
@@ -251,7 +251,7 @@ python eval/lead_rhythm/score_lead_rhythm.py --emit-mode best_effort --note "leg
 make eval-lead-rhythm
 ```
 
-Metrics written to `RESULTS.md`:
+Metrics written to `RESULTS.md` (local-only, gitignored):
 
 - **Split precision** — among emits, fraction with `gt_parts=2`
 - **Split recall** — among `gt_parts=2`, fraction emitted (also by `mix_type`)

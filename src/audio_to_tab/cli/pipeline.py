@@ -22,7 +22,12 @@ def main() -> None:
     parser.add_argument("--no-separate", action="store_true", help="Skip Demucs stem separation (solo guitar)")
     parser.add_argument("--quality", choices=["fast", "balanced", "high", "extreme"], default="balanced")
     parser.add_argument("--device", default="cpu", help="Demucs device: cpu or cuda")
-    parser.add_argument("--max-duration", type=float, default=90.0, help="Max seconds to process")
+    parser.add_argument(
+        "--max-duration",
+        type=float,
+        default=0.0,
+        help="Length in seconds of the section to process (0 = through end of file, default)",
+    )
     parser.add_argument("--title", default="Guitar Tab")
     parser.add_argument("--tempo", type=float, default=None, help="Override detected tempo (BPM)")
     parser.add_argument("--onset-threshold", type=float, default=0.5)
@@ -41,7 +46,7 @@ def main() -> None:
         demucs_device=args.device,
         onset_threshold=args.onset_threshold,
         frame_threshold=args.frame_threshold,
-        max_duration_sec=args.max_duration,
+        max_duration_sec=None if args.max_duration <= 0 else args.max_duration,
         title=args.title,
         tempo_bpm_override=args.tempo,
         mix_aware_filtering=not args.no_mix_aware,

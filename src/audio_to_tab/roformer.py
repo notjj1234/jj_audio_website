@@ -28,6 +28,7 @@ import os
 import shutil
 import urllib.error
 import urllib.request
+from contextlib import suppress
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -207,7 +208,7 @@ def _canonical_stem_name(path: Path) -> str | None:
     for name in _CANONICAL_STEMS:
         if stem == name:
             return name
-        if stem.endswith(f"_{name}") or stem.endswith(f"-{name}"):
+        if stem.endswith((f"_{name}", f"-{name}")):
             return name
         if f"({name})" in stem or f"_{name}_" in stem:
             return name
@@ -605,10 +606,8 @@ def _run_via_audio_separator(
         # audio-separator looks for a yaml next to the checkpoint.
         sidecar = ckpt_path.with_suffix(".yaml")
         if sidecar.resolve() != yaml_path.resolve():
-            try:
+            with suppress(OSError):
                 shutil.copy2(yaml_path, sidecar)
-            except OSError:
-                pass
     kwargs: dict = {
         "output_dir": str(dest_dir),
         "output_format": "WAV",
@@ -691,32 +690,35 @@ def refine_guitar_from_stems(
 
     work = Path(work_dir) if work_dir is not None else Path(guitar).parent / "_guitar_refine"
     work.mkdir(parents=True, exist_ok=True)
-    other = artifacts.get("other")
-    source = Path(guitar)
-    if other is not None and Path(other).is_file():
-        mixed = work / "refine_input.wav"
-        mix_stems_to_wav(
-            {"guitar": Path(guitar), "other": Path(other)},
-            output_path=mixed,
-            gains={"guitar": 1.0, "other": REFINE_OTHER_MIX_GAIN},
-        )
-        source = mixed
+    try:
+        other = artifacts.get("other")
+        source = Path(guitar)
+        if other is not None and Path(other).is_file():
+            mixed = work / "refine_input.wav"
+            mix_stems_to_wav(
+                {"guitar": Path(guitar), "other": Path(other)},
+                output_path=mixed,
+                gains={"guitar": 1.0, "other": REFINE_OTHER_MIX_GAIN},
+            )
+            source = mixed
 
-    refined = run_melband_guitar(source, work / "out", device=device)
-    new_guitar = refined.get("guitar")
-    if new_guitar is not None and Path(new_guitar).is_file():
-        shutil.copy2(new_guitar, guitar)
-        artifacts["guitar"] = Path(guitar)
-    new_other = refined.get("other")
-    if (
-        new_other is not None
-        and Path(new_other).is_file()
-        and other is not None
-        and Path(other).is_file()
-    ):
-        shutil.copy2(new_other, other)
-        artifacts["other"] = Path(other)
-    return artifacts
+        refined = run_melband_guitar(source, work / "out", device=device)
+        new_guitar = refined.get("guitar")
+        if new_guitar is not None and Path(new_guitar).is_file():
+            shutil.copy2(new_guitar, guitar)
+            artifacts["guitar"] = Path(guitar)
+        new_other = refined.get("other")
+        if (
+            new_other is not None
+            and Path(new_other).is_file()
+            and other is not None
+            and Path(other).is_file()
+        ):
+            shutil.copy2(new_other, other)
+            artifacts["other"] = Path(other)
+        return artifacts
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def run_roformer_model(

@@ -7,16 +7,19 @@ import importlib.util
 import logging
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
-from audio_to_tab.subprocess_util import subprocess_run_kwargs
+from audio_to_tab.ingest import temporary_output_path
+from audio_to_tab.subprocess_util import run_process, subprocess_run_kwargs
 
 logger = logging.getLogger(__name__)
+
+_USER_AGENT = "audio-to-tab-pdf/1.0 (guitar isolation; urllib)"
 
 GUITAR_FT_CHECKPOINT_ID = "htdemucs_6s_guitar_ft"
 GUITAR_FT_HF_REPO = "adityalakhani/htdemucs-6s-guitar-ft"
@@ -28,9 +31,8 @@ GUITAR_FT_URL = (
 GUITAR_FT_SHA256 = "4fde369e41582ba5c2759b6ab926a44af467c64d4566bf914374ab267b19260e"
 SUPPORTED_GUITAR_CHECKPOINTS = frozenset({GUITAR_FT_CHECKPOINT_ID})
 GUITAR_FT_CACHE_HINT = (
-    "guitar-ft weights are not in the torch cache; using stock htdemucs_6s. "
-    "Download once from Audio Isolation Advanced "
-    "(or audio-isolate --guitar-checkpoint htdemucs_6s_guitar_ft)."
+    "Download the ~330 MB weights once from Audio Isolation Advanced "
+    "(or run audio-isolate --guitar-checkpoint htdemucs_6s_guitar_ft) and retry."
 )
 
 
@@ -54,15 +56,38 @@ def guitar_ft_weights_path() -> Path:
     return _torch_cache_dir() / "checkpoints" / GUITAR_FT_FILENAME
 
 
+def _guitar_ft_digest_sidecar(path: Path) -> Path:
+    """Sidecar file so re-checks skip re-hashing the 330 MB checkpoint."""
+    return path.with_name(path.name + ".sha256")
+
+
+def _write_guitar_ft_digest_sidecar(path: Path) -> None:
+    try:
+        _guitar_ft_digest_sidecar(path).write_text(
+            GUITAR_FT_SHA256 + "\n", encoding="utf-8"
+        )
+    except OSError:
+        logger.debug("Could not write guitar-ft digest sidecar for %s", path)
+
+
 def guitar_ft_weights_cached() -> bool:
     """True when pinned guitar-ft weights are already on disk. Does not download."""
     path = guitar_ft_weights_path()
     if not path.is_file():
         return False
+    sidecar = _guitar_ft_digest_sidecar(path)
+    if sidecar.is_file() and sidecar.stat().st_mtime >= path.stat().st_mtime:
+        try:
+            return sidecar.read_text(encoding="utf-8").strip() == GUITAR_FT_SHA256
+        except OSError:
+            pass
     try:
-        return guitar_ft_weights_sha256(path) == GUITAR_FT_SHA256
+        if guitar_ft_weights_sha256(path) != GUITAR_FT_SHA256:
+            return False
     except OSError:
         return False
+    _write_guitar_ft_digest_sidecar(path)
+    return True
 
 
 def guitar_ft_weights_sha256(path: Path | None = None) -> str:
@@ -86,6 +111,7 @@ def verify_guitar_ft_weights(path: Path | None = None) -> Path:
         raise RuntimeError(
             f"guitar-ft weights hash mismatch (got {digest}, expected {GUITAR_FT_SHA256})"
         )
+    _write_guitar_ft_digest_sidecar(target)
     return target
 
 
@@ -100,15 +126,32 @@ def download_guitar_ft_weights(*, force: bool = False) -> Path:
             path.unlink(missing_ok=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".part")
+    digest = hashlib.sha256()
     try:
-        with urllib.request.urlopen(GUITAR_FT_URL, timeout=120) as resp:
-            data = resp.read()
-        tmp.write_bytes(data)
+        req = urllib.request.Request(
+            GUITAR_FT_URL, headers={"User-Agent": _USER_AGENT}
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp, tmp.open("wb") as out:
+            while True:
+                chunk = resp.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                digest.update(chunk)
+        if digest.hexdigest() != GUITAR_FT_SHA256:
+            raise RuntimeError(
+                f"guitar-ft download hash mismatch "
+                f"(got {digest.hexdigest()}, expected {GUITAR_FT_SHA256})"
+            )
         tmp.replace(path)
+    except RuntimeError:
+        tmp.unlink(missing_ok=True)
+        raise
     except (urllib.error.URLError, OSError) as exc:
-        if tmp.exists():
-            tmp.unlink(missing_ok=True)
-        raise RuntimeError(f"Failed to download guitar-ft weights from {GUITAR_FT_URL}") from exc
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"Failed to download guitar-ft weights from {GUITAR_FT_URL}"
+        ) from exc
     return verify_guitar_ft_weights(path)
 
 
@@ -209,17 +252,25 @@ def run_demucs_guitar_ft_inprocess(
     track_name = audio_path.stem
     out_dir = output_root / "htdemucs_6s" / track_name
     out_dir.mkdir(parents=True, exist_ok=True)
-    for source, name in zip(sources, model.sources):
+    for source, name in zip(sources, model.sources, strict=True):
         save_audio(source, str(out_dir / f"{name}.wav"), samplerate=model.samplerate)
 
 
-def run_demucs(demucs_args: list[str]) -> None:
+def run_demucs(
+    demucs_args: list[str],
+    *,
+    should_abort: Callable[[], bool] | None = None,
+    timeout_sec: float | None = None,
+) -> None:
     """
     Run Demucs with CLI-style args (everything after ``python -m demucs``).
 
     When frozen (PyInstaller), invokes ``demucs.separate.main`` in-process because
     ``sys.executable`` is the app binary and cannot run ``-m demucs``.
     Otherwise uses a subprocess so tests and local runs keep the same isolation.
+
+    ``should_abort`` / ``timeout_sec`` only apply to the subprocess path: the
+    frozen in-process run shares the caller's thread and cannot be terminated.
     """
     if getattr(sys, "frozen", False):
         from demucs.separate import main as demucs_main
@@ -233,7 +284,14 @@ def run_demucs(demucs_args: list[str]) -> None:
         return
 
     cmd = [sys.executable, "-m", "demucs", *demucs_args]
-    result = subprocess.run(cmd, capture_output=True, text=True, **subprocess_run_kwargs())
+    result = run_process(
+        cmd,
+        should_abort=should_abort,
+        timeout_sec=timeout_sec,
+        capture_output=True,
+        text=True,
+        **subprocess_run_kwargs(),
+    )
     if result.returncode != 0:
         raise RuntimeError(f"Demucs failed: {result.stderr or result.stdout}")
 
@@ -256,11 +314,10 @@ def _maybe_refine_guitar_stem(
     )
 
     if not is_guitar_refine_available():
-        logger.warning(
-            "guitar refine requested but no RoFormer extra is installed; skipping. %s",
-            ROFORMER_INSTALL_HINT,
+        raise RuntimeError(
+            "Guitar refine was requested but no RoFormer extra is installed. "
+            f"{ROFORMER_INSTALL_HINT}"
         )
-        return
     residual = residual_path if residual_path is not None and residual_path.is_file() else None
     try:
         from audio_to_tab.isolate import ensure_guitar_prerefine_backup, save_guitar_refined_backup
@@ -323,7 +380,11 @@ def separate_guitar_stem(
     fold_other_mode: str | None = None,
     sub_bass_debleed: bool = False,
     low_end_restore_db: float = 0.0,
+    bleed_gate: bool = False,
+    adaptive_fold_gain: bool = False,
+    guitar_ensemble: bool = False,
     recovery_diagnostics_path: Path | None = None,
+    bleed_gate_diagnostics_path: Path | None = None,
 ) -> Path:
     """
     Extract guitar stem using Demucs CLI (or an opt-in RoFormer backend).
@@ -331,34 +392,53 @@ def separate_guitar_stem(
     quality presets mirror TabGrabber: fast | balanced | high | extreme.
     ``demucs_segment`` / ``demucs_jobs`` match the isolate path so this is not
     a full-track tensor (isolate defaults: segment 8s clamped per model, jobs 1).
-    ``fold_other_mode`` is accepted for API parity; the tab path does not fold.
+    ``fold_other_mode`` mixes the leftover ``other`` stem into the guitar stem
+    (full | best_effort | band_limited) instead of discarding it.
     """
-    del fold_other_mode  # tab path keeps guitar only; isolate handles fold.
-    from audio_to_tab.isolate import apply_guitar_low_end_recovery
-    from audio_to_tab.isolate import DEMUCS_MODELS, effective_demucs_segment
+    from audio_to_tab.isolate import (
+        DEMUCS_MODELS,
+        FOLD_OTHER_MODES,
+        apply_guitar_low_end_recovery,
+        effective_demucs_segment,
+    )
+    if fold_other_mode is not None and fold_other_mode not in FOLD_OTHER_MODES:
+        raise ValueError(
+            f"Unsupported fold_other_mode {fold_other_mode!r}. "
+            f"Choose from: {', '.join(FOLD_OTHER_MODES)}"
+        )
     from audio_to_tab.roformer import (
+        BS_ROFORMER_SW_ID,
         ROFORMER_INSTALL_HINT,
         ROFORMER_MODELS,
         collect_named_stems,
         is_roformer_backend_available,
         run_roformer_model,
     )
+    from audio_to_tab.scnet import (
+        SCNET_INSTALL_HINT,
+        SCNET_MODELS,
+        is_scnet_available,
+        run_scnet_model,
+    )
 
     src = Path(audio_path)
     if output_path is None:
-        out = Path(tempfile.mkstemp(suffix="_guitar.wav", prefix="stem_")[1])
+        out = temporary_output_path("stem_", "_guitar.wav")
     else:
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
 
     resolved_model = model
     if resolved_model in ROFORMER_MODELS and not is_roformer_backend_available():
-        logger.warning(
-            "RoFormer backend missing; falling back to htdemucs_6s. %s",
-            ROFORMER_INSTALL_HINT,
+        raise RuntimeError(
+            f"Model {resolved_model!r} needs the optional RoFormer backend, which "
+            f"is not installed. {ROFORMER_INSTALL_HINT}"
         )
-        resolved_model = "htdemucs_6s"
-        guitar_refine = False
+    if resolved_model in SCNET_MODELS and not is_scnet_available():
+        raise RuntimeError(
+            f"Model {resolved_model!r} needs the optional SCNet runtime, which "
+            f"is not installed. {SCNET_INSTALL_HINT}"
+        )
 
     def _apply_low_end_recovery(stems: dict[str, Path]) -> None:
         if not sub_bass_debleed and not low_end_restore_db:
@@ -376,10 +456,77 @@ def separate_guitar_stem(
             if recovery_diagnostics_path is not None:
                 recovery.write_json(recovery_diagnostics_path)
 
+    def _maybe_fold_other(guitar_path: Path, other_path: Path | None) -> None:
+        if not fold_other_mode:
+            return
+        from audio_to_tab.isolate import apply_fold_other_into_guitar
+
+        apply_fold_other_into_guitar(
+            {"guitar": guitar_path, "other": other_path},
+            mode=fold_other_mode,
+            adaptive_gain=adaptive_fold_gain,
+        )
+
+    def _maybe_bleed_gate(guitar_path: Path, stems: dict[str, Path | None]) -> None:
+        if not bleed_gate:
+            return
+        from audio_to_tab.isolate import apply_bleed_gate
+
+        competitors = {
+            name: path for name, path in stems.items() if path is not None
+        }
+        diag = apply_bleed_gate(
+            guitar_path, guitar_path, competitor_paths=competitors
+        )
+        if diag.attempted and bleed_gate_diagnostics_path is not None:
+            diag.write_json(bleed_gate_diagnostics_path)
+
+    def _maybe_ensemble_guitar(guitar_path: Path, src: Path) -> None:
+        if not guitar_ensemble:
+            return
+        from audio_to_tab.isolate import blend_guitar_stems
+
+        if not is_roformer_backend_available():
+            logger.warning(
+                "guitar ensemble requested but the RoFormer backend is not installed; "
+                "keeping the primary Demucs guitar stem. %s",
+                ROFORMER_INSTALL_HINT,
+            )
+            return
+        with tempfile.TemporaryDirectory() as ens_tmp:
+            ens_out = Path(ens_tmp)
+            try:
+                run_roformer_model(
+                    src, ens_out, model=BS_ROFORMER_SW_ID, device=device
+                )
+            except Exception as exc:
+                logger.warning(
+                    "guitar ensemble secondary separation failed; "
+                    "keeping the primary guitar stem: %s",
+                    exc,
+                )
+                return
+            secondary = collect_named_stems(ens_out, ("guitar",))
+            secondary_path = secondary.get("guitar")
+            if secondary_path is None:
+                logger.warning(
+                    "guitar ensemble secondary separation produced no guitar stem; "
+                    "keeping the primary guitar stem"
+                )
+                return
+            diag = blend_guitar_stems(
+                guitar_path, secondary_path, guitar_path
+            )
+            if diag.attempted:
+                logger.debug("guitar ensemble: %s", diag.reason)
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        if resolved_model in ROFORMER_MODELS:
-            run_roformer_model(src, tmp_path, model=resolved_model, device=device)
+        if resolved_model in ROFORMER_MODELS or resolved_model in SCNET_MODELS:
+            if resolved_model in SCNET_MODELS:
+                run_scnet_model(src, tmp_path, device=device)
+            else:
+                run_roformer_model(src, tmp_path, model=resolved_model, device=device)
             found = collect_named_stems(tmp_path, ("guitar", "other", "bass", "drums"))
             if "guitar" not in found:
                 raise FileNotFoundError(
@@ -393,6 +540,8 @@ def separate_guitar_stem(
                 guitar_refine=guitar_refine,
                 model=resolved_model,
             )
+            _maybe_fold_other(out, found.get("other"))
+            _maybe_bleed_gate(out, found)
             _apply_low_end_recovery(found)
             return out
 
@@ -410,8 +559,11 @@ def separate_guitar_stem(
             and resolved_model == "htdemucs_6s"
         )
         if want_guitar_ft and not guitar_ft_weights_cached():
-            logger.warning(GUITAR_FT_CACHE_HINT)
-        elif want_guitar_ft:
+            raise RuntimeError(
+                "Guitar-FT was requested but its weights are not in the torch "
+                f"cache; not falling back to stock htdemucs_6s. {GUITAR_FT_CACHE_HINT}"
+            )
+        if want_guitar_ft:
             try:
                 run_demucs_guitar_ft_inprocess(
                     src,
@@ -423,9 +575,9 @@ def separate_guitar_stem(
                 )
                 used_guitar_ft = True
             except Exception as exc:
-                logger.warning(
-                    "guitar-ft separation failed; falling back to stock 6s: %s", exc
-                )
+                raise RuntimeError(
+                    f"Guitar-FT separation failed; not falling back to stock: {exc}"
+                ) from exc
 
         if not used_guitar_ft:
             _run_demucs_guitar_cli(
@@ -448,6 +600,7 @@ def separate_guitar_stem(
         bass_files = list(tmp_path.rglob("bass.wav"))
         drum_files = list(tmp_path.rglob("drums.wav"))
         shutil.copy2(guitar_files[0], out)
+        _maybe_ensemble_guitar(out, src)
         _maybe_refine_guitar_stem(
             out,
             other_files[0] if other_files else None,
@@ -455,12 +608,14 @@ def separate_guitar_stem(
             guitar_refine=guitar_refine,
             model=resolved_model,
         )
+        _maybe_fold_other(out, other_files[0] if other_files else None)
         stem_refs = {
             "guitar": guitar_files[0],
             "other": other_files[0] if other_files else None,
             "bass": bass_files[0] if bass_files else None,
             "drums": drum_files[0] if drum_files else None,
         }
+        _maybe_bleed_gate(out, stem_refs)
         _apply_low_end_recovery({k: v for k, v in stem_refs.items() if v is not None})
 
     return out

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 
 from audio_to_tab.ingest import normalize_audio
@@ -48,9 +49,7 @@ def transcribe_audio(
         pm.write(str(output_path))
 
     if normalize and work_audio != audio_path and work_audio.exists():
-        try:
+        with suppress(OSError):
             work_audio.unlink()
-        except OSError:
-            pass
 
     return output_path

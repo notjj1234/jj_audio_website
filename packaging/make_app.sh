@@ -39,19 +39,21 @@ else
   exit 1
 fi
 
-APP_VERSION="${AUDIO_TOOLS_VERSION:-0.1.2}"
+APP_VERSION="${AUDIO_TOOLS_VERSION:-0.1.3}"
 APP_DIR="dist/AudioTools.app"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Frameworks" "$APP_DIR/Contents/Resources"
 
 # Refresh Streamlit sources so a stale PyInstaller freeze still ships current UI.
+# audio_tools.spec ships the entire ui/ tree, so copy every ui/**/*.py (not a
+# hand-picked subset) to keep frozen sources in sync.
 if [[ -d dist/AudioTools/_internal/ui ]]; then
-  if [[ -f ui/pages/isolate.py ]]; then
-    ditto --norsrc --noextattr --noqtn ui/pages/isolate.py dist/AudioTools/_internal/ui/pages/isolate.py
-  fi
-  if [[ -f ui/media.py ]]; then
-    ditto --norsrc --noextattr --noqtn ui/media.py dist/AudioTools/_internal/ui/media.py
-  fi
+  while IFS= read -r -d '' src; do
+    rel="${src#ui/}"
+    dst="dist/AudioTools/_internal/ui/$rel"
+    mkdir -p "$(dirname "$dst")"
+    ditto --norsrc --noextattr --noqtn "$src" "$dst"
+  done < <(find ui -type f -name '*.py' -print0)
 fi
 
 # ditto --noqtn/--noextattr drops downloaded-file quarantine so it is not baked in.

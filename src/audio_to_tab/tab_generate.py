@@ -6,7 +6,12 @@ from dataclasses import dataclass, field
 
 import pretty_midi
 
-from audio_to_tab.tuning import FretPosition, STANDARD_TUNING_MIDI, STANDARD_TUNING_NAMES, positions_for_pitch
+from audio_to_tab.tuning import (
+    STANDARD_TUNING_MIDI,
+    STANDARD_TUNING_NAMES,
+    FretPosition,
+    positions_for_pitch,
+)
 
 
 @dataclass
@@ -140,7 +145,7 @@ def _pick_chord_positions(
         for pos in candidates_per_pitch[idx]:
             if pos.string in used_strings:
                 continue
-            trial_frets = frets + [pos.fret]
+            trial_frets = [*frets, pos.fret]
             if trial_frets and max(trial_frets) - min(trial_frets) > max_fret_span:
                 continue
             used_strings.add(pos.string)
@@ -243,15 +248,20 @@ def midi_to_tab(
     )
 
 
-def tab_to_ascii(doc: TabDocument, chars_per_beat: int = 16, beats_per_measure: int | None = None) -> str:
-    """Render tab document as ASCII text with note durations."""
+def tab_to_ascii(doc: TabDocument, chars_per_beat: int = 4, beats_per_measure: int | None = None) -> str:
+    """Render tab document as ASCII text with note durations.
+
+    ``chars_per_beat`` is ASCII columns per quarter-note beat (default 4 => one
+    column per 16th note); the measure width follows the meter.
+    """
     if not doc.events:
         return "No notes detected.\n"
 
     bpm = beats_per_measure if beats_per_measure is not None else doc.beats_per_measure
-    sec_per_char = 60.0 / doc.tempo_bpm / (chars_per_beat / bpm)
+    chars_per_measure = chars_per_beat * bpm
+    sec_per_char = 60.0 / doc.tempo_bpm / chars_per_beat
     end_time = max((n.end for e in doc.events for n in e.notes), default=1.0)
-    total_chars = max(int(end_time / sec_per_char) + chars_per_beat, chars_per_beat * bpm)
+    total_chars = max(int(end_time / sec_per_char) + chars_per_beat, chars_per_measure)
 
     lines: list[list[str]] = [["-" for _ in range(total_chars)] for _ in range(6)]
     prefixes = [f"{name}|" for name in doc.tuning_names]

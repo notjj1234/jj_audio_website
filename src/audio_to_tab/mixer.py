@@ -103,10 +103,7 @@ def effective_linear_gains(
     for name in stem_names:
         db = float(volumes.get(name, DB_DEFAULT))
         db = max(DB_MIN, min(DB_MAX, db))
-        if any_solo:
-            audible = soloed.get(name, False)
-        else:
-            audible = not muted.get(name, False)
+        audible = soloed.get(name, False) if any_solo else not muted.get(name, False)
         gains[name] = (db_to_linear(db) * master_lin) if audible else 0.0
     return gains
 
@@ -193,7 +190,7 @@ def mix_stems_to_wav(
             raise ValueError("No audible stems selected for mix")
         names = list(audible)
         length_names = names
-        gains = {n: 1.0 for n in names}
+        gains = dict.fromkeys(names, 1.0)
 
     mixed: np.ndarray | None = None
     sample_rate: int | None = None

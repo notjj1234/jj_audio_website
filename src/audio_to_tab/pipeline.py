@@ -4,20 +4,23 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from audio_to_tab.ingest import download_youtube_audio, normalize_audio
 from audio_to_tab.isolate import analyze_guitar_stem_quality
-from audio_to_tab.midi_cleanup import CleanupConfig, mix_aware_cleanup_config, solo_guitar_cleanup_config
+from audio_to_tab.midi_cleanup import (
+    CleanupConfig,
+    mix_aware_cleanup_config,
+    solo_guitar_cleanup_config,
+)
 from audio_to_tab.pdf_render import render_structured_tab_pdf
 from audio_to_tab.rhythm import quantize_tab_document
 from audio_to_tab.separate import separate_guitar_stem
 from audio_to_tab.tab_generate import midi_to_tab, tab_to_ascii
 from audio_to_tab.tempo import resolve_tempo
 from audio_to_tab.transcribe import transcribe_audio
-
 
 YOUTUBE_DISCLAIMER = (
     "YouTube audio download may violate YouTube Terms of Service. "
@@ -43,6 +46,9 @@ class PipelineConfig:
     fold_other_mode: str | None = None
     low_end_restore_db: float = 0.0
     sub_bass_debleed: bool = False
+    bleed_gate: bool = False
+    adaptive_fold_gain: bool = False
+    guitar_ensemble: bool = False
     mix_aware_filtering: bool = True
     onset_threshold: float = 0.5
     frame_threshold: float = 0.3
@@ -51,7 +57,7 @@ class PipelineConfig:
     min_duration_sec: float = 0.05
     quantize_sec: float | None = 0.05
     max_notes_per_onset: int = 6
-    max_duration_sec: float | None = 90.0
+    max_duration_sec: float | None = None
     title: str = "Guitar Tab"
     tempo_bpm_override: float | None = None
     beats_per_measure: int = 4
@@ -68,13 +74,15 @@ def _separate_progress_label(cfg: PipelineConfig) -> str:
     model = (cfg.model or "htdemucs_6s").lower()
     if model in {"bs_roformer_sw", "melband_roformer_guitar"}:
         return "Isolating guitar stem with BS-RoFormer"
+    if model in {"guitar_scnet"}:
+        return "Isolating guitar stem with SCNet"
     if cfg.guitar_checkpoint:
         return "Isolating guitar stem with guitar-ft Demucs"
     return "Isolating guitar stem"
 
 
 def _trim_audio(input_path: Path, max_duration_sec: float | None) -> Path:
-    if max_duration_sec is None:
+    if max_duration_sec is None or max_duration_sec <= 0:
         return input_path
     import subprocess
 
@@ -84,13 +92,15 @@ def _trim_audio(input_path: Path, max_duration_sec: float | None) -> Path:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return input_path
-    subprocess.run(
+    result = subprocess.run(
         [ffmpeg, "-y", "-i", str(input_path), "-t", str(max_duration_sec), str(out)],
         capture_output=True,
         check=False,
         **subprocess_run_kwargs(),
     )
-    return out if out.exists() else input_path
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg trim failed: {result.stderr or result.stdout}")
+    return out
 
 
 def _cleanup_config_for_pipeline(cfg: PipelineConfig) -> CleanupConfig:
@@ -172,7 +182,15 @@ def run_pipeline(
                     fold_other_mode=cfg.fold_other_mode,
                     sub_bass_debleed=cfg.sub_bass_debleed,
                     low_end_restore_db=cfg.low_end_restore_db,
+                    bleed_gate=cfg.bleed_gate,
+                    adaptive_fold_gain=cfg.adaptive_fold_gain,
+                    guitar_ensemble=cfg.guitar_ensemble,
                     recovery_diagnostics_path=recovery_diag_path,
+                    bleed_gate_diagnostics_path=(
+                        output_dir / "bleed_gate_diagnostics.json"
+                        if cfg.bleed_gate
+                        else None
+                    ),
                 )
                 quality_diag = analyze_guitar_stem_quality(stem_path)
                 quality_diag.write_json(output_dir / "guitar_stem_quality.json")

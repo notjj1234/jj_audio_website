@@ -59,6 +59,7 @@ docs/oracle-free-memory-spike.md
 # Editor / local tooling
 .vscode/
 .pytest_cache/
+.ruff_cache/
 packaging/_diag_*
 .streamlit/credentials.toml
 

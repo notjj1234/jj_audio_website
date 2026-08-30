@@ -49,7 +49,7 @@ def test_run_demucs_subprocess_when_not_frozen(monkeypatch):
         seen.append(list(cmd))
         return MagicMock(returncode=0, stderr="", stdout="")
 
-    with patch("audio_to_tab.separate.subprocess.run", side_effect=fake_run):
+    with patch("audio_to_tab.separate.run_process", side_effect=fake_run):
         run_demucs(["-n", "htdemucs_6s", "-d", "cpu", "song.wav"])
 
     assert len(seen) == 1
@@ -65,7 +65,7 @@ def test_run_demucs_inprocess_when_frozen(monkeypatch):
         called.append(list(opts or []))
 
     with patch("demucs.separate.main", side_effect=fake_main):
-        with patch("audio_to_tab.separate.subprocess.run") as sub_run:
+        with patch("audio_to_tab.separate.run_process") as sub_run:
             run_demucs(["-n", "htdemucs_6s", "-d", "cpu", "song.wav"])
             sub_run.assert_not_called()
 
@@ -936,16 +936,16 @@ def test_desktop_app_version_is_0_1_1_not_website_package(monkeypatch):
     from audio_to_tab import __version__
 
     monkeypatch.delenv("AUDIO_TOOLS_EDITION", raising=False)
-    assert __version__ == "0.1.2"
-    assert common.desktop_app_version() == "0.1.2"
+    assert __version__ == "0.1.3"
+    assert common.desktop_app_version() == "0.1.3"
     pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "1.0.0"' in pyproject
+    assert 'version = "0.1.3"' in pyproject
     blurb = common.desktop_demo_blurb()
-    assert "Demo 0.1.2 (CPU)" in blurb
+    assert "Demo 0.1.3 (CPU)" in blurb
     assert "this PC" in blurb
     assert "github" not in blurb.lower()
     assert "ATT_SECRET" not in blurb
-    cuda_blurb = common.desktop_demo_blurb("0.1.2", "cuda")
+    cuda_blurb = common.desktop_demo_blurb("0.1.3", "cuda")
     assert "NVIDIA CUDA" in cuda_blurb
 
 
@@ -953,7 +953,7 @@ def test_inno_and_installer_script_use_versioned_filename():
     root = Path(__file__).resolve().parents[1]
     iss = (root / "packaging" / "AudioTools.iss").read_text(encoding="utf-8")
     assert "OutputBaseFilename=AudioTools-{#AppVersion}-windows-x64-{#Flavor}-setup" in iss
-    assert '#define AppVersion "0.1.2"' in iss
+    assert '#define AppVersion "0.1.3"' in iss
     assert "VersionInfoVersion={#AppVersion}" in iss
     assert "VersionInfoProductVersion={#AppVersion}" in iss
     assert "{A7C3E8F1-4B2D-4E9A-9C1F-8D6B5A2E0F73}" in iss

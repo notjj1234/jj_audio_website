@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 
 from audio_to_tab.pdf_render import render_structured_tab_pdf, render_tab_pdf
-from audio_to_tab.tab_generate import midi_to_tab, tab_to_ascii
+from audio_to_tab.tab_generate import midi_to_tab
 
 
 def main() -> None:

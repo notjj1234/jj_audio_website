@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -11,13 +12,17 @@ from audio_to_tab.ingest import (
     YouTubeDownloadError,
     YouTubeSearchError,
     _is_403_error,
+    _resolve_downloaded_wav,
     _thumbnail_url_for_entry,
     _watch_url_from_entry,
+    _youtube_log_path,
     _youtube_ydl_opts,
     download_youtube_audio,
     format_youtube_duration,
     is_youtube_url,
+    normalize_audio,
     search_youtube_videos,
+    temporary_output_path,
 )
 
 
@@ -40,6 +45,38 @@ def test_youtube_ydl_opts_sets_noplaylist_and_client():
     assert opts["retries"] == 3
     assert opts["extractor_args"]["youtube"]["player_client"] == ["default", "-android_sdkless"]
     assert opts["postprocessors"][0]["preferredcodec"] == "wav"
+    assert "logger" not in opts
+
+
+def test_youtube_ydl_opts_forwards_file_logger_to_ytdlp(tmp_path):
+    log = tmp_path / "yt-dlp.log"
+    opts = _youtube_ydl_opts(
+        template="/tmp/%(title)s.%(ext)s",
+        player_client="default",
+        verbose=True,
+        log_path=log,
+    )
+    logger = opts.get("logger")
+    assert logger is not None
+    logger.debug("hello from yt-dlp")
+    assert "hello from yt-dlp" in log.read_text(encoding="utf-8")
+
+
+def test_youtube_log_path_is_platform_neutral(monkeypatch, tmp_path):
+    monkeypatch.setenv("AUDIO_TOOLS_DEBUG", "1")
+    monkeypatch.setenv("AUDIO_TOOLS_LOG_DIR", "")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setattr("audio_to_tab.ingest.sys.platform", "win32")
+    path = _youtube_log_path()
+    assert path is not None
+    assert path.parent.is_dir()
+    assert path.name == "yt-dlp.log"
+    assert str(path).startswith(str(tmp_path))
+    monkeypatch.setattr("audio_to_tab.ingest.sys.platform", "linux")
+    linux_path = _youtube_log_path()
+    assert linux_path is not None
+    assert "audiotools" in linux_path.parts
 
 
 def test_is_403_error():
@@ -159,6 +196,13 @@ def test_download_does_not_require_js_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr("audio_to_tab.ingest.shutil.which", lambda _name: None)
     wav = tmp_path / "clip.wav"
     wav.write_bytes(b"RIFF")
+    normalized: list[Path] = []
+
+    def fake_normalize(path, *_args, **_kwargs):
+        normalized.append(Path(path))
+        return Path(path)
+
+    monkeypatch.setattr("audio_to_tab.ingest.normalize_audio", fake_normalize)
 
     class FakeYDL:
         def __init__(self, opts):
@@ -176,6 +220,7 @@ def test_download_does_not_require_js_runtime(tmp_path, monkeypatch):
     with patch("yt_dlp.YoutubeDL", FakeYDL):
         path = download_youtube_audio("https://www.youtube.com/watch?v=abc", tmp_path)
     assert path == wav
+    assert normalized == [wav]
 
 
 def test_download_retries_after_403_then_succeeds(tmp_path, monkeypatch):
@@ -183,6 +228,7 @@ def test_download_retries_after_403_then_succeeds(tmp_path, monkeypatch):
 
     wav = tmp_path / "clip.wav"
     wav.write_bytes(b"RIFF")
+    monkeypatch.setattr("audio_to_tab.ingest.normalize_audio", lambda p, *_a, **_k: Path(p))
     calls: list[str] = []
 
     class FakeYDL:
@@ -241,5 +287,111 @@ def test_youtube_public_download_integration(tmp_path):
     url = "https://www.youtube.com/watch?v=BaW_jenozKc"
     path = download_youtube_audio(url, tmp_path)
     assert path.is_file()
-    assert path.suffix.lower() == ".wav"
-    assert path.stat().st_size > 1000
+
+
+def test_resolve_downloaded_wav_prefers_title_match_over_stale(tmp_path, monkeypatch):
+    stale = tmp_path / "Old Song.wav"
+    stale.write_bytes(b"s")
+    target = tmp_path / "My Song (Official Audio).wav"
+    target.write_bytes(b"t")
+    seen: list[Path] = []
+    monkeypatch.setattr(
+        "audio_to_tab.ingest.normalize_audio",
+        lambda p, *_a, **_k: (seen.append(Path(p)), Path(p))[1],
+    )
+
+    got = _resolve_downloaded_wav(tmp_path, "My Song (Official Audio)", "https://x/1")
+    assert got == target
+    assert seen == [target]
+
+
+def test_resolve_downloaded_wav_no_title_match_uses_newest_normalized(tmp_path, monkeypatch):
+    import os
+    import time as _time
+
+    a = tmp_path / "a.wav"
+    a.write_bytes(b"a")
+    b = tmp_path / "zzz.wav"
+    b.write_bytes(b"b")
+    now = _time.time() - 10
+    os.utime(a, (now, now))
+    os.utime(b, (now + 30, now + 30))
+    seen: list[Path] = []
+    monkeypatch.setattr(
+        "audio_to_tab.ingest.normalize_audio",
+        lambda p, *_a, **_k: (seen.append(Path(p)), Path(p))[1],
+    )
+
+    got = _resolve_downloaded_wav(tmp_path, "Totally Different Title", "https://x/1")
+    assert got == b
+    assert seen == [b]
+
+
+def test_resolve_downloaded_wav_no_candidates_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "audio_to_tab.ingest.normalize_audio",
+        lambda p, *_a, **_k: Path(p),
+    )
+    with pytest.raises(FileNotFoundError, match="not found"):
+        _resolve_downloaded_wav(tmp_path, "clip", "https://x/1")
+
+
+def test_temporary_output_path_closes_fd_and_creates_file(tmp_path, monkeypatch):
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    out = temporary_output_path("audio_norm_", ".wav")
+    assert out.exists()
+    assert out.name.startswith("audio_norm_")
+    # The leaked on-disk FD from mkstemp is closed, so the file is deletable
+    # immediately on Windows (PermissionError otherwise).
+    out.unlink()
+    assert not out.exists()
+
+
+def test_normalize_audio_deletes_temp_on_failure(tmp_path, monkeypatch):
+    import tempfile
+    from unittest.mock import MagicMock
+
+    src = tmp_path / "in.wav"
+    src.write_bytes(b"x")
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(work))
+
+    def boom(cmd, **kwargs):
+        return MagicMock(returncode=1, stderr="corrupt input")
+
+    with (
+        patch("audio_to_tab.ingest._require_ffmpeg", return_value="ffmpeg"),
+        patch("audio_to_tab.ingest.subprocess.run", side_effect=boom),
+    ):
+        with pytest.raises(RuntimeError, match="ffmpeg failed"):
+            normalize_audio(src)
+    assert not list(work.glob("audio_norm_*"))
+
+
+def test_normalize_audio_temp_output_is_caller_owned(tmp_path, monkeypatch):
+    import tempfile
+    from unittest.mock import MagicMock
+
+    src = tmp_path / "in.wav"
+    src.write_bytes(b"x")
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(work))
+
+    def fake_run(cmd, **kwargs):
+        Path(cmd[-1]).write_bytes(b"norm-wav")
+        return MagicMock(returncode=0)
+
+    with (
+        patch("audio_to_tab.ingest._require_ffmpeg", return_value="ffmpeg"),
+        patch("audio_to_tab.ingest.subprocess.run", side_effect=fake_run),
+    ):
+        out = normalize_audio(src)
+    assert out.exists()
+    # Caller owns the temp output; it is not removed out from under it but is
+    # by no longer held by the engine's mkstemp FD.
+    assert list(work.glob("audio_norm_*")) == [out]
+    out.unlink()

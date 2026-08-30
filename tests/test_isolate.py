@@ -42,7 +42,7 @@ from audio_to_tab.subprocess_util import subprocess_run_kwargs
 # Pre-warm librosa's lazily-imported scipy submodules at collection time (not
 # inside a test). Some environments trigger a one-off scipy.ndimage import
 # chain that shells out via platform.win32_ver(); doing it here keeps that
-# away from tests below that mock audio_to_tab.separate.subprocess.run.
+# away from tests below that mock audio_to_tab.separate.run_process.
 import librosa  # noqa: E402
 
 librosa.stft(np.zeros(2048, dtype=np.float32))
@@ -69,7 +69,11 @@ def test_fold_other_into_guitar_mixes_and_drops_other(tmp_path: Path):
     assert "other" not in artifacts
     assert not other.exists()
     data, _sr = sf.read(str(guitar))
-    assert float(np.max(np.abs(data))) > 0.2
+    # guitar 0.1 + other 0.2 * FOLD_OTHER_MIX_GAIN(0.5) → 0.2 peak, which the
+    # int16 WAV write quantizes to ~0.19995; assert it clearly exceeds the
+    # guitar-only level (0.1) but stays under the 0.2 mix level.
+    peak = float(np.max(np.abs(data)))
+    assert 0.15 < peak <= 0.21, peak
 
 
 def test_fold_other_into_guitar_keeps_other_without_guitar(tmp_path: Path):
@@ -125,7 +129,7 @@ def test_separate_stems_emit_stems_drops_piano(tmp_path: Path):
         patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
         patch("audio_to_tab.isolate.normalize_audio", side_effect=fake_normalize),
         patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
-        patch("audio_to_tab.separate.subprocess.run", side_effect=fake_run),
+        patch("audio_to_tab.separate.run_process", side_effect=fake_run),
     ):
         artifacts = separate_stems(
             audio,
@@ -142,6 +146,52 @@ def test_separate_stems_emit_stems_drops_piano(tmp_path: Path):
     assert "piano" not in artifacts
     assert "other" not in artifacts
     assert not (out_dir / "piano.wav").exists()
+
+
+def test_separate_stems_recovery_blames_emit_policy_for_missing_bass(tmp_path: Path):
+    audio = tmp_path / "song.wav"
+    audio.write_bytes(b"fake-wav")
+    out_dir = tmp_path / "stems"
+
+    def fake_normalize(src, dest=None):
+        dest = Path(dest) if dest else tmp_path / "norm.wav"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"norm")
+        return dest
+
+    def fake_run(cmd, capture_output=True, text=True, **_kwargs):
+        demucs_out = Path(cmd[cmd.index("-o") + 1])
+        track_dir = demucs_out / "htdemucs_6s" / "normalized"
+        track_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("vocals", "drums", "bass", "piano"):
+            (track_dir / f"{name}.wav").write_bytes(b"stem-" + name.encode())
+        _write_silent_wav(track_dir / "other.wav")
+        sf.write(str(track_dir / "guitar.wav"), np.zeros((256, 2), dtype=np.float32), 44100)
+        return MagicMock(returncode=0, stderr="", stdout="")
+
+    with (
+        patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
+        patch("audio_to_tab.isolate.normalize_audio", side_effect=fake_normalize),
+        patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
+        patch("audio_to_tab.separate.run_process", side_effect=fake_run),
+    ):
+        artifacts = separate_stems(
+            audio,
+            out_dir,
+            IsolateConfig(
+                model="htdemucs_6s",
+                quality="fast",
+                max_duration_sec=15,
+                sub_bass_debleed=True,
+                emit_stems=("guitar",),
+            ),
+        )
+
+    diag_path = artifacts["low_end_recovery_diagnostics"]
+    data = json.loads(Path(diag_path).read_text(encoding="utf-8"))
+    assert data["attempted"] is False
+    assert "dropped by emit policy" in data["reason"]
+    assert "bass stem missing" not in data["reason"]
 
 
 def test_separate_stems_keeps_other_when_fold_disabled(tmp_path: Path):
@@ -169,7 +219,7 @@ def test_separate_stems_keeps_other_when_fold_disabled(tmp_path: Path):
         patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
         patch("audio_to_tab.isolate.normalize_audio", side_effect=fake_normalize),
         patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
-        patch("audio_to_tab.separate.subprocess.run", side_effect=fake_run),
+        patch("audio_to_tab.separate.run_process", side_effect=fake_run),
     ):
         artifacts = separate_stems(
             audio,
@@ -186,6 +236,54 @@ def test_separate_stems_keeps_other_when_fold_disabled(tmp_path: Path):
     assert artifacts["other"].exists()
     assert "guitar" in artifacts
     assert "piano" in artifacts
+
+
+def test_separate_stems_raises_region_error_when_start_past_unknown_duration(tmp_path: Path):
+    audio = tmp_path / "song.wav"
+    audio.write_bytes(b"fake-wav")
+    out_dir = tmp_path / "stems"
+
+    def fake_normalize(src, dest=None):
+        dest = Path(dest) if dest else tmp_path / "norm.wav"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"norm")
+        return dest
+
+    with (
+        patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
+        patch("audio_to_tab.isolate.normalize_audio", side_effect=fake_normalize),
+        patch("audio_to_tab.isolate.probe_duration_sec", return_value=None),
+    ):
+        with pytest.raises(RegionError, match="can't be honored"):
+            separate_stems(
+                audio,
+                out_dir,
+                IsolateConfig(model="htdemucs_6s", quality="fast", start_sec=30.0),
+            )
+
+
+def test_separate_stems_raises_region_error_when_start_past_file_end(tmp_path: Path):
+    audio = tmp_path / "song.wav"
+    audio.write_bytes(b"fake-wav")
+    out_dir = tmp_path / "stems"
+
+    def fake_normalize(src, dest=None):
+        dest = Path(dest) if dest else tmp_path / "norm.wav"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"norm")
+        return dest
+
+    with (
+        patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
+        patch("audio_to_tab.isolate.normalize_audio", side_effect=fake_normalize),
+        patch("audio_to_tab.isolate.probe_duration_sec", return_value=12.0),
+    ):
+        with pytest.raises(RegionError, match="can't be honored"):
+            separate_stems(
+                audio,
+                out_dir,
+                IsolateConfig(model="htdemucs_6s", quality="fast", start_sec=30.0),
+            )
 
 
 def test_is_demucs_available_does_not_import_torch(monkeypatch):
@@ -299,7 +397,7 @@ def test_separate_stems_collects_wavs(tmp_path: Path):
         patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
         patch("audio_to_tab.isolate.normalize_audio", side_effect=fake_normalize),
         patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
-        patch("audio_to_tab.separate.subprocess.run", side_effect=fake_run),
+        patch("audio_to_tab.separate.run_process", side_effect=fake_run),
     ):
         artifacts = separate_stems(
             audio,
@@ -322,6 +420,56 @@ def test_separate_stems_collects_wavs(tmp_path: Path):
     assert "--segment" in seen_cmd[0]
     seg_idx = seen_cmd[0].index("--segment")
     assert seen_cmd[0][seg_idx + 1] == "7"
+
+
+def test_separate_stems_threads_abort_and_timeout_into_backend(tmp_path: Path):
+    audio = tmp_path / "song.wav"
+    audio.write_bytes(b"fake")
+    captured: dict[str, object] = {}
+
+    def fake_normalize(src, dest=None):
+        dest = Path(dest) if dest else tmp_path / "norm.wav"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"norm")
+        return dest
+
+    def fake_backend(
+        audio_path,
+        demucs_out,
+        cfg,
+        *,
+        model,
+        allow_guitar_ft,
+        progress,
+        should_abort=None,
+        timeout_sec=None,
+    ):
+        demucs_out.mkdir(parents=True, exist_ok=True)
+        track_dir = demucs_out / "htdemucs_6s" / "normalized"
+        track_dir.mkdir(parents=True, exist_ok=True)
+        sf.write(str(track_dir / "guitar.wav"), np.zeros((256, 2), dtype=np.float32), 44100)
+        captured["should_abort"] = should_abort
+        captured["timeout_sec"] = timeout_sec
+
+    def abort_flag() -> bool:
+        return False
+
+    with (
+        patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
+        patch("audio_to_tab.isolate.normalize_audio", side_effect=fake_normalize),
+        patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
+        patch("audio_to_tab.isolate._run_separation_backend", side_effect=fake_backend),
+    ):
+        separate_stems(
+            audio,
+            tmp_path / "out",
+            IsolateConfig(model="htdemucs_6s", quality="fast"),
+            should_abort=abort_flag,
+            subprocess_timeout_sec=123.0,
+        )
+
+    assert captured["should_abort"] is abort_flag
+    assert captured["timeout_sec"] == 123.0
 
 
 def test_separate_stems_passes_two_stems_flag(tmp_path: Path):
@@ -349,7 +497,7 @@ def test_separate_stems_passes_two_stems_flag(tmp_path: Path):
         patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
         patch("audio_to_tab.isolate.normalize_audio", side_effect=fake_normalize),
         patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
-        patch("audio_to_tab.separate.subprocess.run", side_effect=fake_run),
+        patch("audio_to_tab.separate.run_process", side_effect=fake_run),
     ):
         artifacts = separate_stems(
             audio,
@@ -387,7 +535,7 @@ def test_separate_stems_keeps_other_without_guitar(tmp_path: Path):
         patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
         patch("audio_to_tab.isolate.normalize_audio", side_effect=fake_normalize),
         patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
-        patch("audio_to_tab.separate.subprocess.run", side_effect=fake_run),
+        patch("audio_to_tab.separate.run_process", side_effect=fake_run),
     ):
         artifacts = separate_stems(
             audio,
@@ -446,7 +594,7 @@ def test_separate_stems_lead_rhythm_when_confident(tmp_path: Path):
         patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
         patch("audio_to_tab.isolate.normalize_audio", side_effect=_fake_normalize_factory(tmp_path)),
         patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
-        patch("audio_to_tab.separate.subprocess.run", side_effect=_fake_demucs_with_guitar(left, right)),
+        patch("audio_to_tab.separate.run_process", side_effect=_fake_demucs_with_guitar(left, right)),
         patch("audio_to_tab.lead_rhythm.split_lead_rhythm_guitar", side_effect=fake_split),
     ):
         artifacts = separate_stems(
@@ -490,7 +638,7 @@ def test_separate_stems_default_skips_lead_rhythm(tmp_path: Path):
         patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
         patch("audio_to_tab.isolate.normalize_audio", side_effect=_fake_normalize_factory(tmp_path)),
         patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
-        patch("audio_to_tab.separate.subprocess.run", side_effect=_fake_demucs_with_guitar(left, right)),
+        patch("audio_to_tab.separate.run_process", side_effect=_fake_demucs_with_guitar(left, right)),
         patch("audio_to_tab.lead_rhythm.split_lead_rhythm_guitar", side_effect=fake_split),
     ):
         artifacts = separate_stems(
@@ -524,7 +672,7 @@ def test_separate_stems_lead_rhythm_skips_mono_by_default(tmp_path: Path):
         patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
         patch("audio_to_tab.isolate.normalize_audio", side_effect=_fake_normalize_factory(tmp_path)),
         patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
-        patch("audio_to_tab.separate.subprocess.run", side_effect=_fake_demucs_with_guitar(mono, mono)),
+        patch("audio_to_tab.separate.run_process", side_effect=_fake_demucs_with_guitar(mono, mono)),
         patch("audio_to_tab.lead_rhythm.split_lead_rhythm_guitar", side_effect=fake_split),
     ):
         artifacts = separate_stems(
@@ -563,7 +711,7 @@ def test_separate_stems_lead_rhythm_best_effort_emits_on_mono(tmp_path: Path):
         patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
         patch("audio_to_tab.isolate.normalize_audio", side_effect=_fake_normalize_factory(tmp_path)),
         patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
-        patch("audio_to_tab.separate.subprocess.run", side_effect=_fake_demucs_with_guitar(mono, mono)),
+        patch("audio_to_tab.separate.run_process", side_effect=_fake_demucs_with_guitar(mono, mono)),
         patch("audio_to_tab.lead_rhythm.split_lead_rhythm_guitar", side_effect=fake_split),
     ):
         artifacts = separate_stems(
@@ -777,7 +925,7 @@ def test_separate_stems_writes_bass_bleed_diagnostics(tmp_path: Path):
         patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
         patch("audio_to_tab.isolate.normalize_audio", side_effect=_fake_normalize_factory(tmp_path)),
         patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
-        patch("audio_to_tab.separate.subprocess.run", side_effect=_fake_demucs_with_guitar_mono(bled, sr)),
+        patch("audio_to_tab.separate.run_process", side_effect=_fake_demucs_with_guitar_mono(bled, sr)),
         patch("audio_to_tab.lead_rhythm.split_lead_rhythm_guitar", side_effect=fake_split),
     ):
         artifacts = separate_stems(
@@ -811,7 +959,7 @@ def test_separate_stems_bass_bleed_mitigation_is_opt_in(tmp_path: Path):
         patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
         patch("audio_to_tab.isolate.normalize_audio", side_effect=_fake_normalize_factory(tmp_path)),
         patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
-        patch("audio_to_tab.separate.subprocess.run", side_effect=_fake_demucs_with_guitar_mono(bled, sr)),
+        patch("audio_to_tab.separate.run_process", side_effect=_fake_demucs_with_guitar_mono(bled, sr)),
         patch("audio_to_tab.lead_rhythm.split_lead_rhythm_guitar", side_effect=fake_split),
     ):
         artifacts = separate_stems(
@@ -847,7 +995,7 @@ def test_separate_stems_bass_bleed_mitigation_when_enabled(tmp_path: Path):
         patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
         patch("audio_to_tab.isolate.normalize_audio", side_effect=_fake_normalize_factory(tmp_path)),
         patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
-        patch("audio_to_tab.separate.subprocess.run", side_effect=_fake_demucs_with_guitar_mono(bled, sr)),
+        patch("audio_to_tab.separate.run_process", side_effect=_fake_demucs_with_guitar_mono(bled, sr)),
         patch("audio_to_tab.lead_rhythm.split_lead_rhythm_guitar", side_effect=fake_split),
     ):
         artifacts = separate_stems(
@@ -895,6 +1043,41 @@ def test_trim_audio_full_file_unchanged(tmp_path: Path):
     src = tmp_path / "norm.wav"
     src.write_bytes(b"wav")
     assert _trim_audio(src, None, start_sec=0.0) == src
+
+
+def test_trim_audio_zero_or_negative_returns_full_file(tmp_path: Path):
+    src = tmp_path / "norm.wav"
+    src.write_bytes(b"wav")
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(cmd)
+        return MagicMock(returncode=0)
+
+    with patch("audio_to_tab.isolate.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
+        "audio_to_tab.isolate.subprocess.run", side_effect=fake_run
+    ):
+        assert _trim_audio(src, 0.0) == src
+        assert _trim_audio(src, -5.0) == src
+        assert _trim_audio(src, 0.0, start_sec=10.0) == src
+        assert _trim_audio(src, -5.0, start_sec=10.0) == src
+        assert _trim_audio(src, -5.0, start_sec=0.0) == src
+    assert seen == []
+
+
+def test_trim_audio_raises_on_ffmpeg_failure(tmp_path: Path):
+    src = tmp_path / "norm.wav"
+    src.write_bytes(b"wav")
+
+    def fake_run(cmd, **kwargs):
+        Path(cmd[-1]).write_bytes(b"partial")
+        return MagicMock(returncode=2, stderr="boom", stdout="")
+
+    with patch("audio_to_tab.isolate.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
+        "audio_to_tab.isolate.subprocess.run", side_effect=fake_run
+    ):
+        with pytest.raises(RuntimeError, match="ffmpeg trim failed"):
+            _trim_audio(src, 30.0)
 
 
 def test_trim_audio_builds_ss_before_input(tmp_path: Path):
@@ -988,7 +1171,7 @@ def test_guitar_ft_fallback_to_stock_demucs_on_load_failure(tmp_path: Path):
         patch("audio_to_tab.isolate.normalize_audio", side_effect=_fake_normalize_factory(tmp_path)),
         patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
         patch("audio_to_tab.isolate.run_demucs_guitar_ft_inprocess", side_effect=fail_guitar_ft),
-        patch("audio_to_tab.separate.subprocess.run", side_effect=_fake_demucs_with_guitar(left, right)),
+        patch("audio_to_tab.separate.run_process", side_effect=_fake_demucs_with_guitar(left, right)),
         patch("audio_to_tab.lead_rhythm.split_lead_rhythm_guitar", side_effect=fake_split),
     ):
         artifacts = separate_stems(
@@ -1168,7 +1351,7 @@ def test_separate_stems_two_pass_runs_htdemucs_then_six_stem(tmp_path: Path):
         patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
         patch("audio_to_tab.isolate.normalize_audio", side_effect=fake_normalize),
         patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
-        patch("audio_to_tab.separate.subprocess.run", side_effect=fake_run),
+        patch("audio_to_tab.separate.run_process", side_effect=fake_run),
     ):
         artifacts = separate_stems(
             audio,

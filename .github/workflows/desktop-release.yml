@@ -1,6 +1,6 @@
 # Build Windows / Mac desktop packages (Streamlit + Demucs on-device).
-# macOS .pkg is signed + notarized when the runner has Developer ID certs and
-# AUDIO_TOOLS_NOTARY_PROFILE / App Store Connect API secrets.
+# CI does NOT sign or notarize: the runners have no Apple Developer ID certs or
+# notary secrets, so every CI .pkg/.exe is unsigned.
 # Trigger: tag desktop-v* or workflow_dispatch.
 #
 # Four artifacts (not a universal binary):
@@ -15,6 +15,12 @@ on:
     tags:
       - "desktop-v*"
   workflow_dispatch:
+
+# One run per branch/tag: a second workflow_dispatch on the same ref queues
+# instead of launching another 4-job matrix concurrently.
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -96,7 +102,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install -U pip
-          python -m pip install --upgrade torch torchaudio
+          python -m pip install --upgrade "torch>=2.2,<2.14" "torchaudio>=2.2,<2.12"
           python -m pip install -e ".[demucs,desktop,roformer,separator]"
           python -c "import torch; assert torch.version.cuda is None, torch.version.cuda; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
 
@@ -105,7 +111,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install -U pip
-          python -m pip install --upgrade torch torchaudio --index-url https://download.pytorch.org/whl/cu126
+          python -m pip install --upgrade "torch>=2.2,<2.14" "torchaudio>=2.2,<2.12" --index-url https://download.pytorch.org/whl/cu126
           python -m pip install "bs-roformer-infer>=0.1.5"
           python -m pip install -e ".[demucs,desktop,separator]"
           python -c "import torch; assert torch.version.cuda is not None, torch.version.cuda; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
@@ -169,7 +175,7 @@ jobs:
       - name: Install Inno Setup (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: choco install innosetup -y --no-progress
+        run: winget install --id JRSoftware.InnoSetup --exact --silent --accept-package-agreements --accept-source-agreements
 
       - name: Package Windows installer
         if: runner.os == 'Windows'
@@ -192,6 +198,7 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
           if-no-files-found: error
+          retention-days: 14
 
   release:
     needs: build
@@ -210,7 +217,7 @@ jobs:
           generate_release_notes: true
           files: release-assets/**/*
           body: |
-            **0.1.2** desktop demo — Audio Isolation runs on your computer. The onedir freeze is not obfuscated; it ships no hosted-site code, `.env`, or cloud credentials. macOS `.pkg` is signed and notarized when the build machine has Developer ID certificates.
+            **0.1.3** desktop demo — Audio Isolation runs on your computer. The onedir freeze is not obfuscated; it ships no hosted-site code, `.env`, or cloud credentials. CI builds are **unsigned** — expect the "unknown developer" Gatekeeper warning on macOS and SmartScreen on Windows.
 
             Pick **one** file for your machine (not a universal installer). Windows testers pick CPU **or** NVIDIA (or install both side by side):
 

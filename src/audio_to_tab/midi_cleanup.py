@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import numpy as np
 import pretty_midi
 
 from audio_to_tab.tuning import GUITAR_PITCH_MAX, GUITAR_PITCH_MIN
@@ -115,11 +114,7 @@ def merge_instruments_to_one(pm: pretty_midi.PrettyMIDI) -> pretty_midi.PrettyMI
 
 
 def estimate_tempo_bpm(pm: pretty_midi.PrettyMIDI) -> float:
-    """Estimate tempo from MIDI; default 120 if unknown."""
-    try:
-        tempo = pm.estimate_tempo()
-        if tempo and not np.isnan(tempo):
-            return float(tempo)
-    except Exception:
-        pass
-    return 120.0
+    """Estimate tempo from MIDI; default 120 if unknown. Delegates to tempo.py."""
+    from audio_to_tab.tempo import estimate_tempo_from_midi_robust
+
+    return estimate_tempo_from_midi_robust(pm)

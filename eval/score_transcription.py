@@ -1,4 +1,11 @@
-"""Score transcription output against ground-truth MIDI using mir_eval."""
+"""Score transcription output against ground-truth MIDI using mir_eval.
+
+Manual evaluation tool: writes ``eval/results.json`` (gitignored) and prints a
+summary for a maintainer. ``gate_solo_melody_f1`` is reported but is
+**informational only** — no CI job reads this file, so a regression never fails
+the build until a human checks the number (I-104). Threshold gating is a
+future, separate CI step.
+"""
 
 from __future__ import annotations
 
@@ -111,6 +118,8 @@ def run_eval(fixtures_dir: Path | None = None) -> dict:
 
     summary = {
         "fixtures": results,
+        # Informational reference metric: eval/results.json is gitignored and
+        # no CI job enforces it. Manual pass gate only (I-104).
         "gate_solo_melody_f1": results.get("solo_melody", {})
         .get("transcription", {})
         .get("f1", None)

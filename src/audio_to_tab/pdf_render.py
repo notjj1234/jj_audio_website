@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from reportlab.lib.pagesizes import letter
@@ -25,7 +26,7 @@ def render_tab_pdf(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     c = canvas.Canvas(str(path), pagesize=letter)
-    width, height = letter
+    _, height = letter
     margin = 0.75 * inch
     line_height = 14
     y = height - margin
@@ -68,6 +69,13 @@ def _events_in_measure(doc: TabDocument, m_start: float, m_end: float) -> list:
     return [e for e in doc.events if m_start <= e.start < m_end]
 
 
+def _count_measures(end_time: float, sec_per_measure: float) -> int:
+    """Measure count where a note ending exactly on a bar line adds no empty measure."""
+    if sec_per_measure <= 0:
+        return 1
+    return max(1, math.ceil(end_time / sec_per_measure))
+
+
 def render_structured_tab_pdf(
     doc: TabDocument,
     output_path: str,
@@ -79,7 +87,7 @@ def render_structured_tab_pdf(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     c = canvas.Canvas(str(path), pagesize=letter)
-    width, height = letter
+    _, height = letter
     margin = 0.6 * inch
     staff_gap = 11
     measure_width = 4.5 * inch
@@ -105,7 +113,7 @@ def render_structured_tab_pdf(
 
     sec_per_measure = 60.0 / doc.tempo_bpm * beats_per_measure
     end_time = max((n.end for e in doc.events for n in e.notes), default=sec_per_measure)
-    num_measures = max(1, int(end_time / sec_per_measure) + 1)
+    num_measures = _count_measures(end_time, sec_per_measure)
     measures_per_row = 2
     row_height = strings * staff_gap + 30
 

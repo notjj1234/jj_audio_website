@@ -12,7 +12,7 @@ chmod +x packaging/make_app.sh
 # Sign the .app before wrapping it so the installer payload is Gatekeeper-ready.
 python3 packaging/macos_signing.py sign-app dist/AudioTools.app
 
-APP_VERSION="${AUDIO_TOOLS_VERSION:-0.1.2}"
+APP_VERSION="${AUDIO_TOOLS_VERSION:-0.1.3}"
 BIN_ARCHS="$(lipo -archs dist/AudioTools/AudioTools 2>/dev/null || true)"
 if grep -qw arm64 <<<"$BIN_ARCHS"; then
   PKG_NAME="AudioTools-${APP_VERSION}-macos-arm64-silicon.pkg"

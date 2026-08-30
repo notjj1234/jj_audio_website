@@ -157,3 +157,28 @@ def test_cleanup_midi_writes_filtered(tmp_path: Path):
     cleanup_midi(str(raw), str(out), CleanupConfig(min_velocity=40))
     cleaned = pretty_midi.PrettyMIDI(str(out))
     assert len(cleaned.instruments[0].notes) == 1
+
+
+def test_count_measures_does_not_add_empty_trailing_bar():
+    from audio_to_tab.pdf_render import _count_measures
+
+    assert _count_measures(4.0, 2.0) == 2  # last note ends exactly on bar line
+    assert _count_measures(3.999, 2.0) == 2
+    assert _count_measures(5.0, 2.0) == 3
+    assert _count_measures(1.0, 2.0) == 1
+    assert _count_measures(0.0, 2.0) == 1
+    assert _count_measures(4.0, 0.0) == 1
+
+
+def test_estimate_tempo_bpm_delegates_to_robust():
+    from audio_to_tab.midi_cleanup import estimate_tempo_bpm
+
+    pm = pretty_midi.PrettyMIDI()
+    inst = pretty_midi.Instrument(program=25)
+    for i in range(8):
+        inst.notes.append(pretty_midi.Note(80, 64, i * 0.5, i * 0.5 + 0.25))
+    pm.instruments.append(inst)
+    assert 100.0 <= estimate_tempo_bpm(pm) <= 140.0
+
+    empty = pretty_midi.PrettyMIDI()
+    assert estimate_tempo_bpm(empty) == 120.0

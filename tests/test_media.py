@@ -3,20 +3,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import soundfile as sf
 
-from unittest.mock import MagicMock, patch
-
 from ui.media import (
-    PREVIEW_DURATION_THRESHOLD_SEC,
     PREVIEW_SAMPLE_RATE,
     cleanup_mix_artifacts,
     ensure_mixer_audio_paths,
     ensure_region_preview_wav,
     region_preview_cache_key,
-    should_use_previews,
+    register_mixer_media,
 )
 
 
@@ -40,25 +38,29 @@ def test_cleanup_mix_artifacts(tmp_path: Path):
     assert (tmp_path / "vocals.wav").exists()
 
 
-def test_should_use_previews_short(tmp_path: Path):
-    p = tmp_path / "a.wav"
-    _write_tone(p, 5.0)
-    assert should_use_previews({"a": p}) is False
-
-
-def test_should_use_previews_long(tmp_path: Path):
-    p = tmp_path / "a.wav"
-    _write_tone(p, PREVIEW_DURATION_THRESHOLD_SEC + 5.0)
-    assert should_use_previews({"a": p}) is True
-
-
 def test_mixer_preview_rate_is_full_quality():
     assert PREVIEW_SAMPLE_RATE == 44100
 
 
+def test_register_mixer_media_registers_both_url_sets(monkeypatch):
+    from pathlib import Path
+
+    calls: list[str] = []
+
+    def fake_urls(paths, *, coord_prefix="isolate.mixer"):
+        calls.append(coord_prefix)
+        return {name: f"/media/{coord_prefix}/{name}" for name in paths}
+
+    monkeypatch.setattr("ui.media.stem_media_urls", fake_urls)
+    playback, downloads = register_mixer_media({"vocals": Path("v.wav")})
+    assert playback == {"vocals": "/media/isolate.mixer/vocals"}
+    assert downloads == {"vocals": "/media/isolate.download/vocals"}
+    assert calls == ["isolate.mixer", "isolate.download"]
+
+
 def test_ensure_mixer_audio_paths_long_uses_original(tmp_path: Path):
     p = tmp_path / "vocals.wav"
-    _write_tone(p, PREVIEW_DURATION_THRESHOLD_SEC + 5.0)
+    _write_tone(p, 200.0)
     out = ensure_mixer_audio_paths({"vocals": p})
     assert out["vocals"] == p
     assert not (tmp_path / "preview").exists()

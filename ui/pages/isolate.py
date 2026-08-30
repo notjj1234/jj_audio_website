@@ -13,6 +13,23 @@ from pathlib import Path
 
 import streamlit as st
 
+from ui.common import (
+    AUDIO_UPLOAD_TYPES,
+    DATA_DIR,
+    ensure_src_path,
+    list_recent_runs,
+    run_output_dir,
+    save_upload,
+)
+from ui.desktop_export import (
+    choose_export_dir,
+    copy_mix_to_folder,
+    copy_tracks_to_folder,
+    default_export_dir,
+    export_song_dir,
+    open_path_in_os,
+)
+from ui.desktop_notify import notify as desktop_notify
 from ui.guitar_fixup import (
     GUITAR_BACKUP_NAME,
     GUITAR_PREREFINE_NAME,
@@ -26,75 +43,6 @@ from ui.guitar_fixup import (
     merge_artifact_updates,
     reset_mixer_guitar_fixup,
     switch_mixer_guitar_variant,
-)
-from ui.common import (
-    AUDIO_UPLOAD_TYPES,
-    DATA_DIR,
-    ensure_src_path,
-    list_recent_runs,
-    run_output_dir,
-    save_upload,
-)
-from ui.isolate_state import (
-    DEFAULT_SPEED_PRESET,
-    DEFAULT_TRACK_OPTIONS,
-    DEMUCS_STEM_CHECKBOX_IDS,
-    GUITAR_TRACK_OPTION_IDS,
-    SPEED_PRESETS,
-    TRACK_OPTIONS,
-    ROFORMER_BACKEND_UI_HINT,
-    VOCALS_INSTRUMENTAL_OPTION_ID,
-    guitar_track_radio_ids,
-    job_requires_roformer_backend,
-    normalize_guitar_track_selection,
-    tracks_picker_help,
-    WORKSPACE_KEY,
-    WORKSPACE_NEXT_KEY,
-    WORKSPACE_TABS,
-    ISOLATE_UI_STATE_FILENAME,
-    ISOLATE_USER_ID_FILENAME,
-    ISOLATE_EXPORT_DIR_KEY,
-    LISTEN_PICKER_KEY,
-    LISTEN_PICKER_NEXT_KEY,
-    apply_listen_picker_pending,
-    apply_pending_output_name,
-    apply_pending_youtube_url,
-    apply_stored_isolate_ui_state,
-    apply_workspace_tab,
-    apply_youtube_output_name_sync,
-    clamp_region_bounds,
-    format_source_caption,
-    format_source_title,
-    infer_source_kind,
-    is_stopping_previous_job,
-    isolate_ui_state_payload,
-    jobs_needing_os_notify,
-    listen_picker_default,
-    load_persist_isolate_user_id,
-    os_notify_message,
-    partition_queue_jobs,
-    paused_job_caption,
-    pending_audio_needs_resave,
-    pending_upload_fp_for_stale,
-    plan_isolate_job_poll,
-    queue_reopen_output_name,
-    queued_wait_caption,
-    queue_youtube_url,
-    read_isolate_ui_state,
-    recent_runs_with_owner_fallback,
-    reset_new_tab_source,
-    migrate_track_options,
-    resolve_track_selection,
-    resolve_speed_preset,
-    running_progress_view,
-    select_rehydrate_row,
-    session_mixer_artifacts_ok,
-    should_hide_stale_results,
-    staged_audio_for_new_tab,
-    status_strip_waiting_caption,
-    sync_output_name_on_upload,
-    upload_fingerprint,
-    write_isolate_ui_state,
 )
 from ui.isolate_jobs import (
     IsolateJobSpec,
@@ -116,30 +64,79 @@ from ui.isolate_jobs import (
     resume_job,
     worker_busy,
 )
-from ui.media import ensure_mixer_audio_paths, ensure_region_preview_wav, stem_media_urls
-from ui.desktop_export import (
-    choose_export_dir,
-    copy_mix_to_folder,
-    copy_tracks_to_folder,
-    default_export_dir,
-    export_song_dir,
-    open_path_in_os,
+from ui.isolate_state import (
+    DEFAULT_SPEED_PRESET,
+    DEFAULT_TRACK_OPTIONS,
+    DEMUCS_STEM_CHECKBOX_IDS,
+    GUITAR_TRACK_OPTION_IDS,
+    ISOLATE_EXPORT_DIR_KEY,
+    ISOLATE_UI_STATE_FILENAME,
+    ISOLATE_USER_ID_FILENAME,
+    LISTEN_PICKER_KEY,
+    LISTEN_PICKER_NEXT_KEY,
+    ROFORMER_BACKEND_UI_HINT,
+    SPEED_PRESETS,
+    TRACK_OPTIONS,
+    VOCALS_INSTRUMENTAL_OPTION_ID,
+    WORKSPACE_KEY,
+    WORKSPACE_NEXT_KEY,
+    WORKSPACE_TABS,
+    apply_listen_picker_pending,
+    apply_pending_output_name,
+    apply_pending_youtube_url,
+    apply_stored_isolate_ui_state,
+    apply_workspace_tab,
+    apply_youtube_output_name_sync,
+    clamp_region_bounds,
+    format_source_caption,
+    format_source_title,
+    guitar_track_radio_ids,
+    infer_source_kind,
+    is_stopping_previous_job,
+    isolate_ui_state_payload,
+    job_requires_roformer_backend,
+    jobs_needing_os_notify,
+    listen_picker_default,
+    load_persist_isolate_user_id,
+    migrate_track_options,
+    normalize_guitar_track_selection,
+    os_notify_message,
+    partition_queue_jobs,
+    paused_job_caption,
+    pending_audio_needs_resave,
+    pending_upload_fp_for_stale,
+    plan_isolate_job_poll,
+    promote_default_guitar_option,
+    queue_reopen_output_name,
+    queue_youtube_url,
+    queued_wait_caption,
+    read_isolate_ui_state,
+    recent_runs_with_owner_fallback,
+    reset_new_tab_source,
+    resolve_speed_preset,
+    resolve_track_selection,
+    resolve_youtube_job_name,
+    running_progress_view,
+    select_rehydrate_row,
+    session_mixer_artifacts_ok,
+    should_hide_stale_results,
+    staged_audio_for_new_tab,
+    status_strip_waiting_caption,
+    sync_output_name_on_upload,
+    tracks_picker_help,
+    upload_fingerprint,
+    write_isolate_ui_state,
 )
-from ui.desktop_notify import notify as desktop_notify
+from ui.media import (
+    ensure_mixer_audio_paths,
+    ensure_region_preview_wav,
+    register_mixer_media,
+    stem_media_urls,
+)
 from ui.stem_mixer_component import component_build_available, stem_mixer
 
 ensure_src_path()
 
-from audio_to_tab.isolate import (  # noqa: E402
-    DEMUCS_INSTALL_HINT,
-    MIN_REGION_SEC,
-    RegionError,
-    format_region_label,
-    format_region_label_filename,
-    format_time_sec,
-    probe_duration_sec,
-    resolve_region,
-)
 from audio_to_tab.hardware import (  # noqa: E402
     CUDA_UNAVAILABLE_MESSAGE,
     desktop_device_options,
@@ -156,6 +153,16 @@ from audio_to_tab.ingest import (  # noqa: E402
     format_youtube_duration,
     is_youtube_url,
     search_youtube_videos,
+)
+from audio_to_tab.isolate import (  # noqa: E402
+    DEMUCS_INSTALL_HINT,
+    MIN_REGION_SEC,
+    RegionError,
+    format_region_label,
+    format_region_label_filename,
+    format_time_sec,
+    probe_duration_sec,
+    resolve_region,
 )
 from audio_to_tab.mixer import (  # noqa: E402
     DB_DEFAULT,
@@ -200,14 +207,14 @@ def _youtube_search_dialog() -> None:
         )
         do_search = st.form_submit_button(
             "Search",
-            use_container_width=True,
+            width="stretch",
         )
     action_cols = st.columns([1, 1])
     with action_cols[0]:
         if st.button(
             "Clear results",
             key="isolate_youtube_search_clear",
-            use_container_width=True,
+            width="stretch",
         ):
             st.session_state.pop("isolate_youtube_search_hits", None)
             st.session_state.pop("isolate_youtube_search_error", None)
@@ -216,7 +223,7 @@ def _youtube_search_dialog() -> None:
         if st.button(
             "Close",
             key="isolate_youtube_search_close",
-            use_container_width=True,
+            width="stretch",
         ):
             _close_youtube_search_dialog()
             st.rerun()
@@ -281,7 +288,7 @@ def _youtube_search_dialog() -> None:
                     "Use",
                     key=f"isolate_youtube_pick_{vid}",
                     disabled=not url,
-                    use_container_width=True,
+                    width="stretch",
                 ):
                     queue_youtube_url(st.session_state, url)
                     st.session_state.pop("isolate_youtube_search_error", None)
@@ -752,6 +759,8 @@ def _render_live_mixer(
     track_title: str = "",
     base_name: str = "stems",
     run_dir: Path | None = None,
+    media_urls: dict[str, str] | None = None,
+    download_urls: dict[str, str] | None = None,
 ) -> dict | None:
     if not component_build_available():
         st.error(
@@ -762,14 +771,11 @@ def _render_live_mixer(
         return None
 
     mixer_paths = ensure_mixer_audio_paths(stem_paths)
-    if mixer_paths != stem_paths:
-        st.caption(
-            "Using lighter preview audio for playback. Downloads still use the full-quality files."
-        )
 
     try:
-        urls = stem_media_urls(mixer_paths)
-        download_urls = stem_media_urls(stem_paths, coord_prefix="isolate.download")
+        urls = media_urls if media_urls is not None else stem_media_urls(mixer_paths)
+        if download_urls is None:
+            download_urls = stem_media_urls(stem_paths, coord_prefix="isolate.download")
     except Exception as exc:
         st.error(f"Could not prepare track audio for the mixer: {exc}")
         return None
@@ -815,6 +821,9 @@ def _init_track_picker_session() -> None:
     if st.session_state.get("isolate_track_picker_initialized"):
         return
     migrated = migrate_track_options(st.session_state)
+    migrated = promote_default_guitar_option(
+        migrated, roformer_available=is_roformer_backend_available()
+    )
     for oid in DEMUCS_STEM_CHECKBOX_IDS:
         st.session_state[f"isolate_track_{oid}"] = oid in migrated
     guitar_pick = next((g for g in migrated if g in GUITAR_TRACK_OPTION_IDS), None)
@@ -1122,7 +1131,7 @@ def _render_separation_controls() -> dict:
             if st.button(
                 "Search songs",
                 key="isolate_youtube_search_open_btn",
-                use_container_width=True,
+                width="stretch",
                 help="Open a search panel to find a public video by song or artist.",
             ):
                 st.session_state[ISOLATE_YOUTUBE_SEARCH_OPEN_KEY] = True
@@ -1699,6 +1708,8 @@ def _mixer_and_downloads_fragment(
     presence: dict,
     base_name: str,
     run_dir: Path,
+    media_urls: dict[str, str],
+    download_urls: dict[str, str],
 ) -> None:
     """Track picker, mixer, and downloads — fragment-scoped so checkboxes do not remount the page."""
     with _stateful_expander(
@@ -1720,6 +1731,8 @@ def _mixer_and_downloads_fragment(
         track_title=base_name,
         base_name=base_name,
         run_dir=run_dir,
+        media_urls=media_urls,
+        download_urls=download_urls,
     )
     if mixer_state:
         st.session_state["isolate_mixer_state"] = mixer_state
@@ -1814,7 +1827,7 @@ def _render_downloads_panel(
             if st.button(
                 "Choose folder",
                 key="isolate_choose_export_dir",
-                use_container_width=True,
+                width="stretch",
             ):
                 picked = choose_export_dir()
                 if picked:
@@ -1826,7 +1839,7 @@ def _render_downloads_panel(
             if st.button(
                 "Open folder",
                 key="isolate_open_export_dir",
-                use_container_width=True,
+                width="stretch",
             ):
                 last = st.session_state.get("isolate_last_export_path")
                 target = Path(str(last)) if last else export_root
@@ -1841,14 +1854,14 @@ def _render_downloads_panel(
                     "Save all tracks",
                     type="primary",
                     key="isolate_save_tracks",
-                    use_container_width=True,
+                    width="stretch",
                 ):
                     _save_all_tracks(selected_stem_paths, export_root, str(base_name))
             with mix_col:
                 if st.button(
                     "Save current mix",
                     key="isolate_save_mix",
-                    use_container_width=True,
+                    width="stretch",
                 ):
                     _save_current_mix(str(ready), export_root, str(base_name))
         else:
@@ -1856,7 +1869,7 @@ def _render_downloads_panel(
                 "Save all tracks",
                 type="primary",
                 key="isolate_save_tracks",
-                use_container_width=True,
+                width="stretch",
             ):
                 _save_all_tracks(selected_stem_paths, export_root, str(base_name))
 
@@ -1877,7 +1890,17 @@ def _resolve_audio_for_job(choice: dict) -> tuple[Path | None, str | None]:
             and st.session_state.get("isolate_pending_fp") == f"youtube:{youtube_url}"
         )
         if already:
-            return Path(pending), None
+            audio = Path(pending)
+            new_name = apply_youtube_output_name_sync(
+                st.session_state,
+                downloaded_stem=audio.stem,
+                apply_now=False,
+            )
+            if new_name:
+                choice["output_name"] = new_name
+            elif not str(choice.get("output_name") or "").strip():
+                choice["output_name"] = audio.stem
+            return audio, None
         out = run_output_dir()
         try:
             with st.spinner("Downloading YouTube audio…"):
@@ -1920,7 +1943,11 @@ def _enqueue_confirmed_job(choice: dict, audio_path: Path) -> None:
     start_sec = float(choice.get("start_sec") or 0.0)
     max_duration_sec = choice.get("max_duration_sec")
     region_label = choice.get("region_label")
-    output_name = (choice.get("output_name") or "").strip() or audio_path.stem
+    output_name = resolve_youtube_job_name(
+        choice.get("output_name") or "",
+        choice.get("youtube_url") or "",
+        audio_path.stem,
+    )
 
     try:
         file_dur = probe_duration_sec(audio_path)
@@ -2131,7 +2158,7 @@ def _render_listening_switcher(browser_id: str | None, rows: list[dict] | None =
         delete_clicked = st.button(
             "Delete this run",
             key="isolate_delete_listening",
-            use_container_width=True,
+            width="stretch",
         )
     if delete_clicked and chosen:
         deleted = delete_library_run(chosen)
@@ -2277,11 +2304,14 @@ def _render_mixer_workspace(browser_id: str | None) -> None:
 
     _render_mixer_region_caption(base_name)
 
+    mixer_media_urls, mixer_download_urls = register_mixer_media(stem_paths)
     _mixer_and_downloads_fragment(
         stem_paths,
         presence=presence,
         base_name=base_name,
         run_dir=run_dir,
+        media_urls=mixer_media_urls,
+        download_urls=mixer_download_urls,
     )
 
     source_audio_path = st.session_state.get("isolate_source_audio_path")
@@ -2368,4 +2398,5 @@ def main() -> None:
     _persist_isolate_ui_state()
 
 
-main()
+if __name__ == "__main__":
+    main()

@@ -7,16 +7,9 @@ import shutil
 import subprocess
 from pathlib import Path
 
-import soundfile as sf
-
 from audio_to_tab.subprocess_util import subprocess_run_kwargs
 
-# Mixer plays original 44.1 kHz stems. Do not downsample — 22.05 kHz strips highs.
-PREVIEW_DURATION_THRESHOLD_SEC = 90.0
-# ~21 MB/min/stem float32 stereo @ 44.1kHz; 400MB ≈ ~3.2 stem-minutes at full rate.
-PREVIEW_RAM_BUDGET_BYTES = 400 * 1024 * 1024
 PREVIEW_SAMPLE_RATE = 44100
-BYTES_PER_SEC_FULL = 44100 * 2 * 4  # float32 stereo estimate for RAM budgeting
 
 
 def cleanup_mix_artifacts(run_dir: Path) -> None:
@@ -28,27 +21,6 @@ def cleanup_mix_artifacts(run_dir: Path) -> None:
     current = run_dir / "current_mix.wav"
     if current.exists():
         current.unlink(missing_ok=True)
-
-
-def _stem_duration_sec(path: Path) -> float:
-    info = sf.info(str(path))
-    if info.samplerate <= 0:
-        return 0.0
-    return float(info.frames) / float(info.samplerate)
-
-
-def should_use_previews(stem_paths: dict[str, Path]) -> bool:
-    """True when stems are long enough that browser float buffers may be heavy."""
-    if not stem_paths:
-        return False
-    durations = [_stem_duration_sec(p) for p in stem_paths.values() if p.exists()]
-    if not durations:
-        return False
-    max_dur = max(durations)
-    if max_dur > PREVIEW_DURATION_THRESHOLD_SEC:
-        return True
-    est_ram = len(stem_paths) * max_dur * BYTES_PER_SEC_FULL
-    return est_ram > PREVIEW_RAM_BUDGET_BYTES
 
 
 def ensure_mixer_audio_paths(stem_paths: dict[str, Path]) -> dict[str, Path]:
@@ -86,6 +58,20 @@ def stem_media_urls(stem_paths: dict[str, Path], *, coord_prefix: str = "isolate
     for i, (name, path) in enumerate(sorted(stem_paths.items())):
         urls[name] = media_url_for_file(path, coordinates=f"{coord_prefix}.{i}.{name}")
     return urls
+
+
+def register_mixer_media(stem_paths: dict[str, Path]) -> tuple[dict[str, str], dict[str, str]]:
+    """Register playback + download stem URLs during the full page run.
+
+    Registration must happen outside the ``@st.fragment``: fragment-scoped media
+    registrations can be GC'd on a later full/fragment rerun, which makes stems
+    intermittently fail to load in the mixer. Returning the URLs lets callers
+    pass them into the fragment.
+    """
+    return (
+        stem_media_urls(stem_paths),
+        stem_media_urls(stem_paths, coord_prefix="isolate.download"),
+    )
 
 
 def region_preview_cache_key(

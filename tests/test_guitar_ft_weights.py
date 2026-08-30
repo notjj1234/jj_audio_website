@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import urllib.request
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +13,7 @@ import pytest
 from audio_to_tab.separate import (
     GUITAR_FT_SHA256,
     download_guitar_ft_weights,
+    guitar_ft_weights_cached,
     guitar_ft_weights_sha256,
     remap_guitar_ft_state_dict,
     verify_guitar_ft_weights,
@@ -87,7 +90,7 @@ def test_download_guitar_ft_weights_redownloads_corrupt_cache(tmp_path: Path, mo
     digest = hashlib.sha256(good).hexdigest()
     monkeypatch.setattr("audio_to_tab.separate.GUITAR_FT_SHA256", digest)
     fake_resp = MagicMock()
-    fake_resp.read.return_value = good
+    fake_resp.read.side_effect = [good, b""]
     fake_resp.__enter__.return_value = fake_resp
     fake_resp.__exit__.return_value = False
     with patch("audio_to_tab.separate.urllib.request.urlopen", return_value=fake_resp):
@@ -98,13 +101,67 @@ def test_download_guitar_ft_weights_redownloads_corrupt_cache(tmp_path: Path, mo
 def test_download_guitar_ft_weights_rejects_bad_download(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("TORCH_HOME", str(tmp_path))
     fake_resp = MagicMock()
-    fake_resp.read.return_value = b"corrupt-checkpoint"
+    fake_resp.read.side_effect = [b"corrupt-checkpoint", b""]
     fake_resp.__enter__.return_value = fake_resp
     fake_resp.__exit__.return_value = False
     with patch("audio_to_tab.separate.urllib.request.urlopen", return_value=fake_resp):
         with pytest.raises(RuntimeError, match="hash mismatch"):
             download_guitar_ft_weights()
     assert not (tmp_path / "checkpoints" / "guitar_htdemucs_6s.pt").exists()
+
+
+def test_download_guitar_ft_weights_sends_ua_and_streams(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TORCH_HOME", str(tmp_path))
+    good = b"chunked-good-checkpoint"
+    digest = hashlib.sha256(good).hexdigest()
+    monkeypatch.setattr("audio_to_tab.separate.GUITAR_FT_SHA256", digest)
+    fake_resp = MagicMock()
+    fake_resp.read.side_effect = [good[:5], good[5:], b""]
+    fake_resp.__enter__.return_value = fake_resp
+    fake_resp.__exit__.return_value = False
+    with patch(
+        "audio_to_tab.separate.urllib.request.urlopen", return_value=fake_resp
+    ) as urlopen:
+        path = download_guitar_ft_weights()
+    req = urlopen.call_args.args[0]
+    assert isinstance(req, urllib.request.Request)
+    assert req.get_header("User-agent") == "audio-to-tab-pdf/1.0 (guitar isolation; urllib)"
+    assert path.read_bytes() == good
+
+
+def test_guitar_ft_weights_cached_uses_sidecar_digest(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TORCH_HOME", str(tmp_path))
+    cache = tmp_path / "checkpoints"
+    cache.mkdir()
+    blob = cache / "guitar_htdemucs_6s.pt"
+    blob.write_bytes(b"sidecar-ok")
+    digest = guitar_ft_weights_sha256(blob)
+    monkeypatch.setattr("audio_to_tab.separate.GUITAR_FT_SHA256", digest)
+    assert verify_guitar_ft_weights(blob) == blob
+    sidecar = cache / "guitar_htdemucs_6s.pt.sha256"
+    assert sidecar.read_text(encoding="utf-8").strip() == digest
+    with patch("audio_to_tab.separate.guitar_ft_weights_sha256") as sha:
+        assert guitar_ft_weights_cached() is True
+    sha.assert_not_called()
+
+
+def test_guitar_ft_weights_cached_rehashes_when_file_newer_than_sidecar(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("TORCH_HOME", str(tmp_path))
+    cache = tmp_path / "checkpoints"
+    cache.mkdir()
+    blob = cache / "guitar_htdemucs_6s.pt"
+    blob.write_bytes(b"sidecar-stale")
+    digest = guitar_ft_weights_sha256(blob)
+    monkeypatch.setattr("audio_to_tab.separate.GUITAR_FT_SHA256", digest)
+    assert verify_guitar_ft_weights(blob) == blob
+    sidecar = cache / "guitar_htdemucs_6s.pt.sha256"
+    future = sidecar.stat().st_mtime + 1000.0
+    os.utime(blob, (future, future))
+    with patch("audio_to_tab.separate.guitar_ft_weights_sha256", return_value=digest) as sha:
+        assert guitar_ft_weights_cached() is True
+    sha.assert_called_once()
 
 
 def test_pinned_sha256_matches_huggingface_blob():

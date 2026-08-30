@@ -19,6 +19,10 @@ guitar ~9.05 dB vs guitar "not established" for htdemucs_6s):
 - ``melband_roformer_guitar`` / ``IsolateConfig.guitar_refine`` — becruily
   MelBand-Roformer Guitar 2-stem specialist as a second-pass refine.
   Requires optional ``.[separator]``.
+- ``guitar_scnet`` — SCNet 4-stem (MUSDB18, ~10.6M params) via optional
+  ``.[scnet]``; a dedicated-guitar engine is not what it outputs, so guitar is
+  mapped from its ``other`` stem (fuzzier than ``bs_roformer_sw`` but a real
+  SDR jump over stock 6s). Weights MIT-friendly (UVR mirror, SHA256-pinned).
 - ``htdemucs_6s_guitar_ft`` stays Advanced opt-in (smallest gain).
 
 Default path stays Demucs-only and backwards-compatible on time: smarter
@@ -42,23 +46,24 @@ the default. Guitar refine is a separate opt-in stage.
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
-logger = logging.getLogger(__name__)
-
+from audio_to_tab.hardware import ensure_cuda_available, separate_progress_message
 from audio_to_tab.ingest import normalize_audio
 from audio_to_tab.lead_rhythm import LeadRhythmThresholds, resolve_lead_rhythm_mode
-from audio_to_tab.hardware import ensure_cuda_available, separate_progress_message
 from audio_to_tab.mixer import apply_true_peak_ceiling, mix_stems_to_wav
 from audio_to_tab.roformer import (
     BS_ROFORMER_SW_ID,
@@ -70,6 +75,12 @@ from audio_to_tab.roformer import (
     run_guitar_refine,
     run_roformer_model,
 )
+from audio_to_tab.scnet import (
+    SCNET_INSTALL_HINT,
+    SCNET_MODELS,
+    is_scnet_available,
+    run_scnet_model,
+)
 from audio_to_tab.separate import (
     GUITAR_FT_CHECKPOINT_ID,
     SUPPORTED_GUITAR_CHECKPOINTS,
@@ -77,7 +88,9 @@ from audio_to_tab.separate import (
     run_demucs,
     run_demucs_guitar_ft_inprocess,
 )
-from audio_to_tab.subprocess_util import subprocess_run_kwargs
+from audio_to_tab.subprocess_util import JobAborted, subprocess_run_kwargs
+
+logger = logging.getLogger(__name__)
 
 DEMUCS_INSTALL_HINT = (
     "Demucs is required for stem separation. Install with: make install-demucs "
@@ -86,10 +99,6 @@ DEMUCS_INSTALL_HINT = (
 
 ProgressCallback = Callable[[str, str], None]
 StageCompleteCallback = Callable[[str], None]
-
-
-class JobAborted(Exception):
-    """Raised when isolation should stop between pipeline stages (stop/pause)."""
 
 
 def _abort_if(should_abort: Callable[[], bool] | None) -> None:
@@ -106,7 +115,7 @@ def _mark_stage_complete(stage: str, on_stage_complete: StageCompleteCallback | 
         on_stage_complete(stage)
 
 DEMUCS_MODELS = ("htdemucs_6s", "htdemucs", "htdemucs_ft")
-SUPPORTED_MODELS = DEMUCS_MODELS + ROFORMER_MODELS
+SUPPORTED_MODELS = DEMUCS_MODELS + ROFORMER_MODELS + SCNET_MODELS
 # Models that emit a dedicated guitar stem (quality floor, refine, fold).
 GUITAR_PRODUCING_MODELS = frozenset(
     {"htdemucs_6s", BS_ROFORMER_SW_ID, MELBAND_GUITAR_ID}
@@ -135,6 +144,25 @@ SUB_BASS_DEBLEED_MIX = 0.85
 SUB_BASS_DRUMS_MIX = 0.35
 # Linear gain on ``other`` when folding into guitar (reserve headroom vs peak ceiling).
 FOLD_OTHER_MIX_GAIN = 0.5
+# Opt-in fold-gain search (Phase 1b) — DSL gains sized for band-limited Other.
+FOLD_OTHER_GAIN_CANDIDATES = (0.25, 0.5, 0.75)
+# Opt-in spectral bleed gate (flutter/cymbal/bass residue scrub).
+# A time-frequency soft gate: when competing stems strongly dominate the
+# guitar's own magnitude in a bin, the guitar is attenuated (that energy is
+# bleed the separator left behind). Competing-dominated solo sections keep
+# gutier content because the score only trips when the competitor wins.
+BLEED_GATE_NPERSEG = 2048
+BLEED_GATE_OVERLAP = 1536  # 75% — Hann is COLA at this hop.
+BLEED_GATE_DOMINANCE_THRESHOLD = 0.90  # competitor share of bin energy to trip.
+BLEED_GATE_MAX_ATTENUATION = 0.25  # linear floor (~−12 dB) while fully dominated.
+BLEED_GATE_STRENGTH = 1.0
+BLEED_GATE_HIGH_HZ = 16000.0  # protect only up to top of instrument range.
+# Cross-model guitar ensemble (Phase 2): per-band energy soft-max blend.
+# Bands are log-spaced over the guitar's playable range; gamma≈3 ≈ soft max,
+# so whichever separator captured more energy in a band wins that band.
+ENSEMBLE_BLEND_BANDS = 24
+ENSEMBLE_BLEND_GAMMA = 3.0
+ENSEMBLE_BLEND_LOW_HZ = 40.0
 GUITAR_PREREFINE_NAME = "guitar_prerefine.wav"
 GUITAR_REFINED_NAME = "guitar_refined.wav"
 TWO_PASS_KEEP_FROM_FIRST = ("vocals", "drums", "bass")
@@ -155,6 +183,7 @@ def isolate_timeout_multiplier(
     model: str,
     two_pass: bool = False,
     guitar_refine: bool = False,
+    guitar_ensemble: bool = False,
 ) -> int:
     """Wall-clock timeout scale vs a single Demucs pass."""
     n = 1
@@ -162,17 +191,19 @@ def isolate_timeout_multiplier(
         n += 1
     if guitar_refine:
         n += 1
-    if model in ROFORMER_MODELS:
+    if guitar_ensemble:
+        n += 1
+    if model in ROFORMER_MODELS or model in SCNET_MODELS:
         n += 1
     return n
 
 
-def effective_demucs_segment(model: str, requested: int | float | None) -> int | None:
+def effective_demucs_segment(model: str, requested: float | None) -> int | None:
     """Clamp Demucs --segment to the model training limit, or None to omit the flag."""
     if requested is None:
         return None
     try:
-        value = int(round(float(requested)))
+        value = round(float(requested))
     except (TypeError, ValueError):
         return None
     if value <= 0:
@@ -244,8 +275,7 @@ class RegionError(ValueError):
 
 def format_time_sec(sec: float) -> str:
     """Format seconds as M:SS."""
-    if sec < 0:
-        sec = 0
+    sec = max(sec, 0)
     m = int(sec // 60)
     s = int(sec % 60)
     return f"{m}:{s:02d}"
@@ -409,6 +439,56 @@ class FoldOtherDiagnostics:
         return path
 
 
+@dataclass
+class BleedGateDiagnostics:
+    """Whether the spectral flutter/bleed gate ran and how much it removed.
+
+    Fraction of time-frequency bins where competing stems dominated the
+    bin's energy (``dominated_bin_fraction``) is the "how dirty was it"
+    signal; ``mean_attenuation_db`` quantifies how much was scrubbed. Both
+    are driven by competitor stems (bass/drums/other), never the full mix.
+    """
+
+    attempted: bool
+    reason: str
+    gated: bool = False
+    dominated_bin_fraction: float | None = None
+    mean_attenuation_db: float | None = None
+    threshold: float = BLEED_GATE_DOMINANCE_THRESHOLD
+    max_attenuation_linear: float = BLEED_GATE_MAX_ATTENUATION
+    high_hz: float = BLEED_GATE_HIGH_HZ
+    competitors: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def write_json(self, path: Path) -> Path:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
+        return path
+
+
+@dataclass
+class AdaptiveFoldGainDiagnostics:
+    """Result of the opt-in fold-gain search (which gain won and by how much)."""
+
+    attempted: bool
+    reason: str
+    chosen_gain: float | None = None
+    scores: dict[str, float] | None = None
+    wins_by: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def write_json(self, path: Path) -> Path:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
+        return path
+
+
 def _bandpass_audio(
     data: np.ndarray,
     sr: int,
@@ -441,10 +521,8 @@ def _drop_other_stem(artifacts: dict[str, Path]) -> None:
     other = artifacts.pop("other", None)
     if other is None:
         return
-    try:
+    with suppress(OSError):
         Path(other).unlink(missing_ok=True)
-    except OSError:
-        pass
 
 
 def fold_other_into_guitar(
@@ -468,8 +546,17 @@ def apply_fold_other_into_guitar(
     artifacts: dict[str, Path],
     *,
     mode: str = "full",
+    gain: float | None = None,
+    adaptive_gain: bool = False,
 ) -> tuple[dict[str, Path], FoldOtherDiagnostics]:
-    """Like ``fold_other_into_guitar`` but returns diagnostics for tests/eval."""
+    """Like ``fold_other_into_guitar`` but returns diagnostics for tests/eval.
+
+    ``gain`` overrides the fixed ``FOLD_OTHER_MIX_GAIN`` (0.5). When
+    ``adaptive_gain`` is True a small gain search is run first and the best
+    candidate (scored by ``analyze_guitar_stem_quality`` vs the competing
+    bass/drum stems) is used; the search result is returned alongside via
+    ``apply_fold_other_gain_search``.
+    """
     other = artifacts.get("other")
     guitar = artifacts.get("guitar")
     resolved_mode = mode if mode in FOLD_OTHER_MODES else "full"
@@ -527,6 +614,7 @@ def apply_fold_other_into_guitar(
 
     mix_src = other
     tmp_band: Path | None = None
+    resolved_gain = FOLD_OTHER_MIX_GAIN if gain is None else float(gain)
     if resolved_mode in ("best_effort", "band_limited"):
         tmp_band = other.parent / f"{other.stem}_guitar_band.wav"
         try:
@@ -537,16 +625,32 @@ def apply_fold_other_into_guitar(
             resolved_mode = "full"
             tmp_band = None
 
+    scoring_competitors = {
+        name: artifacts[name]
+        for name in ("bass", "drums")
+        if name in artifacts and artifacts[name] is not None
+    }
+    search = apply_fold_other_gain_search(
+        guitar,
+        mix_src,
+        competitors=scoring_competitors,
+        mode=resolved_mode,
+        adaptive=adaptive_gain,
+        fixed_gain=resolved_gain,
+    )
+    if search.attempted:
+        search_path = Path(guitar).parent / "adaptive_fold_gain_diagnostics.json"
+        search_path = search.write_json(search_path)
+        artifacts["adaptive_fold_gain_diagnostics"] = search_path
+
     mix_stems_to_wav(
         {"guitar": guitar, "other": mix_src},
         output_path=guitar,
-        gains={"guitar": 1.0, "other": FOLD_OTHER_MIX_GAIN},
+        gains={"guitar": 1.0, "other": search.chosen_gain},
     )
     if tmp_band is not None:
-        try:
+        with suppress(OSError):
             tmp_band.unlink(missing_ok=True)
-        except OSError:
-            pass
     _drop_other_stem(artifacts)
     band_note = (
         f"mixed guitar-band other ({FOLD_GUITAR_BAND_LOW_HZ:.0f}–"
@@ -554,12 +658,104 @@ def apply_fold_other_into_guitar(
         if mix_src != other
         else "mixed full other into guitar"
     )
+    if search.attempted:
+        band_note += f" @ {search.chosen_gain:.2f} gain (adaptive)"
     return artifacts, FoldOtherDiagnostics(
         attempted=True,
         folded=True,
         mode=resolved_mode,
         reason=band_note,
         piano_overlap=piano_overlap,
+    )
+
+
+def apply_fold_other_gain_search(
+    guitar_path: Path,
+    other_path: Path,
+    *,
+    competitors: dict[str, Path] | None = None,
+    mode: str = "full",
+    adaptive: bool = False,
+    fixed_gain: float = FOLD_OTHER_MIX_GAIN,
+) -> AdaptiveFoldGainDiagnostics:
+    """Pick the fold mix gain (fixed default or search over candidates).
+
+    The objective favors candidates that raise the guitar stem's high-end
+    presence while lowering overlap with the (still-present) bass/drum
+    competitors — i.e. more guitar content, less leftover bleed. Candidates
+    are scored with ``analyze_guitar_stem_quality`` on a scratch mix, so the
+    guitar file is only re-written once with the winning gain.
+    """
+    guitar = Path(guitar_path)
+    other = Path(other_path)
+    if not adaptive:
+        return AdaptiveFoldGainDiagnostics(
+            attempted=False,
+            reason="adaptive off; fixed gain",
+            chosen_gain=max(0.0, min(1.0, float(fixed_gain))),
+            scores=None,
+            wins_by=0.0,
+        )
+    if not guitar.is_file() or not other.is_file():
+        return AdaptiveFoldGainDiagnostics(
+            attempted=False,
+            reason="guitar or other stem missing",
+            chosen_gain=max(0.0, min(1.0, float(fixed_gain))),
+        )
+
+    import soundfile as sf
+
+    guitar_data, sr = sf.read(str(guitar), always_2d=True)
+    other_data, other_sr = sf.read(str(other), always_2d=True)
+    if guitar_data.size == 0 or other_data.size == 0 or int(sr) != int(other_sr):
+        return AdaptiveFoldGainDiagnostics(
+            attempted=False,
+            reason="incompatible stems for band-limited scoring",
+            chosen_gain=max(0.0, min(1.0, float(fixed_gain))),
+        )
+
+    from audio_to_tab.mixer import mix_stems_to_wav
+
+    work = guitar.parent / "_fold_gain_search"
+    work.mkdir(parents=True, exist_ok=True)
+    scores: dict[str, float] = {}
+    best_gain = float(fixed_gain)
+    best_score = float("-inf")
+    try:
+        for cand in FOLD_OTHER_GAIN_CANDIDATES:
+            probe = work / f"fold_{cand!s}.wav"
+            mix_stems_to_wav(
+                {"guitar": guitar, "other": other},
+                output_path=probe,
+                gains={"guitar": 1.0, "other": cand},
+            )
+            diag = analyze_guitar_stem_quality(probe, competing_stems=competitors or None)
+            overlap = 1.0
+            if diag.competitor_overlap:
+                values = [v for v in diag.competitor_overlap.values() if v is not None]
+                if values:
+                    overlap = float(sum(values)) / len(values)
+            score = (diag.high_end_energy_share or 0.0) - 0.5 * overlap
+            scores[f"{cand:.2f}"] = float(score)
+            if score > best_score:
+                best_score = score
+                best_gain = cand
+    finally:
+        with suppress(OSError):
+            import shutil
+
+            shutil.rmtree(work, ignore_errors=True)
+
+    wins_by = 0.0
+    ranked = sorted(scores.values(), reverse=True)
+    if len(ranked) >= 2:
+        wins_by = float(ranked[0] - ranked[1])
+    return AdaptiveFoldGainDiagnostics(
+        attempted=True,
+        reason=f"search over {len(scores)} gains; picked {best_gain:.2f}",
+        chosen_gain=best_gain,
+        scores=scores,
+        wins_by=wins_by,
     )
 
 
@@ -583,10 +779,8 @@ def apply_emit_stems(
     ]
     for name in drop:
         path = artifacts.pop(name)
-        try:
+        with suppress(OSError):
             Path(path).unlink(missing_ok=True)
-        except OSError:
-            pass
     return artifacts
 
 
@@ -640,6 +834,14 @@ class IsolateConfig:
     low_end_restore_db: float = 0.0
     # Opt-in subtractive bass/drum de-bleed below ~150 Hz (default off).
     sub_bass_debleed: bool = False
+    # Opt-in competitive spectral scrub of bass/drum flutter on the guitar stem.
+    bleed_gate: bool = False
+    # Opt-in fold-gain search (pick the best Other→Guitar mix gain automatically).
+    adaptive_fold_gain: bool = False
+    # Opt-in cross-model guitar ensemble: run BS-RoFormer-SW on top of the
+    # primary Demucs run and per-band soft-max blend the two guitar stems
+    # (whichever model kept more energy in a band wins that band).
+    guitar_ensemble: bool = False
 
     def __post_init__(self) -> None:
         # dual_guitar=True enables lead_rhythm (deprecated alias) with best_effort emit.
@@ -661,6 +863,10 @@ class IsolateConfig:
             self.two_pass = False
         if self.two_stems or self.model not in GUITAR_PRODUCING_MODELS:
             self.guitar_refine = False
+        if self.guitar_ensemble and (
+            self.two_stems or self.two_pass or self.model not in DEMUCS_MODELS
+        ):
+            self.guitar_ensemble = False
         if self.emit_stems is not None:
             self.emit_stems = tuple(self.emit_stems)
         try:
@@ -1148,6 +1354,342 @@ def apply_sub_bass_debleed(
     return dest, pre_share, post_share, removed_rms
 
 
+def apply_bleed_gate(
+    guitar_path: Path,
+    output_path: Path | None = None,
+    *,
+    competitor_paths: dict[str, Path] | None = None,
+    threshold: float = BLEED_GATE_DOMINANCE_THRESHOLD,
+    max_attenuation_linear: float = BLEED_GATE_MAX_ATTENUATION,
+    strength: float = BLEED_GATE_STRENGTH,
+    high_hz: float = BLEED_GATE_HIGH_HZ,
+) -> BleedGateDiagnostics:
+    """Competitive spectral scrub of bleed left on a guitar stem (opt-in).
+
+    For every STFT bin the competitor magnitude (sum of the separating model's
+    non-guitar stems that are expected to bleed) is compared to the guitar's
+    own magnitude. When the competitor strongly dominates the bin's energy,
+    the guitar's bin is attenuated down to ``max_attenuation_linear``. Solo or
+    guitar-dominated bins are left untouched, so clean sections are not rolled
+    off. This complements ``apply_guitar_low_end_recovery``: it scrubs *bleed*
+    (energy the model placed on the guitar stem that belongs to bass/cymbal/)
+    instead of boosting blindly. It cannot re-insert guitar energy the
+    separator already dropped — that stays the job of the better base model,
+    ensemble, or MelBand refine.
+    """
+    dest = Path(output_path) if output_path is not None else Path(guitar_path)
+    if not Path(guitar_path).is_file():
+        return BleedGateDiagnostics(attempted=False, reason="guitar stem missing")
+    competitors = {
+        name: path
+        for name, path in (competitor_paths or {}).items()
+        if path is not None and Path(path).is_file()
+    }
+    if not competitors:
+        return BleedGateDiagnostics(
+            attempted=False, reason="no competitor stems to gate against"
+        )
+
+    import soundfile as sf
+
+    guitar_data, sr = sf.read(str(guitar_path), always_2d=True)
+    if guitar_data.size == 0:
+        return BleedGateDiagnostics(attempted=False, reason="guitar stem is empty")
+    if int(sr) == 0:
+        return BleedGateDiagnostics(attempted=False, reason="unknown sample rate")
+
+    n = len(guitar_data)
+    comp_data: dict[str, np.ndarray] = {}
+    for name, path in competitors.items():
+        try:
+            data, comp_sr = sf.read(str(path), always_2d=True)
+        except Exception:
+            continue
+        if data.size == 0 or int(comp_sr) != int(sr):
+            continue
+        comp_data[name] = data[:n]
+
+    if not comp_data:
+        return BleedGateDiagnostics(
+            attempted=False, reason="no compatible competitor stems (sr mismatch)"
+        )
+
+    gate_high_hz = max(0.0, min(float(high_hz), int(sr) / 2.0))
+    alpha = max(0.0, min(1.0, float(strength)))
+    floor_lin = max(1e-3, min(1.0, float(max_attenuation_linear)))
+
+    from scipy.signal import istft, stft
+
+    nperseg = BLEED_GATE_NPERSEG
+    noverlap = BLEED_GATE_OVERLAP
+    window = "hann"
+
+    guitar_mono = _to_mono(guitar_data)
+    comp_mono = np.zeros_like(guitar_mono)
+    for data in comp_data.values():
+        comp_mono = comp_mono + _to_mono(data)
+
+    _, _, gz = stft(
+        guitar_mono, fs=int(sr), window=window, nperseg=nperseg, noverlap=noverlap
+    )
+    _, _, cz = stft(
+        comp_mono, fs=int(sr), window=window, nperseg=nperseg, noverlap=noverlap
+    )
+    gmag = np.abs(gz)
+    cmag = np.abs(cz)
+    bins = min(gmag.shape[0], cmag.shape[0])
+    frames = min(gmag.shape[1], cmag.shape[1])
+    gmag = gmag[:bins, :frames]
+    cmag = cmag[:bins, :frames]
+
+    nyquist = int(sr) / 2.0
+    cutoff_bin = bins if gate_high_hz >= nyquist else int(bins * gate_high_hz / nyquist)
+    cutoff_bin = max(1, min(bins, cutoff_bin))
+
+    denom = gmag + cmag + 1e-12
+    score = cmag / denom
+    trip = (score >= float(threshold)).astype(np.float32)
+    over = np.maximum(0.0, (score - threshold) / max(1e-6, 1.0 - threshold))
+    mult = 1.0 - alpha * over * (1.0 - floor_lin)
+    gated_mask = np.where(trip > 0, mult, 1.0).astype(np.float32)
+    gated_mask[cutoff_bin:, :] = 1.0
+
+    dominated = float(np.mean(trip[:cutoff_bin, :])) if cutoff_bin > 0 else 0.0
+    attenuated = gated_mask < 0.999
+    if not bool(np.any(attenuated)):
+        return BleedGateDiagnostics(
+            attempted=True,
+            reason="competitor energy never dominated guitar; nothing scrubbed",
+            gated=False,
+            dominated_bin_fraction=dominated,
+            mean_attenuation_db=0.0,
+            threshold=threshold,
+            max_attenuation_linear=floor_lin,
+            high_hz=gate_high_hz,
+            competitors=tuple(comp_data),
+        )
+    atten_db = float(
+        np.mean(np.where(attenuated, -20.0 * np.log10(gated_mask + 1e-12), 0.0))
+    )
+
+    channels = guitar_data.shape[1]
+    out_channels: list[np.ndarray] = []
+    for ch in range(channels):
+        _, _, Z = stft(
+            guitar_data[:, ch].astype(np.float64),
+            fs=int(sr),
+            window=window,
+            nperseg=nperseg,
+            noverlap=noverlap,
+        )
+        Z = Z[:bins, :frames]
+        Z = Z * gated_mask
+        _, rebuilt = istft(
+            Z, fs=int(sr), window=window, nperseg=nperseg, noverlap=noverlap
+        )
+        rebuilt = rebuilt[:n]
+        if len(rebuilt) < n:
+            rebuilt = np.pad(rebuilt, (0, n - len(rebuilt)))
+        out_channels.append(rebuilt)
+
+    stereo = np.column_stack(out_channels)[:n].astype(np.float32)
+    if stereo.shape[1] == 1:
+        stereo = np.repeat(stereo, 2, axis=1)
+    stereo = _apply_peak_limit(stereo)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(dest), stereo, int(sr), subtype="PCM_16")
+    return BleedGateDiagnostics(
+        attempted=True,
+        reason=(
+            f"scrubbed {dominated:.3f} dominated bins, "
+            f"mean ~{atten_db:.1f} dB attenuation"
+        ),
+        gated=True,
+        dominated_bin_fraction=dominated,
+        mean_attenuation_db=atten_db,
+        threshold=threshold,
+        max_attenuation_linear=floor_lin,
+        high_hz=gate_high_hz,
+        competitors=tuple(comp_data),
+    )
+
+
+@dataclass
+class EnsembleGuitarDiagnostics:
+    """Per-band soft-max blend of two separators' guitar stems (opt-in)."""
+
+    attempted: bool
+    reason: str
+    blended: bool = False
+    bands: int = ENSEMBLE_BLEND_BANDS
+    gamma: float = ENSEMBLE_BLEND_GAMMA
+    low_hz: float = ENSEMBLE_BLEND_LOW_HZ
+    mean_primary_weight: float | None = None
+    primary_label: str = ""
+    secondary_label: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def write_json(self, path: Path) -> Path:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
+        return path
+
+
+def blend_guitar_stems(
+    primary_path: Path,
+    secondary_path: Path,
+    output_path: Path,
+    *,
+    bands: int = ENSEMBLE_BLEND_BANDS,
+    gamma: float = ENSEMBLE_BLEND_GAMMA,
+    low_hz: float = ENSEMBLE_BLEND_LOW_HZ,
+    primary_label: str = "primary",
+    secondary_label: str = "secondary",
+) -> EnsembleGuitarDiagnostics:
+    """Blend two guitar stems per frequency band by soft-max energy weighting.
+
+    Each separator loses a *different* sub-band on dense mixes; this picks, per
+    log-spaced band, whichever stem carries more energy (soft max with
+    ``gamma``≈3), which preserves every band either model kept. The mask is
+    estimated from the mono mixdown and applied per channel with an overlap-add
+    STFT so the result is COLA-exact apart from the band smoothing.
+    """
+    dest = Path(output_path)
+    if not Path(primary_path).is_file() or not Path(secondary_path).is_file():
+        return EnsembleGuitarDiagnostics(
+            attempted=False,
+            reason="one of the guitar stems is missing",
+            primary_label=primary_label,
+            secondary_label=secondary_label,
+        )
+
+    import soundfile as sf
+    from scipy.signal import istft, stft
+
+    primary, sr_p = sf.read(str(primary_path), always_2d=True)
+    secondary, sr_s = sf.read(str(secondary_path), always_2d=True)
+    if primary.size == 0 or secondary.size == 0:
+        return EnsembleGuitarDiagnostics(
+            attempted=False,
+            reason="one of the guitar stems is empty",
+            primary_label=primary_label,
+            secondary_label=secondary_label,
+        )
+    if int(sr_p) != int(sr_s):
+        return EnsembleGuitarDiagnostics(
+            attempted=False,
+            reason=f"sample-rate mismatch ({sr_p} vs {sr_s})",
+            primary_label=primary_label,
+            secondary_label=secondary_label,
+        )
+    sr = int(sr_p)
+    n = min(len(primary), len(secondary))
+    primary = primary[:n]
+    secondary = secondary[:n]
+
+    nperseg = BLEED_GATE_NPERSEG
+    noverlap = BLEED_GATE_OVERLAP
+    window = "hann"
+    p_mono = _to_mono(primary)
+    s_mono = _to_mono(secondary)
+
+    freqs, _, P = stft(p_mono, fs=sr, window=window, nperseg=nperseg, noverlap=noverlap)
+    _, _, S = stft(s_mono, fs=sr, window=window, nperseg=nperseg, noverlap=noverlap)
+    bins = min(P.shape[0], S.shape[0])
+    frames = min(P.shape[1], S.shape[1])
+    P = P[:bins, :frames]
+    S = S[:bins, :frames]
+
+    band_edges = _log_band_edges(freqs[:bins], bands=bands, low_hz=low_hz)
+    weights = np.ones_like(P, dtype=np.float32)
+    if len(band_edges) >= 2:
+        band_weights: list[float] = []
+        for lo_idx, hi_idx in itertools.pairwise(band_edges):
+            if hi_idx <= lo_idx:
+                continue
+            p_e = float(np.sum(np.abs(P[lo_idx:hi_idx, :]) ** 2)) + 1e-12
+            s_e = float(np.sum(np.abs(S[lo_idx:hi_idx, :]) ** 2)) + 1e-12
+            w = p_e**gamma / (p_e**gamma + s_e**gamma)
+            band_weights.append(float(w))
+            weights[lo_idx:hi_idx, :] = w
+    mean_primary_weight = float(np.mean(weights))
+
+    channels = primary.shape[1]
+    out_channels: list[np.ndarray] = []
+    for ch in range(channels):
+        _, _, Zp = stft(
+            primary[:, ch].astype(np.float64),
+            fs=sr,
+            window=window,
+            nperseg=nperseg,
+            noverlap=noverlap,
+        )
+        _, _, Zs = stft(
+            secondary[:, ch].astype(np.float64),
+            fs=sr,
+            window=window,
+            nperseg=nperseg,
+            noverlap=noverlap,
+        )
+        Zp = Zp[:bins, :frames]
+        Zs = Zs[:bins, :frames]
+        blended = Zp * weights + Zs * (1.0 - weights)
+        _, rebuilt = istft(
+            blended, fs=sr, window=window, nperseg=nperseg, noverlap=noverlap
+        )
+        rebuilt = rebuilt[:n]
+        if len(rebuilt) < n:
+            rebuilt = np.pad(rebuilt, (0, n - len(rebuilt)))
+        out_channels.append(rebuilt)
+
+    stereo = np.column_stack(out_channels)[:n].astype(np.float32)
+    if stereo.shape[1] == 1:
+        stereo = np.repeat(stereo, 2, axis=1)
+    stereo = _apply_peak_limit(stereo)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(dest), stereo, sr, subtype="PCM_16")
+    return EnsembleGuitarDiagnostics(
+        attempted=True,
+        reason=(
+            f"blended {len(band_edges) - 1} bands, "
+            f"mean primary weight {mean_primary_weight:.2f}"
+        ),
+        blended=True,
+        bands=bands,
+        gamma=gamma,
+        low_hz=low_hz,
+        mean_primary_weight=mean_primary_weight,
+        primary_label=primary_label,
+        secondary_label=secondary_label,
+    )
+
+
+def _log_band_edges(
+    freqs: np.ndarray, *, bands: int, low_hz: float
+) -> list[int]:
+    """Indices dividing ``freqs`` into ``bands`` log-spaced groups below Nyquist."""
+    n = len(freqs)
+    if n == 0:
+        return []
+    hi = float(freqs[-1])
+    lo = min(float(low_hz), hi)
+    if hi <= lo * (1.0 + 1e-6):
+        return [0, n]
+    edges = np.geomspace(lo, hi, num=max(2, int(bands)) + 1)
+    out: list[int] = []
+    for value in edges:
+        idx = int(np.searchsorted(freqs, value))
+        idx = max(0, min(n - 1, idx))
+        if not out or idx != out[-1]:
+            out.append(idx)
+    if out[-1] != n:
+        out.append(n)  # framegroup closed at the full bin count
+    return out
+
+
 def apply_guitar_low_end_recovery(
     guitar_path: Path,
     output_path: Path | None = None,
@@ -1156,8 +1698,13 @@ def apply_guitar_low_end_recovery(
     drums_path: Path | None = None,
     sub_bass_debleed: bool = False,
     boost_db: float = 0.0,
+    bass_missing_reason: str = "",
 ) -> LowEndRecoveryDiagnostics:
-    """Opt-in subtractive de-bleed then harmonic restore (both default off)."""
+    """Opt-in subtractive de-bleed then harmonic restore (both default off).
+
+    ``bass_missing_reason`` overrides the generic "bass stem missing" note when
+    the bass stem exists upstream but was intentionally dropped (e.g. emit).
+    """
     dest = Path(output_path) if output_path is not None else Path(guitar_path)
     work = dest
     debleed_applied = False
@@ -1180,7 +1727,10 @@ def apply_guitar_low_end_recovery(
                 f"subtracted bass/drum energy below {SUB_BASS_DEBLEED_CUTOFF_HZ:.0f} Hz"
             )
     elif sub_bass_debleed:
-        reasons.append("sub_bass_debleed requested but bass stem missing")
+        if bass_missing_reason:
+            reasons.append(f"sub_bass_debleed not applied: {bass_missing_reason}")
+        else:
+            reasons.append("sub_bass_debleed requested but bass stem missing")
 
     try:
         boost = float(boost_db)
@@ -1205,7 +1755,7 @@ def apply_guitar_low_end_recovery(
     if not debleed_applied and not restore_applied:
         return LowEndRecoveryDiagnostics(
             attempted=False,
-            reason="off (no recovery stages enabled)",
+            reason="; ".join(reasons) if reasons else "off (no recovery stages enabled)",
             harmonic_restore_db=boost,
         )
 
@@ -1430,16 +1980,13 @@ def _trim_audio(
     start_sec: float = 0.0,
 ) -> Path:
     """Trim normalized audio with ffmpeg ``-ss`` + ``-t`` (after normalize, before Demucs)."""
-    if max_duration_sec is None and start_sec <= 0:
-        return input_path
-    length = max_duration_sec
-    if length is None:
+    if max_duration_sec is None or max_duration_sec <= 0:
         return input_path
     out = input_path.parent / f"{input_path.stem}_trim.wav"
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return input_path
-    subprocess.run(
+    result = subprocess.run(
         [
             ffmpeg,
             "-y",
@@ -1448,14 +1995,16 @@ def _trim_audio(
             "-i",
             str(input_path),
             "-t",
-            str(length),
+            str(max_duration_sec),
             str(out),
         ],
         capture_output=True,
         check=False,
         **subprocess_run_kwargs(),
     )
-    return out if out.exists() else input_path
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg trim failed: {result.stderr or result.stdout}")
+    return out
 
 
 def merge_two_pass_stems(
@@ -1513,6 +2062,8 @@ def _run_demucs_model(
     model: str,
     allow_guitar_ft: bool,
     progress: ProgressCallback,
+    should_abort: Callable[[], bool] | None = None,
+    timeout_sec: float | None = None,
 ) -> None:
     """Run one Demucs pass into ``demucs_out`` (CLI or guitar-ft in-process)."""
     use_guitar_ft = (
@@ -1558,7 +2109,7 @@ def _run_demucs_model(
     if cfg.two_stems:
         demucs_args.extend(["--two-stems", cfg.two_stems])
     demucs_args.append(str(audio_path))
-    run_demucs(demucs_args)
+    run_demucs(demucs_args, should_abort=should_abort, timeout_sec=timeout_sec)
 
 
 def _run_separation_backend(
@@ -1569,11 +2120,17 @@ def _run_separation_backend(
     model: str,
     allow_guitar_ft: bool,
     progress: ProgressCallback,
+    should_abort: Callable[[], bool] | None = None,
+    timeout_sec: float | None = None,
 ) -> None:
-    """Run Demucs or an opt-in RoFormer backend into ``demucs_out``."""
+    """Run Demucs or an opt-in RoFormer / SCNet backend into ``demucs_out``."""
     if model in ROFORMER_MODELS:
         progress("separate", separate_progress_message(cfg.device))
         run_roformer_model(audio_path, demucs_out, model=model, device=cfg.device)
+        return
+    if model in SCNET_MODELS:
+        progress("separate", separate_progress_message(cfg.device))
+        run_scnet_model(audio_path, demucs_out, device=cfg.device)
         return
     _run_demucs_model(
         audio_path,
@@ -1582,6 +2139,8 @@ def _run_separation_backend(
         model=model,
         allow_guitar_ft=allow_guitar_ft,
         progress=progress,
+        should_abort=should_abort,
+        timeout_sec=timeout_sec,
     )
 
 
@@ -1625,6 +2184,7 @@ def separate_stems(
     checkpoint_dir: str | Path | None = None,
     completed_stages: set[str] | frozenset[str] | list[str] | None = None,
     on_stage_complete: StageCompleteCallback | None = None,
+    subprocess_timeout_sec: float | None = None,
 ) -> dict[str, Path]:
     """
     Separate an audio file into instrument stems using Demucs.
@@ -1632,6 +2192,9 @@ def separate_stems(
     Returns a mapping of stem name -> wav path under output_dir.
     CPU separation is slow (~track length or longer); quality presets multiply time.
     CUDA (NVIDIA GPU) is used when ``config.device`` is ``cuda`` and Torch can see it.
+    ``should_abort`` and ``subprocess_timeout_sec`` are honored **during** the
+    long-running Demucs subprocess (terminated on abort / killed on timeout),
+    not only at the stage boundaries checked between steps.
     """
     cfg = config or IsolateConfig()
     if cfg.model not in SUPPORTED_MODELS:
@@ -1647,6 +2210,10 @@ def separate_stems(
     if cfg.model in ROFORMER_MODELS and not is_roformer_backend_available():
         raise RuntimeError(
             f"RoFormer backend is not installed. {ROFORMER_INSTALL_HINT}"
+        )
+    if cfg.model in SCNET_MODELS and not is_scnet_available():
+        raise RuntimeError(
+            f"SCNet backend is not installed. {SCNET_INSTALL_HINT}"
         )
 
     ensure_cuda_available(cfg.device)
@@ -1670,17 +2237,19 @@ def separate_stems(
         normalized = normalize_audio(src, work / "normalized.wav")
         trim_length = cfg.max_duration_sec
         trim_start = cfg.start_sec
-        if trim_length is None and trim_start <= 0:
+        if trim_length is None and trim_start > 0:
+            file_dur = probe_duration_sec(normalized)
+            if file_dur is None or file_dur <= trim_start:
+                raise RegionError(
+                    f"Requested region (start {trim_start:.1f}s) can't be honored: "
+                    "the audio duration is unknown or the start is past the end of "
+                    "the file. Process the full track or a shorter section instead."
+                )
+            trim_length = file_dur - trim_start
+        if trim_length is None or trim_length <= 0:
             trim_message = "Using full audio"
         else:
-            if trim_length is None:
-                file_dur = probe_duration_sec(normalized)
-                if file_dur is not None and file_dur > trim_start:
-                    trim_length = file_dur - trim_start
-            if trim_length is not None and trim_length > 0:
-                trim_message = f"Trimming to {format_region_label(trim_start, trim_length)}"
-            else:
-                trim_message = "Using full audio"
+            trim_message = f"Trimming to {format_region_label(trim_start, trim_length)}"
         logger.debug("isolate trim: %s", trim_message)
         progress("ingest", "Preparing audio")
         return _trim_audio(normalized, trim_length, start_sec=trim_start)
@@ -1699,6 +2268,8 @@ def separate_stems(
                 model="htdemucs",
                 allow_guitar_ft=False,
                 progress=progress,
+                should_abort=should_abort,
+                timeout_sec=subprocess_timeout_sec,
             )
             pass1 = _collect_stem_wavs(pass1_out)
             other = pass1.get("other")
@@ -1711,6 +2282,8 @@ def separate_stems(
                     model=cfg.model,
                     allow_guitar_ft=True,
                     progress=progress,
+                    should_abort=should_abort,
+                    timeout_sec=subprocess_timeout_sec,
                 )
             else:
                 progress("separate", "Separating guitar from the leftover mix")
@@ -1721,6 +2294,8 @@ def separate_stems(
                     model="htdemucs_6s",
                     allow_guitar_ft=True,
                     progress=progress,
+                    should_abort=should_abort,
+                    timeout_sec=subprocess_timeout_sec,
                 )
                 pass2 = _collect_stem_wavs(pass2_out)
                 merge_two_pass_stems(pass1, pass2, demucs_out)
@@ -1732,6 +2307,8 @@ def separate_stems(
                 model=cfg.model,
                 allow_guitar_ft=True,
                 progress=progress,
+                should_abort=should_abort,
+                timeout_sec=subprocess_timeout_sec,
             )
         return demucs_out
 
@@ -1788,6 +2365,52 @@ def separate_stems(
         _abort_if(should_abort)
         return collected
 
+    def _maybe_ensemble_guitar(artifacts: dict[str, Path], trimmed: Path) -> None:
+        """Opt-in Phase 2: per-band blend of Demucs + BS-RoFormer guitar stems."""
+        if not cfg.guitar_ensemble or "guitar" not in artifacts:
+            return
+        if not is_roformer_backend_available():
+            logger.warning(
+                "guitar ensemble requested but no RoFormer extra is installed; "
+                "keeping the primary Demucs guitar stem. %s",
+                ROFORMER_INSTALL_HINT,
+            )
+            return
+        _abort_if(should_abort)
+        progress("ensemble", "Running secondary separation")
+        with tempfile.TemporaryDirectory() as tmp:
+            sec_out = Path(tmp) / "secondary"
+            sec_out.mkdir(parents=True, exist_ok=True)
+            try:
+                run_roformer_model(
+                    trimmed, sec_out, model=BS_ROFORMER_SW_ID, device=cfg.device
+                )
+            except Exception as exc:
+                logger.warning(
+                    "guitar ensemble secondary separation failed; "
+                    "keeping the primary guitar stem: %s",
+                    exc,
+                )
+                return
+            secondary = sec_out / "guitar.wav"
+            if not secondary.is_file():
+                logger.warning(
+                    "guitar ensemble secondary separation produced no guitar stem; "
+                    "keeping the primary guitar stem"
+                )
+                return
+            diag = blend_guitar_stems(
+                artifacts["guitar"],
+                secondary,
+                artifacts["guitar"],
+            )
+            if diag.attempted:
+                ensemble_path = diag.write_json(
+                    out_dir / "ensemble_guitar_diagnostics.json"
+                )
+                artifacts["ensemble_guitar_diagnostics"] = ensemble_path
+                logger.debug("guitar ensemble: %s", diag.reason)
+
     if ckpt_root is not None:
         work = ckpt_root / "work"
         work.mkdir(parents=True, exist_ok=True)
@@ -1809,6 +2432,7 @@ def separate_stems(
             _mark_stage_complete("separate", on_stage_complete)
             _abort_if(should_abort)
         artifacts = _collect_into_out_dir(demucs_out)
+        _maybe_ensemble_guitar(artifacts, trimmed)
     else:
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
@@ -1816,6 +2440,7 @@ def separate_stems(
             _abort_if(should_abort)
             demucs_out = _run_separate_stage(trimmed, work)
             artifacts = _collect_into_out_dir(demucs_out)
+            _maybe_ensemble_guitar(artifacts, trimmed)
 
     if not _stage_done(completed, "guitar_refine"):
         _abort_if(should_abort)
@@ -1833,13 +2458,36 @@ def separate_stems(
 
     if cfg.fold_other_into_guitar and "guitar" in artifacts:
         artifacts, fold_diag = apply_fold_other_into_guitar(
-            artifacts, mode=cfg.fold_other_mode
+            artifacts,
+            mode=cfg.fold_other_mode,
+            adaptive_gain=cfg.adaptive_fold_gain,
         )
         fold_path = fold_diag.write_json(out_dir / "fold_other_diagnostics.json")
         artifacts["fold_other_diagnostics"] = fold_path
         logger.debug("fold other: %s", fold_diag.reason)
+
+    if cfg.bleed_gate and "guitar" in artifacts:
+        gate_competitors = {
+            name: artifacts[name]
+            for name in ("bass", "drums", "other")
+            if name in artifacts and artifacts[name] is not None
+        }
+        gate_diag = apply_bleed_gate(
+            artifacts["guitar"],
+            artifacts["guitar"],
+            competitor_paths=gate_competitors,
+        )
+        gate_path = gate_diag.write_json(out_dir / "bleed_gate_diagnostics.json")
+        artifacts["bleed_gate_diagnostics"] = gate_path
+        logger.debug("bleed gate: %s", gate_diag.reason)
     bass_path_for_recovery = artifacts.get("bass")
     drums_path_for_recovery = artifacts.get("drums")
+    emit_keeps = set(cfg.emit_stems) if cfg.emit_stems else None
+    bass_dropped_by_emit = (
+        emit_keeps is not None
+        and bass_path_for_recovery is not None
+        and "bass" not in emit_keeps
+    )
     apply_emit_stems(artifacts, cfg.emit_stems)
 
     if "guitar" in artifacts:
@@ -1869,6 +2517,11 @@ def separate_stems(
                 drums_path=drums_path_for_recovery,
                 sub_bass_debleed=cfg.sub_bass_debleed,
                 boost_db=cfg.low_end_restore_db,
+                bass_missing_reason=(
+                    "bass stem dropped by emit policy"
+                    if bass_dropped_by_emit
+                    else ""
+                ),
             )
             recovery_path = recovery_diag.write_json(
                 out_dir / "low_end_recovery_diagnostics.json"

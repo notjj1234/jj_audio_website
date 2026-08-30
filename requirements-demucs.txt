@@ -1,5 +1,5 @@
 -r requirements.txt
 demucs>=4.0
-torch>=2.0
-torchaudio>=2.0
+torch>=2.2,<2.14
+torchaudio>=2.2,<2.12
 torchcodec>=0.14,<0.15

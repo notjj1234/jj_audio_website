@@ -86,6 +86,30 @@ def test_run_guitar_refine_saves_backups(tmp_path: Path, monkeypatch):
     assert guitar.read_bytes() != pre_bytes
 
 
+def test_refine_guitar_from_stems_cleans_work_dir(tmp_path: Path, monkeypatch):
+    from audio_to_tab.roformer import refine_guitar_from_stems
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    guitar = run_dir / "guitar.wav"
+    other = run_dir / "other.wav"
+    _write_tone(guitar, 440.0)
+    _write_tone(other, 110.0)
+    original = guitar.read_bytes()
+
+    def fake_melband(audio_path, output_root, *, device="cpu"):
+        output_root.mkdir(parents=True, exist_ok=True)
+        _write_tone(output_root / "guitar.wav", 880.0)
+        _write_tone(output_root / "other.wav", 220.0)
+        return {"guitar": output_root / "guitar.wav", "other": output_root / "other.wav"}
+
+    monkeypatch.setattr("audio_to_tab.roformer.run_melband_guitar", fake_melband)
+    artifacts = refine_guitar_from_stems({"guitar": guitar, "other": other})
+    assert artifacts["guitar"] == guitar
+    assert not (run_dir / "_guitar_refine").exists()
+    assert guitar.read_bytes() != original
+
+
 def test_apply_fixup_always_sources_from_backup(tmp_path: Path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -38,6 +39,32 @@ class YouTubeDownloadError(RuntimeError):
 
 class YouTubeSearchError(RuntimeError):
     """User-facing failure searching public YouTube videos (no API key)."""
+
+
+class _YoutubeFileLogger:
+    """Router all yt-dlp output to a per-download log file (any platform)."""
+
+    def __init__(self, path: Path):
+        self._path = path
+
+    def _write(self, level: str, msg: str) -> None:
+        try:
+            with self._path.open("a", encoding="utf-8") as log:
+                log.write(f"[{level}] {msg}\n")
+        except OSError:
+            pass
+
+    def debug(self, msg: str) -> None:
+        self._write("debug", str(msg))
+
+    def info(self, msg: str) -> None:
+        self._write("info", str(msg))
+
+    def warning(self, msg: str) -> None:
+        self._write("warning", str(msg))
+
+    def error(self, msg: str) -> None:
+        self._write("error", str(msg))
 
 
 @dataclass(frozen=True)
@@ -81,13 +108,16 @@ def _youtube_log_path() -> Path | None:
     override = os.environ.get("AUDIO_TOOLS_LOG_DIR", "").strip()
     if override:
         path = Path(override)
-        path.mkdir(parents=True, exist_ok=True)
-        return path / "yt-dlp.log"
-    if sys.platform == "darwin":
+    elif sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        path = Path(base) / "AudioTools" / "logs"
+    elif sys.platform == "darwin":
         path = Path.home() / "Library" / "Application Support" / "AudioTools" / "logs"
-        path.mkdir(parents=True, exist_ok=True)
-        return path / "yt-dlp.log"
-    return None
+    else:
+        base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+        path = Path(base) / "audiotools" / "logs"
+    path.mkdir(parents=True, exist_ok=True)
+    return path / "yt-dlp.log"
 
 
 def _youtube_ydl_opts(
@@ -95,6 +125,7 @@ def _youtube_ydl_opts(
     template: str,
     player_client: str,
     verbose: bool = False,
+    log_path: Path | None = None,
 ) -> dict:
     """yt-dlp options for one public-video download attempt."""
     ffmpeg = shutil.which("ffmpeg")
@@ -120,6 +151,8 @@ def _youtube_ydl_opts(
         "no_warnings": not verbose,
         "verbose": verbose,
     }
+    if verbose and log_path is not None:
+        opts["logger"] = _YoutubeFileLogger(log_path)
     if ffmpeg:
         opts["ffmpeg_location"] = str(Path(ffmpeg).resolve().parent)
     return opts
@@ -154,14 +187,24 @@ def _user_facing_youtube_error(last_exc: BaseException | None) -> YouTubeDownloa
     return YouTubeDownloadError(" ".join(parts))
 
 
+def _title_stem(name: str) -> str:
+    """Canonical filename-stem form (case- and punctuation-insensitive)."""
+    return "".join(ch for ch in name.casefold() if ch.isalnum())
+
+
 def _resolve_downloaded_wav(out_dir: Path, title: str, url: str) -> Path:
+    safe = "".join(c if c.isalnum() or c in " -_." else "_" for c in (title or "")).strip()[:80]
+    if safe:
+        want = _title_stem(safe)
+        matches = [
+            p for p in out_dir.glob("*.wav") if _title_stem(p.stem) == want
+        ]
+        if matches:
+            return normalize_audio(max(matches, key=lambda p: p.stat().st_mtime))
+
     candidates = list(out_dir.glob("*.wav"))
     if candidates:
-        return max(candidates, key=lambda p: p.stat().st_mtime)
-    safe = "".join(c if c.isalnum() or c in " -_" else "_" for c in title[:80])
-    for p in out_dir.iterdir():
-        if safe[:20] in p.stem:
-            return normalize_audio(p)
+        return normalize_audio(max(candidates, key=lambda p: p.stat().st_mtime))
     raise FileNotFoundError(f"Downloaded audio not found for: {url}")
 
 
@@ -310,11 +353,10 @@ def download_youtube_audio(url: str, output_dir: str | Path) -> Path:
             template=template,
             player_client=player_client,
             verbose=verbose,
+            log_path=log_path,
         )
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
-                if log_path is not None:
-                    ydl.params["logger"] = None
                 info = ydl.extract_info(url, download=True)
             title = (info or {}).get("title", "youtube_audio")
             return _resolve_downloaded_wav(out_dir, title, url)
@@ -335,14 +377,34 @@ def download_youtube_audio(url: str, output_dir: str | Path) -> Path:
     raise _user_facing_youtube_error(last_exc)
 
 
+def _unlink_quiet(path: Path) -> None:
+    with suppress(OSError):
+        path.unlink()
+
+
+def temporary_output_path(prefix: str, suffix: str) -> Path:
+    """Create a caller-owned temp output path for audio writing tools.
+
+    ``tempfile.mkstemp`` hands back an open FD that engine functions never read
+    or write (they pass the path to ffmpeg instead); closing it right away is
+    required on Windows — an open FD makes later ``unlink()`` calls fail with
+    ``PermissionError`` and leaks the handle. The caller owns the file (and its
+    deletion) once returned.
+    """
+    fd, name = tempfile.mkstemp(suffix=suffix, prefix=prefix)
+    os.close(fd)
+    return Path(name)
+
+
 def normalize_audio(input_path: str | Path, output_path: str | Path | None = None) -> Path:
     """Convert audio to 44.1kHz stereo WAV suitable for ML models."""
     src = Path(input_path)
     if not src.exists():
         raise FileNotFoundError(f"Audio file not found: {src}")
 
-    if output_path is None:
-        out = Path(tempfile.mkstemp(suffix=".wav", prefix="audio_norm_")[1])
+    temp_out = output_path is None
+    if temp_out:
+        out = temporary_output_path("audio_norm_", ".wav")
     else:
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -361,7 +423,14 @@ def normalize_audio(input_path: str | Path, output_path: str | Path | None = Non
         "s16",
         str(out),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, **subprocess_run_kwargs())
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, **subprocess_run_kwargs())
+    except BaseException:
+        if temp_out:
+            _unlink_quiet(out)
+        raise
     if result.returncode != 0:
+        if temp_out:
+            _unlink_quiet(out)
         raise RuntimeError(f"ffmpeg failed: {result.stderr}")
     return out
