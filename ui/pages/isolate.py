@@ -75,6 +75,7 @@ from ui.isolate_state import (
     LISTEN_PICKER_KEY,
     LISTEN_PICKER_NEXT_KEY,
     ROFORMER_BACKEND_UI_HINT,
+    ROFORMER_SPEED_PRESET_NOTE,
     SPEED_PRESETS,
     TRACK_OPTIONS,
     VOCALS_INSTRUMENTAL_OPTION_ID,
@@ -1215,6 +1216,8 @@ def _render_separation_controls() -> dict:
     speed = resolve_speed_preset(speed_id, probe, model=resolved["model"])
     if speed["help"]:
         st.caption(speed["help"])
+    if job_requires_roformer_backend(resolved["model"]):
+        st.caption(ROFORMER_SPEED_PRESET_NOTE)
 
     applied = f"{speed['id']}:{resolved['model']}"
     if st.session_state.get("isolate_speed_applied") != applied:
@@ -1245,7 +1248,10 @@ def _render_separation_controls() -> dict:
             "Device",
             device_options,
             key="isolate_device",
-            help="GPU acceleration is NVIDIA CUDA only.",
+            help=(
+                "GPU: NVIDIA CUDA on Windows; Apple GPU (MPS) on Apple Silicon "
+                "with ≥12 GB RAM. CPU is always available."
+            ),
         )
         st.text_input(
             "Output name",

@@ -526,7 +526,11 @@ def _job_process_entry(job_id: str) -> None:
 
 def _run_one_job(job_id: str) -> None:
     from audio_to_tab.isolate import IsolateConfig, JobAborted, separate_stems
-    from audio_to_tab.hardware import ensure_cuda_available, get_desktop_probe
+    from audio_to_tab.hardware import (
+        get_desktop_probe,
+        recommended_cpu_threads,
+        resolve_safe_device,
+    )
     from ui.common import write_run_metadata
     from ui.isolate_state import (
         estimated_stage_seconds,
@@ -562,6 +566,21 @@ def _run_one_job(job_id: str) -> None:
     clip_sec = spec.audio_duration_sec
     if clip_sec is None:
         clip_sec = spec.max_duration_sec
+    # Never run a job on an accelerator this host cannot use (CUDA stays fail-
+    # closed; an MPS request on an ineligible Mac downgrades to CPU).
+    probe = get_desktop_probe()
+    try:
+        spec.device = resolve_safe_device(spec.device, probe)
+    except RuntimeError as exc:
+        write_status(
+            job_id,
+            status="failed",
+            stage="error",
+            message=str(exc),
+            error=str(exc),
+            finished_at=time.time(),
+        )
+        return
     job_estimate, estimate_conf = estimate_job_seconds(
         audio_duration_sec=clip_sec,
         quality=spec.quality,
@@ -572,6 +591,7 @@ def _run_one_job(job_id: str) -> None:
         expects_guitar=guitar_job,
         two_pass=spec.two_pass,
         guitar_refine=spec.guitar_refine,
+        cpu_threads=recommended_cpu_threads(),
     )
     started = time.time()
     eta_fields = {
@@ -594,19 +614,6 @@ def _run_one_job(job_id: str) -> None:
         stage_started_at=started,
         **eta_fields,
     )
-
-    try:
-        ensure_cuda_available(spec.device, get_desktop_probe())
-    except RuntimeError as exc:
-        write_status(
-            job_id,
-            status="failed",
-            stage="error",
-            message=str(exc),
-            error=str(exc),
-            finished_at=time.time(),
-        )
-        return
 
     config = IsolateConfig(
         model=spec.model,

@@ -16,9 +16,18 @@ $env:AUDIO_TOOLS_EDITION = "cuda"
 .\.venv-desktop\Scripts\python.exe packaging/launcher.py
 ```
 
-**macOS**
+**macOS (Apple Silicon / Intel)**
+`./scripts/dev.sh tester` runs Streamlit in the browser. To open the same UI as a **native app window** (pywebview, title "Audio Tools Demo"), use the launcher:
+
 ```bash
-./scripts/dev.sh tester
+# First time only — desktop venv with the native-window (pywebview) support
+python3.11 -m venv .venv-desktop
+source .venv-desktop/bin/activate
+python -m pip install --upgrade pip
+pip install -e ".[demucs,desktop,roformer,separator]"
+
+# Opens a native macOS window (port 8501, or 8502–8505 if taken)
+.venv-desktop/bin/python packaging/launcher.py
 ```
 
 ## Build installers (0.1.3)

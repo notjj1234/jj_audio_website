@@ -1356,6 +1356,78 @@ def test_estimate_job_seconds_two_pass_is_double_separate():
     assert two == pytest.approx(one * 2.0)
 
 
+def test_estimate_roformer_ignores_demucs_quality():
+    stages = isolation_stages_for_job(expects_guitar=True)
+    fast, _ = estimate_job_seconds(
+        audio_duration_sec=100.0,
+        quality="fast",
+        device="cpu",
+        stages=stages,
+        model="bs_roformer_sw",
+    )
+    balanced, _ = estimate_job_seconds(
+        audio_duration_sec=100.0,
+        quality="balanced",
+        device="cpu",
+        stages=stages,
+        model="bs_roformer_sw",
+    )
+    assert fast is not None and balanced is not None
+    assert fast == pytest.approx(balanced)
+    assert estimated_stage_seconds("separate", stages, fast) == pytest.approx(
+        100.0 * 2.2, rel=0.02
+    )
+
+
+def test_estimate_roformer_scales_by_cores_and_device():
+    stages = isolation_stages_for_job(expects_guitar=True)
+    m1, _ = estimate_job_seconds(
+        audio_duration_sec=100.0,
+        quality="balanced",
+        device="cpu",
+        stages=stages,
+        model="bs_roformer_sw",
+        cpu_threads=4,
+    )
+    assert estimated_stage_seconds("separate", stages, m1) == pytest.approx(
+        100.0 * 2.2 * (8.0 / 4.0), rel=0.02
+    )
+    mps, _ = estimate_job_seconds(
+        audio_duration_sec=100.0,
+        quality="balanced",
+        device="mps",
+        stages=stages,
+        model="bs_roformer_sw",
+    )
+    assert estimated_stage_seconds("separate", stages, mps) == pytest.approx(
+        100.0 * 1.0, rel=0.02
+    )
+
+
+def test_estimate_roformer_refine_adds_a_pass():
+    stages = isolation_stages_for_job(expects_guitar=True)
+    plain, _ = estimate_job_seconds(
+        audio_duration_sec=100.0,
+        quality="balanced",
+        device="cpu",
+        stages=stages,
+        model="bs_roformer_sw",
+    )
+    refined, _ = estimate_job_seconds(
+        audio_duration_sec=100.0,
+        quality="balanced",
+        device="cpu",
+        stages=stages,
+        model="bs_roformer_sw",
+        guitar_refine=True,
+    )
+    assert plain is not None and refined is not None
+    assert refined > plain
+    assert estimated_stage_seconds("separate", stages, refined) == pytest.approx(
+        100.0 * (2.2 + 1.0), rel=0.02
+    )
+
+
 def test_resolve_speed_preset_faster():
     resolved = resolve_speed_preset("faster")
     assert resolved["quality"] == "fast"

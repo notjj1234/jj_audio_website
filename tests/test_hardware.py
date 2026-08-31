@@ -6,7 +6,7 @@ import pytest
 
 from audio_to_tab.hardware import (
     CUDA_UNAVAILABLE_MESSAGE,
-    MAC_NO_NVIDIA_NOTE,
+    MAC_ACCEL_NOTE,
     NVIDIA_ONLY_DISCLAIMER,
     HostProbe,
     desktop_device_options,
@@ -15,7 +15,9 @@ from audio_to_tab.hardware import (
     desktop_system_summary,
     ensure_cuda_available,
     get_desktop_probe_without_torch,
+    recommended_cpu_threads,
     resolve_desktop_speed,
+    resolve_safe_device,
     separate_progress_message,
 )
 
@@ -32,15 +34,22 @@ def _cpu_edition_by_default(monkeypatch):
     monkeypatch.delenv("AUDIO_TOOLS_EDITION", raising=False)
 
 
-def test_mac_never_offers_cuda_even_if_probe_says_cuda():
+def test_mac_offers_mps_but_never_cuda():
     fake_cuda = HostProbe(cuda=True, mps=True, ram_gb=16.0)
-    assert desktop_device_options(fake_cuda, platform="darwin") == ["cpu"]
+    assert desktop_device_options(fake_cuda, platform="darwin") == ["cpu", "mps"]
     assert desktop_device_options(CUDA_HIGH, platform="darwin") == ["cpu"]
+
+def test_mac_mps_gated_behind_12gb_ram():
+    eight = HostProbe(cuda=False, mps=True, ram_gb=8.0)
+    assert desktop_device_options(eight, platform="darwin") == ["cpu"]
 
 
 def test_windows_offers_cuda_only_when_probe_has_cuda():
     assert desktop_device_options(CPU_MID, platform="win32") == ["cpu"]
     assert desktop_device_options(CUDA_HIGH, platform="win32") == ["cpu", "cuda"]
+
+def test_mac_never_offers_mps_on_windows():
+    assert desktop_device_options(MPS_MAC, platform="win32") == ["cpu"]
 
 
 def test_linux_desktop_policy_matches_windows_not_mac():
@@ -68,12 +77,25 @@ def test_auto_cpu_or_mac_is_faster_cpu():
         (CPU_MID, "win32"),
         (CPU_MID, "darwin"),
         (CUDA_HIGH, "darwin"),
-        (MPS_MAC, "darwin"),
     ):
         rec = desktop_recommend(probe, platform=plat)
         assert rec["device"] == "cpu"
         assert rec["speed"] == "faster"
         assert rec["quality"] == "fast"
+
+
+def test_auto_mps_mac_is_balanced_gpu():
+    rec = desktop_recommend(MPS_MAC, platform="darwin")
+    assert rec["device"] == "mps"
+    assert rec["speed"] == "balanced"
+    assert rec["quality"] == "balanced"
+
+
+def test_auto_low_ram_mps_mac_stays_cpu():
+    low = HostProbe(cuda=False, mps=True, ram_gb=8.0)
+    rec = desktop_recommend(low, platform="darwin")
+    assert rec["device"] == "cpu"
+    assert rec["speed"] == "faster"
 
 
 def test_resolve_faster_always_cpu_on_cpu_edition(monkeypatch):
@@ -133,14 +155,16 @@ def test_system_summary_and_disclaimer_copy():
     assert "24" in win_gpu
     win_cpu = desktop_system_summary(CPU_MID, platform="win32")
     assert "CPU" in win_cpu
-    mac = desktop_system_summary(MPS_MAC, platform="darwin")
-    assert "CPU" in mac
+    mac_mps = desktop_system_summary(MPS_MAC, platform="darwin")
+    assert "Apple GPU (MPS)" in mac_mps
+    mac_cpu = desktop_system_summary(HostProbe(cuda=False, mps=False, ram_gb=16.0), platform="darwin")
+    assert "CPU" in mac_cpu
 
     cap_win = desktop_recommend_caption(CUDA_HIGH, platform="win32")
     assert NVIDIA_ONLY_DISCLAIMER in cap_win
     assert "NVIDIA" in cap_win
     cap_mac = desktop_recommend_caption(MPS_MAC, platform="darwin")
-    assert MAC_NO_NVIDIA_NOTE in cap_mac
+    assert MAC_ACCEL_NOTE in cap_mac
     assert NVIDIA_ONLY_DISCLAIMER not in cap_mac
 
 
@@ -155,6 +179,31 @@ def test_separate_progress_mentions_device():
     assert "CPU" in separate_progress_message("cpu")
     assert "NVIDIA GPU" in separate_progress_message("cuda")
     assert "CPU" not in separate_progress_message("cuda")
+    assert "Apple GPU" in separate_progress_message("mps")
+    assert "CPU" not in separate_progress_message("mps")
+
+
+def test_recommended_cpu_threads_clamps_by_ram(monkeypatch):
+    monkeypatch.setenv("AUDIO_TOOLS_EDITION", "")
+    monkeypatch.delenv("AUDIO_TOOLS_EDITION", raising=False)
+
+    def threads_for(ram_gb):
+        return recommended_cpu_threads(ram_gb=ram_gb)
+
+    assert threads_for(8.0) <= 4 or threads_for(8.0) >= 2
+    assert threads_for(16.0) >= 4
+    assert threads_for(64.0) >= 4
+    assert threads_for(16.0) >= threads_for(8.0)
+    assert recommended_cpu_threads(ram_gb=None) >= 1
+
+
+def test_resolve_safe_device_downgrades_ineligible_mps():
+    assert resolve_safe_device("cpu", CPU_MID) == "cpu"
+    with pytest.raises(RuntimeError, match="NVIDIA CUDA"):
+        resolve_safe_device("cuda", CPU_MID)
+    assert resolve_safe_device("mps", MPS_MAC) == "mps"
+    low = HostProbe(cuda=False, mps=True, ram_gb=8.0)
+    assert resolve_safe_device("mps", low) == "cpu"
 
 
 def test_get_desktop_probe_without_torch_does_not_import_torch(monkeypatch):

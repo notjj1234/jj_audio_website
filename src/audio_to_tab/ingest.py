@@ -192,6 +192,24 @@ def _title_stem(name: str) -> str:
     return "".join(ch for ch in name.casefold() if ch.isalnum())
 
 
+def _normalize_in_place(wav: Path) -> Path:
+    """Normalize ``wav`` into a same-dir temp, then atomically move it back.
+
+    Keeps the real file name (e.g. the YouTube video title) on the result so
+    callers that use ``path.stem`` show the human title instead of the
+    ``audio_norm_*`` temp name.
+    """
+    fd, name = tempfile.mkstemp(dir=str(wav.parent), prefix=".audio_norm_", suffix=".wav")
+    os.close(fd)
+    temp = Path(name)
+    try:
+        normalize_audio(wav, output_path=temp)
+        temp.replace(wav)
+    finally:
+        _unlink_quiet(temp)
+    return wav
+
+
 def _resolve_downloaded_wav(out_dir: Path, title: str, url: str) -> Path:
     safe = "".join(c if c.isalnum() or c in " -_." else "_" for c in (title or "")).strip()[:80]
     if safe:
@@ -200,7 +218,7 @@ def _resolve_downloaded_wav(out_dir: Path, title: str, url: str) -> Path:
             p for p in out_dir.glob("*.wav") if _title_stem(p.stem) == want
         ]
         if matches:
-            return normalize_audio(max(matches, key=lambda p: p.stat().st_mtime))
+            return _normalize_in_place(max(matches, key=lambda p: p.stat().st_mtime))
 
     candidates = list(out_dir.glob("*.wav"))
     if candidates:

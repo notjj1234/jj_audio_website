@@ -259,6 +259,24 @@ def _torch_device(device: str):
     return torch.device(name)
 
 
+def _cap_cpu_threads(device: str) -> None:
+    """Cap PyTorch intra-op threads for CPU inference (Apple Silicon P-cores).
+
+    Each isolate job runs in its own ``multiprocessing.Process``, so setting the
+    process-global torch thread pool here cannot disturb the UI or other jobs.
+    """
+    if device != "cpu":
+        return
+    import torch
+
+    try:
+        from audio_to_tab.hardware import recommended_cpu_threads
+
+        torch.set_num_threads(recommended_cpu_threads())
+    except Exception:
+        pass
+
+
 def _load_bs_roformer_config(yaml_path: Path):
     import yaml
     from ml_collections import ConfigDict
@@ -306,6 +324,7 @@ def _run_via_bs_roformer_infer(
     import torch
     from bs_roformer.utils import demix_track, get_model_from_config
 
+    _cap_cpu_threads(device)
     config = _load_bs_roformer_config(yaml_path)
     dev = _torch_device(device)
     model = get_model_from_config("bs_roformer", config)
@@ -329,7 +348,20 @@ def _run_via_bs_roformer_infer(
         mix = mix[:, :2]
     mixture = torch.tensor(mix.T, dtype=torch.float32)
 
-    res, _first = demix_track(config, model, mixture, dev, first_chunk_time=None)
+    try:
+        res, _first = demix_track(config, model, mixture, dev, first_chunk_time=None)
+    except Exception as exc:
+        if dev.type != "cpu":
+            logger.warning(
+                "BS-RoFormer %s run failed (%s); retrying on CPU", dev.type, exc
+            )
+            _cap_cpu_threads("cpu")
+            model = model.to("cpu")
+            res, _first = demix_track(
+                config, model, mixture.cpu(), torch.device("cpu"), first_chunk_time=None
+            )
+        else:
+            raise
     instruments = list(config.training.instruments)
     if getattr(config.training, "target_instrument", None) is not None:
         instruments = [config.training.target_instrument]
@@ -522,6 +554,7 @@ def _run_inprocess(
     num_stems: int,
 ) -> dict[str, Path]:
     """Legacy in-process demix for MelBand configs; BS-RoFormer uses infer API."""
+    _cap_cpu_threads(device)
     if num_stems == 6 and is_roformer_available():
         return _run_via_bs_roformer_infer(
             audio_path,

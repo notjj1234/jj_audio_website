@@ -295,14 +295,25 @@ def test_resolve_downloaded_wav_prefers_title_match_over_stale(tmp_path, monkeyp
     target = tmp_path / "My Song (Official Audio).wav"
     target.write_bytes(b"t")
     seen: list[Path] = []
-    monkeypatch.setattr(
-        "audio_to_tab.ingest.normalize_audio",
-        lambda p, *_a, **_k: (seen.append(Path(p)), Path(p))[1],
-    )
+    outs: list[Path] = []
+
+    def fake_norm(p, *_a, **k):
+        seen.append(Path(p))
+        out = Path(k.get("output_path") or p)
+        outs.append(out)
+        out.write_bytes(b"norm")
+        return out
+
+    monkeypatch.setattr("audio_to_tab.ingest.normalize_audio", fake_norm)
 
     got = _resolve_downloaded_wav(tmp_path, "My Song (Official Audio)", "https://x/1")
     assert got == target
     assert seen == [target]
+    # In-place: normalized into a same-dir temp, then moved onto the title file.
+    assert len(outs) == 1
+    assert outs[0] != target and outs[0].parent == tmp_path
+    assert target.read_bytes() == b"norm"
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".")]
 
 
 def test_resolve_downloaded_wav_no_title_match_uses_newest_normalized(tmp_path, monkeypatch):

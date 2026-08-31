@@ -49,6 +49,12 @@ _GUITAR_ONLY_STAGES = frozenset({"bass_bleed"})
 _DEVICE_REALTIME = {"cpu": 1.0, "cuda": 0.25, "mps": 0.8}
 # Extra work from Demucs --shifts (QUALITY_SHIFTS in isolate.py).
 _QUALITY_TIME_FACTOR = {"fast": 1.0, "balanced": 2.0, "high": 4.0, "extreme": 6.0}
+# BS-RoFormer-SW is ~2.2× realtime on an 8 P-core Apple Silicon CPU (measured
+# 2.13× on an M2 Pro); MPS roughly halves that. The Demucs speed/quality preset
+# does NOT affect RoFormer, so these estimates ignore _QUALITY_TIME_FACTOR.
+_REFERENCE_P_CORES = 8.0
+_ROFORMER_REALTIME = {"cpu": 2.2, "cuda": 0.12, "mps": 1.0}
+_ROFORMER_REFINE_REALTIME = {"cpu": 1.0, "cuda": 0.06, "mps": 0.45}
 _INTRA_STAGE_CAP = 0.95
 _GUITAR_MODEL_MARKERS = ("6s", "guitar", "roformer")
 
@@ -128,6 +134,13 @@ ROFORMER_MODEL_IDS = frozenset({"bs_roformer_sw", "melband_roformer_guitar"})
 ROFORMER_BACKEND_UI_HINT = (
     "BS-RoFormer guitar options need the optional runtime. "
     "In your app Python environment run: `pip install bs-roformer-infer`."
+)
+ROFORMER_SPEED_PRESET_NOTE = (
+    "Speed only tunes Demucs (--shifts) — BS-RoFormer always runs its full "
+    "transformer pass, so Faster/Balanced/Best do not change its time. Expect "
+    "roughly 2× the song length on this Mac's CPU. To go faster: shorten the "
+    "Section, use the Demucs guitar option, or pick Apple GPU (MPS) in Advanced "
+    "when this Mac has ≥12 GB RAM."
 )
 
 
@@ -1296,6 +1309,7 @@ def estimate_job_seconds(
     expects_guitar: bool | None = None,
     two_pass: bool = False,
     guitar_refine: bool = False,
+    cpu_threads: int | None = None,
 ) -> tuple[float | None, str]:
     """Predicted wall time for the whole job.
 
@@ -1327,12 +1341,20 @@ def estimate_job_seconds(
     if not audio_duration_sec or audio_duration_sec <= 0:
         return None, "low"
 
-    q = _QUALITY_TIME_FACTOR.get(quality, 1.0)
-    d = _DEVICE_REALTIME.get(device, _DEVICE_REALTIME["cpu"])
-    pass_factor = 2.0 if two_pass else 1.0
-    if (model or "").lower() in {"bs_roformer_sw", "melband_roformer_guitar"}:
-        pass_factor *= 1.6
-    separate_sec = audio_duration_sec * q * d * pass_factor
+    model_id = (model or "").lower()
+    if model_id in ROFORMER_MODEL_IDS:
+        d = _ROFORMER_REALTIME.get(device, _ROFORMER_REALTIME["cpu"])
+        if device == "cpu" and cpu_threads:
+            d = d * (_REFERENCE_P_CORES / max(1, cpu_threads))
+        separate_sec = audio_duration_sec * d
+        if guitar_refine:
+            ref = _ROFORMER_REFINE_REALTIME.get(device, _ROFORMER_REFINE_REALTIME["cpu"])
+            separate_sec += audio_duration_sec * ref
+    else:
+        q = _QUALITY_TIME_FACTOR.get(quality, 1.0)
+        d = _DEVICE_REALTIME.get(device, _DEVICE_REALTIME["cpu"])
+        pass_factor = 2.0 if two_pass else 1.0
+        separate_sec = audio_duration_sec * q * d * pass_factor
     sep_w = STAGE_WEIGHTS["separate"]
     active_w = sum(STAGE_WEIGHTS.get(s, 0.0) for s in stages)
     if sep_w <= 0 or active_w <= 0:
