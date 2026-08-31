@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from audio_to_tab.subprocess_util import subprocess_run_kwargs
+
 _UNSAFE_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
@@ -56,6 +58,93 @@ def copy_mix_to_folder(mix_path: Path, dest_dir: Path, filename: str) -> Path:
     dest = dest_dir / sanitize_export_name(Path(filename).stem)
     dest = dest.with_suffix(".wav")
     shutil.copy2(mix_path, dest)
+    return dest
+
+
+# Formats ffmpeg can encode for free (lossy/lossless). ``wav`` is a byte-for-byte
+# passthrough (no re-encode); the rest go through ffmpeg with a fixed profile.
+EXPORT_FORMATS = ("wav", "mp3", "flac", "ogg", "opus", "m4a")
+
+EXPORT_FORMAT_LABELS = {
+    "wav": "WAV (lossless)",
+    "mp3": "MP3 (192 kbps)",
+    "flac": "FLAC (lossless)",
+    "ogg": "OGG (Vorbis)",
+    "opus": "Opus (high quality)",
+    "m4a": "M4A (AAC)",
+}
+
+_FFMPEG_PROFILES = {
+    "mp3": ["-c:a", "libmp3lame", "-b:a", "192k", "-vn"],
+    "flac": ["-c:a", "flac", "-vn"],
+    "ogg": ["-c:a", "libvorbis", "-q:a", "4", "-vn"],
+    "opus": ["-c:a", "libopus", "-b:a", "160k", "-vn"],
+    "m4a": ["-c:a", "aac", "-b:a", "192k", "-vn"],
+}
+
+
+def _ffmpeg_path() -> str | None:
+    """Resolve the ffmpeg binary (bundled in the frozen app or on PATH)."""
+    return shutil.which("ffmpeg")
+
+
+def convert_audio(src: Path, dest: Path, fmt: str) -> Path:
+    """Convert ``src`` to ``fmt`` and write to ``dest``. Returns ``dest``.
+
+    ``wav`` is copied as-is (lossless passthrough). Other formats are encoded
+    with ffmpeg using the profile in ``_FFMPEG_PROFILES``.
+    """
+    src = Path(src)
+    dest = Path(dest)
+    fmt = (fmt or "wav").lower()
+    if fmt == "wav":
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+        return dest
+    ffmpeg = _ffmpeg_path()
+    if not ffmpeg:
+        raise FileNotFoundError(f"ffmpeg is required to export to {fmt}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    profile = _FFMPEG_PROFILES.get(fmt)
+    if profile is None:
+        raise ValueError(f"Unsupported export format: {fmt}")
+    cmd = [ffmpeg, "-y", "-i", str(src), *profile, str(dest)]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False, **subprocess_run_kwargs())
+    if result.returncode != 0 or not dest.exists():
+        raise RuntimeError(f"ffmpeg conversion to {fmt} failed")
+    return dest
+
+
+def _export_dest_dir(dest_dir: Path) -> Path:
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    return dest_dir
+
+
+def export_tracks_to_folder(
+    stem_paths: dict[str, Path],
+    dest_dir: Path,
+    base_name: str,
+    fmt: str = "wav",
+) -> Path:
+    """Convert selected stems into ``dest_dir`` as ``fmt``. Returns the folder."""
+    dest_dir = _export_dest_dir(dest_dir)
+    prefix = sanitize_export_name(base_name)
+    for name, src in stem_paths.items():
+        src_path = Path(src)
+        if not src_path.is_file():
+            continue
+        target = dest_dir / f"{prefix}_{name}.{fmt}"
+        convert_audio(src_path, target, fmt)
+    return dest_dir
+
+
+def export_mix_to_folder(mix_path: Path, dest_dir: Path, filename: str, fmt: str = "wav") -> Path:
+    """Convert the current mix into ``dest_dir`` as ``fmt``. Returns the file."""
+    dest_dir = _export_dest_dir(dest_dir)
+    dest = dest_dir / sanitize_export_name(Path(filename).stem)
+    dest = dest.with_suffix("." + fmt)
+    convert_audio(Path(mix_path), dest, fmt)
     return dest
 
 

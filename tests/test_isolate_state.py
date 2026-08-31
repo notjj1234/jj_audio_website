@@ -1089,6 +1089,35 @@ def test_should_auto_apply_job_respects_pin():
     assert should_auto_apply_job("job-old", "job-a") is False
 
 
+def test_listening_picker_uses_on_change_callback_to_pin():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    picker = source[source.find("def _render_listening_switcher") : source.find("def _has_source_for_job")]
+    assert "on_change=_apply_listen_pick" in picker
+    assert 'viewing_mode=str(row.get("id") or str(chosen))' in source
+    assert "def _apply_listen_pick" in source
+
+
+def test_poll_and_queue_fragments_run_every_one_second():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    assert source.count("@st.fragment(run_every=1.0)") == 2
+    assert "run_every=2.0" not in source
+
+
+def test_new_tab_section_and_output_name_prominent_before_advanced():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    controls = source[
+        source.find("def _render_separation_controls") : source.find("def _ffmpeg_install_hint")
+    ]
+    advanced_at = controls.find('key="isolate_options_expanded"')
+    section_at = controls.find('"**Section (optional)**"')
+    output_at = controls.find('key="isolate_output_name"')
+    assert section_at != -1 and advanced_at != -1 and output_at != -1
+    assert output_at < section_at < advanced_at
+
+
 def test_resolve_separation_preset_full_band():
     resolved = resolve_separation_preset("full_band")
     assert resolved["model"] == "bs_roformer_sw"

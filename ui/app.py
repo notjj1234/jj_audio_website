@@ -225,17 +225,35 @@ st.markdown(
         margin-top: 0.15rem;
         margin-bottom: 0.15rem;
       }
-      /* New / Mixer / Queue: large enough to find and click */
+      /* New / Mixer / Queue: large, distinguishable, visible across both themes */
+      section.main [data-testid="stTabs"] {
+        gap: 0.4rem;
+      }
       section.main [data-testid="stTabs"] button {
-        font-weight: 600;
-        font-size: 1.25rem !important;
+        font-weight: 700 !important;
+        font-size: 1.4rem !important;
         line-height: 1.3 !important;
-        min-height: 44px !important;
-        padding: 0.7rem 1.35rem !important;
+        min-height: 52px !important;
+        padding: 0.8rem 1.6rem !important;
+        border-radius: 10px !important;
+        color: var(--secondary-text-color, inherit) !important;
+        background: var(--secondary-background-color, transparent) !important;
+        border: 1px solid var(--border-color, rgba(128, 128, 128, 0.35)) !important;
+        margin: 0.15rem 0 !important;
+      }
+      section.main [data-testid="stTabs"] button:hover {
+        color: var(--text-color, inherit) !important;
+      }
+      section.main [data-testid="stTabs"] button[aria-selected="true"] {
+        color: var(--text-color, inherit) !important;
+        background: var(--primary-color, inherit) !important;
+        border-color: var(--primary-color, inherit) !important;
+        box-shadow: 0 0 0 1px var(--primary-color) inset;
       }
       section.main [data-testid="stTabs"] [data-baseweb="tab-highlight"],
       section.main [data-testid="stTabs"] [data-baseweb="tab-border"] {
         height: 3px !important;
+        opacity: 0;
       }
     </style>
     """,

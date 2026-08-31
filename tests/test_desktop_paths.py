@@ -982,8 +982,8 @@ def test_streamlit_about_is_local_demo_without_hosted_urls():
     assert '[data-stale="true"]' in text
     assert "opacity: 1 !important" in text
     assert 'section.main [data-testid="stTabs"] button' in text
-    assert "font-size: 1.25rem !important" in text
-    assert "min-height: 44px !important" in text
+    assert "font-size: 1.4rem !important" in text
+    assert "min-height: 52px !important" in text
     launcher = LAUNCHER_PATH.read_text(encoding="utf-8")
     assert "def window_title()" in launcher
     assert "edition_window_title" in launcher

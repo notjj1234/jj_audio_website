@@ -22,11 +22,13 @@ from ui.common import (
     save_upload,
 )
 from ui.desktop_export import (
+    EXPORT_FORMAT_LABELS,
+    EXPORT_FORMATS,
     choose_export_dir,
-    copy_mix_to_folder,
-    copy_tracks_to_folder,
     default_export_dir,
+    export_mix_to_folder,
     export_song_dir,
+    export_tracks_to_folder,
     open_path_in_os,
 )
 from ui.desktop_notify import notify as desktop_notify
@@ -1195,6 +1197,19 @@ def _render_separation_controls() -> dict:
 
     audio_path = _active_source_path(uploaded)
 
+    st.text_input(
+        "Output name",
+        help="Used for downloaded file names. Defaults to the uploaded file's name.",
+        key="isolate_output_name",
+        **persist,
+    )
+
+    start_sec, max_duration_sec, region_label = 0.0, None, None
+    if audio_path and audio_path.exists():
+        st.markdown("**Section (optional)**")
+        start_sec, max_duration_sec, region_label = _render_region_controls(audio_path)
+        _render_section_preview(audio_path, start_sec, max_duration_sec, region_label)
+
     track_options, resolved, preset_error = _render_track_picker(persist=persist)
     custom_stems = list(resolved.get("stems") or [])
     if resolved["caveat"]:
@@ -1229,10 +1244,6 @@ def _render_separation_controls() -> dict:
     if st.session_state.get("isolate_device") not in device_options:
         st.session_state["isolate_device"] = device_options[0]
 
-    if audio_path and audio_path.exists():
-        st.caption("Optional section: open Advanced")
-
-    start_sec, max_duration_sec, region_label = 0.0, None, None
     with _stateful_expander(
         "Advanced options", key="isolate_options_expanded", default=False
     ):
@@ -1252,12 +1263,6 @@ def _render_separation_controls() -> dict:
                 "GPU: NVIDIA CUDA on Windows; Apple GPU (MPS) on Apple Silicon "
                 "with ≥12 GB RAM. CPU is always available."
             ),
-        )
-        st.text_input(
-            "Output name",
-            help="Used for downloaded file names. Defaults to the uploaded file's name.",
-            key="isolate_output_name",
-            **persist,
         )
         # Opt-in until eval/lead_rhythm Stage-1 3-clip listen beats stock 6s.
         st.checkbox(
@@ -1301,11 +1306,6 @@ def _render_separation_controls() -> dict:
             "separation — no need to re-run Demucs. MelBand refine improves isolation but can "
             "soften highs — use **Guitar (BS-RoFormer)** without refine if guitar sounds dull."
         )
-        st.markdown("**Section (optional)**")
-        start_sec, max_duration_sec, region_label = _render_region_controls(audio_path)
-
-    if audio_path and audio_path.exists():
-        _render_section_preview(audio_path, start_sec, max_duration_sec, region_label)
 
     quality = st.session_state.get("isolate_quality", speed["quality"])
     device = st.session_state.get("isolate_device", speed["device"])
@@ -1432,17 +1432,19 @@ def _render_job_queue_panel() -> None:
             str(active_status.get("status") or ""),
         )
     for job in parts["in_flight"]:
-        _render_queue_job_row(
-            job,
-            waiting_ids=waiting_ids,
-            stopping_previous=stopping_previous,
-        )
+        with st.container(border=True):
+            _render_queue_job_row(
+                job,
+                waiting_ids=waiting_ids,
+                stopping_previous=stopping_previous,
+            )
     for job in parts["succeeded"]:
-        _render_queue_job_row(
-            job,
-            waiting_ids=waiting_ids,
-            stopping_previous=stopping_previous,
-        )
+        with st.container(border=True):
+            _render_queue_job_row(
+                job,
+                waiting_ids=waiting_ids,
+                stopping_previous=stopping_previous,
+            )
 
 
 def _clear_mixer_if_run_deleted(run_dirs: list[str] | str | None) -> None:
@@ -1633,7 +1635,7 @@ def _render_status_strip(jobs: list) -> None:
             )
 
 
-@st.fragment(run_every=2.0)
+@st.fragment(run_every=1.0)
 def _poll_running_jobs() -> None:
     """Keep progress visible across page switches; apply finished jobs when unpinned."""
     ensure_worker_started()
@@ -1702,7 +1704,7 @@ def _poll_running_jobs() -> None:
     _render_status_strip(jobs)
 
 
-@st.fragment(run_every=2.0)
+@st.fragment(run_every=1.0)
 def _queue_tab_fragment() -> None:
     _render_job_queue_panel()
 
@@ -1801,21 +1803,35 @@ def _mixer_and_downloads_fragment(
     )
 
 
-def _save_all_tracks(selected_stem_paths: dict[str, Path], export_root: Path, base_name: str) -> None:
+def _save_all_tracks(selected_stem_paths: dict[str, Path], export_root: Path, base_name: str, fmt: str) -> None:
     dest = export_song_dir(export_root, str(base_name))
-    copy_tracks_to_folder(selected_stem_paths, dest, str(base_name))
+    export_tracks_to_folder(selected_stem_paths, dest, str(base_name), fmt)
     st.session_state["isolate_last_export_path"] = str(dest)
     st.success(f"Download finished — saved to {dest}")
 
 
-def _save_current_mix(ready: str, export_root: Path, base_name: str) -> None:
-    dest_file = copy_mix_to_folder(
+def _save_current_mix(ready: str, export_root: Path, base_name: str, fmt: str) -> None:
+    dest_file = export_mix_to_folder(
         Path(ready),
         export_song_dir(export_root, str(base_name)),
         f"{base_name}_current_mix.wav",
+        fmt,
     )
     st.session_state["isolate_last_export_path"] = str(dest_file.parent)
     st.success(f"Download finished — saved to {dest_file}")
+
+
+def _download_format_widget() -> str:
+    """Format selector used by the Downloads panel. Returns an EXPORT_FORMATS key."""
+    fmt = st.segmented_control(
+        "Export format",
+        options=list(EXPORT_FORMATS),
+        format_func=lambda f: EXPORT_FORMAT_LABELS[f],
+        default="wav",
+        key="isolate_download_format",
+        help="WAV is lossless; other formats are converted with ffmpeg.",
+    )
+    return fmt or "wav"
 
 
 def _render_downloads_panel(
@@ -1853,6 +1869,7 @@ def _render_downloads_panel(
                     st.warning("Could not open that folder.")
 
         st.divider()
+        fmt = _download_format_widget()
         if ready:
             save_col, mix_col = st.columns(2)
             with save_col:
@@ -1862,14 +1879,14 @@ def _render_downloads_panel(
                     key="isolate_save_tracks",
                     width="stretch",
                 ):
-                    _save_all_tracks(selected_stem_paths, export_root, str(base_name))
+                    _save_all_tracks(selected_stem_paths, export_root, str(base_name), fmt)
             with mix_col:
                 if st.button(
                     "Save current mix",
                     key="isolate_save_mix",
                     width="stretch",
                 ):
-                    _save_current_mix(str(ready), export_root, str(base_name))
+                    _save_current_mix(str(ready), export_root, str(base_name), fmt)
         else:
             if st.button(
                 "Save all tracks",
@@ -1877,7 +1894,7 @@ def _render_downloads_panel(
                 key="isolate_save_tracks",
                 width="stretch",
             ):
-                _save_all_tracks(selected_stem_paths, export_root, str(base_name))
+                _save_all_tracks(selected_stem_paths, export_root, str(base_name), fmt)
 
 
 def _resolve_audio_for_job(choice: dict) -> tuple[Path | None, str | None]:
@@ -2122,6 +2139,23 @@ def _clear_loaded_mixer() -> None:
         st.session_state.pop(key, None)
 
 
+def _apply_listen_pick(rows: list[dict]) -> None:
+    """Apply a manual "Listening to" selection immediately in the widget callback.
+
+    Deferred to the callback (rather than the main-body diff pass) so a concurrent
+    rehydrate/poll pass cannot overwrite the user's choice with ``viewing_mode='latest'``
+    before it is pinned.
+    """
+    chosen = st.session_state.get(LISTEN_PICKER_KEY)
+    if not chosen:
+        return
+    row = next((r for r in rows if str(r.get("run_dir")) == str(chosen)), None)
+    if row is None:
+        st.session_state["isolate_listen_missing"] = str(chosen)
+        return
+    _apply_library_row(row, viewing_mode=str(row.get("id") or str(chosen)), reopen_name=True)
+
+
 def _render_listening_switcher(browser_id: str | None, rows: list[dict] | None = None) -> None:
     """Mixer library: selectbox of finished runs + delete current."""
     if rows is None:
@@ -2159,6 +2193,8 @@ def _render_listening_switcher(browser_id: str | None, rows: list[dict] | None =
             options=options,
             format_func=lambda d: labels.get(d, d),
             key=LISTEN_PICKER_KEY,
+            on_change=_apply_listen_pick,
+            args=(rows,),
         )
     with cols[1]:
         delete_clicked = st.button(
