@@ -19,6 +19,14 @@ class CleanupConfig:
     max_notes_per_onset: int = 6
     onset_window_sec: float = 0.05
 
+    def __post_init__(self) -> None:
+        if self.pitch_min < 0 or self.pitch_min > 127:
+            raise ValueError(f"pitch_min must be 0..127, got {self.pitch_min}")
+        if self.pitch_max < 0 or self.pitch_max > 127:
+            raise ValueError(f"pitch_max must be 0..127, got {self.pitch_max}")
+        if self.pitch_min > self.pitch_max:
+            raise ValueError(f"pitch_min ({self.pitch_min}) > pitch_max ({self.pitch_max})")
+
 
 def mix_aware_cleanup_config() -> CleanupConfig:
     """Stricter filters for full-mix / stem-separated guitar transcription."""

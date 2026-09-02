@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 import tempfile
 from collections.abc import Callable
@@ -21,6 +22,8 @@ from audio_to_tab.separate import separate_guitar_stem
 from audio_to_tab.tab_generate import midi_to_tab, tab_to_ascii
 from audio_to_tab.tempo import resolve_tempo
 from audio_to_tab.transcribe import transcribe_audio
+
+logger = logging.getLogger(__name__)
 
 YOUTUBE_DISCLAIMER = (
     "YouTube audio download may violate YouTube Terms of Service. "
@@ -62,6 +65,16 @@ class PipelineConfig:
     tempo_bpm_override: float | None = None
     beats_per_measure: int = 4
 
+    def __post_init__(self) -> None:
+        if self.demucs_quality not in ("fast", "balanced", "best"):
+            raise ValueError(f"Invalid demucs_quality: {self.demucs_quality!r}")
+        if self.beats_per_measure <= 0:
+            raise ValueError(f"beats_per_measure must be positive, got {self.beats_per_measure}")
+        if not (0.0 <= self.onset_threshold <= 1.0):
+            raise ValueError(f"onset_threshold must be 0..1, got {self.onset_threshold}")
+        if not (0.0 <= self.frame_threshold <= 1.0):
+            raise ValueError(f"frame_threshold must be 0..1, got {self.frame_threshold}")
+
 
 ProgressCallback = Callable[[str, str], None]  # stage, message
 
@@ -91,6 +104,7 @@ def _trim_audio(input_path: Path, max_duration_sec: float | None) -> Path:
     out = input_path.parent / f"{input_path.stem}_trim.wav"
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
+        logger.warning("ffmpeg not found; returning un-trimmed audio")
         return input_path
     result = subprocess.run(
         [ffmpeg, "-y", "-i", str(input_path), "-t", str(max_duration_sec), str(out)],

@@ -62,10 +62,46 @@ def apply_true_peak_ceiling(
     return (mixed * (ceiling / peak)).astype(np.float32, copy=False)
 
 
+# Composite separator joining a re-separate parent stem id to its child id,
+# e.g. ``other::guitar`` (see docs/reseparate-stems.md).
+_COMPOSITE_SEPARATOR = "::"
+
+# Near-silence floor in dBFS for the re-separate silence filter.
+SILENCE_DBFS_FLOOR = -120.0
+
+
 def stem_display_name(stem_id: str) -> str:
+    if _COMPOSITE_SEPARATOR in str(stem_id):
+        parent, _, child = str(stem_id).partition(_COMPOSITE_SEPARATOR)
+        parent_label = _single_stem_label(parent)
+        child_label = _single_stem_label(child)
+        return f"{child_label} (from {parent_label})"
+    return _single_stem_label(stem_id)
+
+
+def _single_stem_label(stem_id: str) -> str:
     if stem_id in STEM_LABELS:
         return STEM_LABELS[stem_id]
     return stem_id.replace("_", " ").title()
+
+
+def stem_energy_db(path: str | Path) -> float:
+    """RMS amplitude of a wav in dBFS (negative; ~0 dBFS = full scale).
+
+    Mono-downmixes multichannel audio (mean across channels) and uses float64
+    internally to avoid overflow/underflow. Near-silence returns
+    ``SILENCE_DBFS_FLOOR`` (``-120.0``) so re-separate children that came out
+    empty can be discarded.
+    """
+    data, _sr = sf.read(str(path), always_2d=True)
+    if data.size == 0:
+        return SILENCE_DBFS_FLOOR
+    mono = data.mean(axis=1).astype(np.float64)
+    energy = float(np.mean(mono * mono))
+    if energy <= np.finfo(np.float32).tiny:
+        return SILENCE_DBFS_FLOOR
+    rms = float(np.sqrt(energy))
+    return 20.0 * np.log10(rms)
 
 
 def sort_stem_names(names: list[str] | set[str]) -> list[str]:

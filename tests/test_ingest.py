@@ -225,6 +225,7 @@ def test_download_does_not_require_js_runtime(tmp_path, monkeypatch):
 
 def test_download_retries_after_403_then_succeeds(tmp_path, monkeypatch):
     monkeypatch.setattr("audio_to_tab.ingest._clear_ytdlp_cache", lambda: None)
+    monkeypatch.setattr("audio_to_tab.ingest._unlink_quiet", lambda p: None)
 
     wav = tmp_path / "clip.wav"
     wav.write_bytes(b"RIFF")

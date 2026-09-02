@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -13,6 +14,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from audio_to_tab.subprocess_util import subprocess_run_kwargs
+
+logger = logging.getLogger(__name__)
 
 _YOUTUBE_HOSTS = frozenset(
     {
@@ -52,7 +55,9 @@ class _YoutubeFileLogger:
             with self._path.open("a", encoding="utf-8") as log:
                 log.write(f"[{level}] {msg}\n")
         except OSError:
-            pass
+            import sys
+
+            sys.stderr.write(f"[yt-dlp] could not write log to {self._path}\n")
 
     def debug(self, msg: str) -> None:
         self._write("debug", str(msg))
@@ -170,8 +175,8 @@ def _clear_ytdlp_cache() -> None:
     try:
         with yt_dlp.YoutubeDL({"rm_cachedir": True, "quiet": True}) as ydl:
             ydl.cache.remove()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("yt-dlp cache clear failed: %s", exc)
 
 
 def _user_facing_youtube_error(last_exc: BaseException | None) -> YouTubeDownloadError:
@@ -204,7 +209,10 @@ def _normalize_in_place(wav: Path) -> Path:
     temp = Path(name)
     try:
         normalize_audio(wav, output_path=temp)
-        temp.replace(wav)
+        try:
+            temp.replace(wav)
+        except OSError:
+            shutil.move(str(temp), str(wav))
     finally:
         _unlink_quiet(temp)
     return wav
@@ -222,7 +230,7 @@ def _resolve_downloaded_wav(out_dir: Path, title: str, url: str) -> Path:
 
     candidates = list(out_dir.glob("*.wav"))
     if candidates:
-        return normalize_audio(max(candidates, key=lambda p: p.stat().st_mtime))
+        return _normalize_in_place(max(candidates, key=lambda p: p.stat().st_mtime))
     raise FileNotFoundError(f"Downloaded audio not found for: {url}")
 
 
@@ -367,6 +375,10 @@ def download_youtube_audio(url: str, output_dir: str | Path) -> Path:
     for index, player_client in enumerate(_YOUTUBE_PLAYER_CLIENTS):
         if index > 0:
             _clear_ytdlp_cache()
+            for stale in out_dir.glob("*.wav"):
+                _unlink_quiet(stale)
+            for stale in out_dir.glob("*.part"):
+                _unlink_quiet(stale)
         opts = _youtube_ydl_opts(
             template=template,
             player_client=player_client,
@@ -415,7 +427,7 @@ def temporary_output_path(prefix: str, suffix: str) -> Path:
 
 
 def normalize_audio(input_path: str | Path, output_path: str | Path | None = None) -> Path:
-    """Convert audio to 44.1kHz stereo WAV suitable for ML models."""
+    """Convert audio to canonical WAV for ML models. Output format is fixed at 44.1kHz stereo 16-bit WAV (required by ML models)."""
     src = Path(input_path)
     if not src.exists():
         raise FileNotFoundError(f"Audio file not found: {src}")

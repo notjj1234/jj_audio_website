@@ -46,3 +46,5 @@ Read `PROJECT_TREE.md` first — it is the canonical "change X → start here" m
 - `.cursor/`, `CONTEXT_TREE.md`, `docs/oracle-free-memory-spike.md` are gitignored internal docs.
 - Node artifacts: `web/dist/`, all `node_modules/`, `ui/stem_mixer_component/frontend/build/assets/*` (hashed).
 - Model weights (guitar-ft, RoFormer) download at runtime via **SHA256-pinned urllib** (no `huggingface_hub`); tests in `tests/test_guitar_ft_weights.py`.
+
+Under any circumstances should you commit files to github for me. Only if i actually approve then u should.

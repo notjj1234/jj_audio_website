@@ -125,6 +125,7 @@ from ui.isolate_state import (
     should_hide_stale_results,
     staged_audio_for_new_tab,
     status_strip_waiting_caption,
+    stem_label_for_id,
     sync_output_name_on_upload,
     tracks_picker_help,
     upload_fingerprint,
@@ -356,7 +357,8 @@ def _wav_exists(path: str) -> bool:
 def _stem_waveform_peaks(path: Path, *, num_points: int = 80) -> list[float]:
     try:
         return waveform_peaks(path, num_points=num_points).tolist()
-    except Exception:
+    except Exception as exc:
+        logger.warning("Could not compute waveform peaks for %s: %s", path, exc)
         return []
 
 
@@ -517,14 +519,19 @@ def _render_guitar_fixup_panel(
         )
 
         if quality.get("high_end_energy_share") is not None:
-            hi = quality["high_end_energy_share"]
-            lo = quality.get("low_band_energy_share")
-            parts = [f"high-end (>4 kHz) share **{hi:.2f}**"]
-            if isinstance(lo, (int, float)):
-                parts.append(f"low-band share **{lo:.2f}**")
+            high_share = quality["high_end_energy_share"]
+            competitor_overlap = quality.get("competitor_overlap") or {}
+            overlap = max(competitor_overlap.values()) if competitor_overlap else None
+            if overlap is None and isinstance(
+                quality.get("low_band_energy_share"), (int, float)
+            ):
+                overlap = quality["low_band_energy_share"]
+            st.caption(
+                f"Brightness: {'high' if high_share > 0.3 else 'moderate' if high_share > 0.15 else 'low'}"
+                f" | Cross-bleed: {'significant' if overlap > 0.3 else 'moderate' if overlap > 0.15 else 'minimal'}"
+            )
             if fold.get("folded"):
-                parts.append(f"Other folded: {fold.get('reason', 'yes')}")
-            st.caption("Stem quality: " + " · ".join(parts))
+                st.caption(f"Other folded: {fold.get('reason', 'yes')}")
 
         if prerefine_exists and refined_exists:
             options = {
@@ -626,29 +633,32 @@ def _render_guitar_fixup_panel(
 
         result = None
         if apply_clicked:
-            result = apply_mixer_guitar_fixup(
-                guitar_path=guitar_path,
-                stem_paths=stem_paths,
-                run_dir=run_dir,
-                sub_bass_debleed=bool(st.session_state.get(debleed_key)),
-                low_end_restore_db=float(st.session_state.get(restore_key) or 0.0),
-            )
+            with st.spinner("Applying guitar fix-up..."):
+                result = apply_mixer_guitar_fixup(
+                    guitar_path=guitar_path,
+                    stem_paths=stem_paths,
+                    run_dir=run_dir,
+                    sub_bass_debleed=bool(st.session_state.get(debleed_key)),
+                    low_end_restore_db=float(st.session_state.get(restore_key) or 0.0),
+                )
         elif quick_clicked:
-            result = apply_mixer_guitar_fixup(
-                guitar_path=guitar_path,
-                stem_paths=stem_paths,
-                run_dir=run_dir,
-                sub_bass_debleed=True,
-                low_end_restore_db=0.0,
-            )
+            with st.spinner("Applying quick de-bleed..."):
+                result = apply_mixer_guitar_fixup(
+                    guitar_path=guitar_path,
+                    stem_paths=stem_paths,
+                    run_dir=run_dir,
+                    sub_bass_debleed=True,
+                    low_end_restore_db=0.0,
+                )
             st.session_state[debleed_key] = True
             st.session_state[restore_key] = 0.0
         elif reset_clicked:
-            result = reset_mixer_guitar_fixup(
-                guitar_path=guitar_path,
-                stem_paths=stem_paths,
-                run_dir=run_dir,
-            )
+            with st.spinner("Resetting guitar fix-up..."):
+                result = reset_mixer_guitar_fixup(
+                    guitar_path=guitar_path,
+                    stem_paths=stem_paths,
+                    run_dir=run_dir,
+                )
 
         if result is None:
             return
@@ -780,7 +790,9 @@ def _render_live_mixer(
         if download_urls is None:
             download_urls = stem_media_urls(stem_paths, coord_prefix="isolate.download")
     except Exception as exc:
-        st.error(f"Could not prepare track audio for the mixer: {exc}")
+        st.error("Could not prepare track audio for the mixer.")
+        with st.expander("Details"):
+            st.exception(exc)
         return None
 
     stem_names = sort_stem_names(stem_paths.keys())
@@ -957,6 +969,21 @@ def _active_source_path(uploaded: object) -> Path | None:
     return Path(chosen) if chosen else None
 
 
+def _st_version() -> tuple[int, int, int]:
+    """Return parsed Streamlit version as (major, minor, patch)."""
+    try:
+        from packaging import version as _pv
+
+        v = _pv.Version(st.__version__)
+        return (v.major, v.minor, v.micro)
+    except Exception:
+        return (0, 0, 0)
+
+
+def _st_at_least(major: int, minor: int, patch: int = 0) -> bool:
+    return _st_version() >= (major, minor, patch)
+
+
 def _closed_selectbox(label: str, options: list[str], *, key: str, help: str | None = None):
     """Dropdown that does not accept typed free-text (Streamlit ≥1.55 combobox)."""
     kwargs: dict = {
@@ -967,10 +994,9 @@ def _closed_selectbox(label: str, options: list[str], *, key: str, help: str | N
     }
     if help:
         kwargs["help"] = help
-    try:
+    if _st_at_least(1, 55, 0):
         return st.selectbox(**kwargs, filter_mode=None)
-    except TypeError:
-        return st.selectbox(**kwargs)
+    return st.selectbox(**kwargs)
 
 
 def _render_region_controls(audio_path: Path | None) -> tuple[float, float | None, str | None]:
@@ -1201,8 +1227,14 @@ def _render_separation_controls() -> dict:
         "Output name",
         help="Used for downloaded file names. Defaults to the uploaded file's name.",
         key="isolate_output_name",
+        max_chars=100,
         **persist,
     )
+    staged_name = st.session_state.get("isolate_output_name")
+    if staged_name:
+        sanitized_name = " ".join(staged_name.split())
+        if sanitized_name != staged_name:
+            st.caption(f"Will be saved as: **{sanitized_name}**")
 
     start_sec, max_duration_sec, region_label = 0.0, None, None
     if audio_path and audio_path.exists():
@@ -1780,21 +1812,24 @@ def _mixer_and_downloads_fragment(
 
     if not mix_fresh:
         try:
-            _build_current_mix(
-                selected_stem_paths,
-                run_dir,
-                stem_names,
-                volumes_db,
-                muted,
-                soloed,
-                master_volume_db,
-            )
+            with st.spinner("Building current mix..."):
+                _build_current_mix(
+                    selected_stem_paths,
+                    run_dir,
+                    stem_names,
+                    volumes_db,
+                    muted,
+                    soloed,
+                    master_volume_db,
+                )
             ready = st.session_state.get("isolate_mix_ready")
         except Exception as exc:
             st.session_state.pop("isolate_mix_ready", None)
             st.session_state.pop("isolate_mix_fp", None)
             ready = None
-            st.warning(f"Could not build current mix export: {exc}")
+            st.warning("Could not build current mix export.")
+            with st.expander("Details"):
+                st.exception(exc)
 
     _render_downloads_panel(
         selected_stem_paths,
@@ -1823,11 +1858,21 @@ def _save_current_mix(ready: str, export_root: Path, base_name: str, fmt: str) -
 
 def _download_format_widget() -> str:
     """Format selector used by the Downloads panel. Returns an EXPORT_FORMATS key."""
-    fmt = st.segmented_control(
+    if _st_at_least(1, 41, 0):
+        fmt = st.segmented_control(
+            "Export format",
+            options=list(EXPORT_FORMATS),
+            format_func=lambda f: EXPORT_FORMAT_LABELS[f],
+            default="wav",
+            key="isolate_download_format",
+            help="WAV is lossless; other formats are handled automatically.",
+        )
+        return fmt or "wav"
+    fmt = st.selectbox(
         "Export format",
         options=list(EXPORT_FORMATS),
         format_func=lambda f: EXPORT_FORMAT_LABELS[f],
-        default="wav",
+        index=0,
         key="isolate_download_format",
         help="WAV is lossless; other formats are converted with ffmpeg.",
     )
@@ -1879,14 +1924,16 @@ def _render_downloads_panel(
                     key="isolate_save_tracks",
                     width="stretch",
                 ):
-                    _save_all_tracks(selected_stem_paths, export_root, str(base_name), fmt)
+                    with st.spinner(f"Converting tracks to {fmt}..."):
+                        _save_all_tracks(selected_stem_paths, export_root, str(base_name), fmt)
             with mix_col:
                 if st.button(
                     "Save current mix",
                     key="isolate_save_mix",
                     width="stretch",
                 ):
-                    _save_current_mix(str(ready), export_root, str(base_name), fmt)
+                    with st.spinner(f"Converting mix to {fmt}..."):
+                        _save_current_mix(str(ready), export_root, str(base_name), fmt)
         else:
             if st.button(
                 "Save all tracks",
@@ -1894,7 +1941,8 @@ def _render_downloads_panel(
                 key="isolate_save_tracks",
                 width="stretch",
             ):
-                _save_all_tracks(selected_stem_paths, export_root, str(base_name), fmt)
+                with st.spinner(f"Converting tracks to {fmt}..."):
+                    _save_all_tracks(selected_stem_paths, export_root, str(base_name), fmt)
 
 
 def _resolve_audio_for_job(choice: dict) -> tuple[Path | None, str | None]:
@@ -1989,7 +2037,8 @@ def _enqueue_confirmed_job(choice: dict, audio_path: Path) -> None:
     except RegionError as exc:
         st.error(str(exc))
         return
-    except Exception:
+    except Exception as exc:
+        logger.warning("Audio duration probe failed; timing estimates unavailable: %s", exc)
         job_audio_sec = float(max_duration_sec) if max_duration_sec is not None else None
 
     if job_requires_roformer_backend(choice["model"]) and not is_roformer_backend_available():
@@ -2132,6 +2181,9 @@ def _clear_loaded_mixer() -> None:
         "isolate_clip_length",
         "isolate_viewing_run_dir",
         "isolate_listen_applied_dir",
+        "isolate_listen_missing",
+        "isolate_results_source_fp",
+        "isolate_last_export_path",
         LISTEN_PICKER_KEY,
         LISTEN_PICKER_NEXT_KEY,
         "isolate_flash",
@@ -2218,11 +2270,10 @@ def _render_listening_switcher(browser_id: str | None, rows: list[dict] | None =
     applied = st.session_state.get("isolate_listen_applied_dir")
     if chosen and chosen != applied:
         row = next((r for r in rows if str(r.get("run_dir")) == chosen), None)
-        loaded_dir = st.session_state.get("isolate_run_dir")
         if row is None:
             st.caption("Those files are no longer available.")
-            if loaded_dir:
-                st.session_state[LISTEN_PICKER_NEXT_KEY] = str(loaded_dir)
+            st.session_state["isolate_listen_missing"] = str(chosen)
+            st.session_state.pop(LISTEN_PICKER_KEY, None)
             st.rerun()
             return
         viewing_id = str(row.get("id") or chosen)
@@ -2230,9 +2281,9 @@ def _render_listening_switcher(browser_id: str | None, rows: list[dict] | None =
             st.rerun()
         else:
             st.caption("Those files are no longer available.")
-            if loaded_dir and str(loaded_dir) != str(chosen):
-                st.session_state[LISTEN_PICKER_NEXT_KEY] = str(loaded_dir)
-                st.rerun()
+            st.session_state["isolate_listen_missing"] = str(chosen)
+            st.session_state.pop(LISTEN_PICKER_KEY, None)
+            st.rerun()
 
 
 def _has_source_for_job(choice: dict) -> bool:
@@ -2295,6 +2346,88 @@ def _render_mixer_region_caption(base_name: str) -> None:
     )
 
 
+def _load_parent_config(run_dir: Path) -> dict:
+    """Read the parent run's persisted separator config (Feature 2), else {}."""
+    meta_path = run_dir / "meta.json"
+    if not meta_path.is_file():
+        return {}
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    cfg = meta.get("config")
+    return dict(cfg) if isinstance(cfg, dict) else {}
+
+
+def _enqueue_reseparate_job(
+    stem_id: str,
+    stem_path: Path,
+    run_dir: Path,
+    parent_config: dict,
+) -> None:
+    """Enqueue a re-separate of one existing stem, defaulting from the parent run."""
+    output_dir = run_output_dir()
+    source_fp = st.session_state.get("isolate_results_source_fp")
+    source_kind = infer_source_kind(
+        source_fingerprint=str(source_fp) if source_fp else None,
+        source_kind=st.session_state.get("isolate_source_kind"),
+    )
+    spec = IsolateJobSpec(
+        id=uuid.uuid4().hex,
+        audio_path=str(stem_path),
+        output_dir=str(output_dir),
+        title=f"{stem_id} (re-separate)",
+        model=str(parent_config.get("model") or "htdemucs_6s"),
+        quality=str(parent_config.get("quality") or "balanced"),
+        device=str(parent_config.get("device") or "cpu"),
+        two_pass=bool(parent_config.get("two_pass", False)),
+        guitar_refine=bool(parent_config.get("guitar_refine", False)),
+        low_end_restore_db=float(parent_config.get("low_end_restore_db") or 0.0),
+        sub_bass_debleed=bool(parent_config.get("sub_bass_debleed", False)),
+        # Fold-other is off by default for a breakdown.
+        fold_other_into_guitar=False,
+        fold_other_mode="best_effort",
+        custom_stems=[stem_id],
+        source_fingerprint=str(source_fp) if source_fp else None,
+        source_kind=source_kind,
+        owner=st.session_state.get("isolate_user_id"),
+        created_at=time.time(),
+        reseparate_from=stem_id,
+        parent_run_dir=str(run_dir),
+    )
+    enqueue_job(spec)
+    st.session_state["isolate_flash"] = f"Queued breakdown of **{stem_id}**."
+    _open_queue_workspace()
+    st.rerun()
+
+
+def _render_reseparate_panel(stem_paths: dict[str, Path], run_dir: Path) -> None:
+    """'Break down a stem' control — re-separate one stem in place (section 6)."""
+    if len(stem_paths) < 1:
+        return
+    parent_config = _load_parent_config(run_dir)
+    run_fp = hashlib.sha256(str(run_dir.resolve()).encode()).hexdigest()[:12]
+    with st.expander(
+        "Break down a stem (re-separate)",
+        expanded=False,
+    ):
+        st.caption(
+            "Re-run the separator on one existing stem to break out more "
+            "instruments without reprocessing the whole track. On success the "
+            "source stem is replaced in the mixer by its new sub-stems."
+        )
+        if not parent_config:
+            st.caption("Parent run has no saved separator config — using defaults.")
+        for stem_id in sort_stem_names(stem_paths.keys()):
+            label = stem_label_for_id(stem_id)
+            if st.button(
+                f"Break down {label}",
+                key=f"reseparate_{run_fp}_{stem_id}",
+                help=f"Separate `{stem_id}` again into sub-stems.",
+            ):
+                _enqueue_reseparate_job(stem_id, stem_paths[stem_id], run_dir, parent_config)
+
+
 def _render_mixer_workspace(browser_id: str | None) -> None:
     owner = browser_id if isinstance(browser_id, str) else None
     rows = _library_rows_available(owner)
@@ -2318,11 +2451,12 @@ def _render_mixer_workspace(browser_id: str | None) -> None:
         return
 
     pending_fp = pending_upload_fp_for_stale(st.session_state)
-    if should_hide_stale_results(
+    show_file_ready_banner = should_hide_stale_results(
         pending_upload_fp=pending_fp,
         has_artifacts=True,
         results_source_fp=st.session_state.get("isolate_results_source_fp"),
-    ):
+    )
+    if not show_file_ready_banner:
         st.caption(
             "New file selected — mixer is still the chosen run until you separate again."
         )
@@ -2344,8 +2478,13 @@ def _render_mixer_workspace(browser_id: str | None) -> None:
 
     _render_guitar_fixup_panel(stem_paths, run_dir, artifacts_map or {}, bass_bleed)
 
+    _render_reseparate_panel(stem_paths, run_dir)
+
     _render_mixer_region_caption(base_name)
 
+    # NOTE: media URLs are generated once per session state, but Streamlit fragments
+    # may re-render at different times. If URL generation becomes expensive or stale,
+    # wrap with @st.cache_resource and a TTL.
     mixer_media_urls, mixer_download_urls = register_mixer_media(stem_paths)
     _mixer_and_downloads_fragment(
         stem_paths,
@@ -2385,7 +2524,12 @@ def main() -> None:
     with title_col:
         st.title("Audio Isolation")
     with refresh_col:
-        refresh_clicked = st.button("Refresh", key="isolate_refresh", use_container_width=True)
+        refresh_clicked = st.button(
+            "Refresh",
+            key="isolate_refresh",
+            help="Re-scan the local run library",
+            width="stretch",
+        )
 
     if not shutil.which("ffmpeg"):
         st.error(
@@ -2427,9 +2571,11 @@ def main() -> None:
     with tab_new:
         try:
             _render_new_workspace(demucs_ok)
-        except Exception:
+        except Exception as exc:
             logger.exception("New tab failed to draw")
-            st.error("Could not draw New. Click Refresh.")
+            st.error("Could not draw the new tab. Try clicking Refresh, or check that the file is valid audio.")
+            with st.expander("Technical details"):
+                st.exception(exc)
     with tab_mixer:
         if selected == "Mixer":
             _render_mixer_workspace(browser_id if isinstance(browser_id, str) else None)

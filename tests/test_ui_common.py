@@ -23,6 +23,46 @@ def test_write_run_metadata_includes_source_kind(tmp_path):
     assert meta["page"] == "isolate"
 
 
+def test_write_run_metadata_persists_config(tmp_path):
+    run_dir = tmp_path / "run-config"
+    config = {"model": "htdemucs_6s", "quality": "balanced", "device": "cpu"}
+    common.write_run_metadata(
+        run_dir,
+        page="isolate",
+        title="Party",
+        artifacts={"vocals": str(run_dir / "vocals.wav")},
+        config=config,
+    )
+    meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+    assert meta["config"] == config
+
+
+def test_write_run_metadata_config_none_omits_key(tmp_path):
+    run_dir = tmp_path / "run-no-config"
+    common.write_run_metadata(
+        run_dir,
+        page="isolate",
+        title="Party",
+        artifacts={"vocals": str(run_dir / "vocals.wav")},
+        config=None,
+    )
+    meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+    assert "config" not in meta
+    run_dir = tmp_path / "run-1"
+    common.write_run_metadata(
+        run_dir,
+        page="isolate",
+        title="Party",
+        artifacts={"vocals": str(run_dir / "vocals.wav")},
+        source_kind="youtube",
+        source_fingerprint="youtube:https://youtu.be/abc",
+    )
+    meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+    assert meta["source_kind"] == "youtube"
+    assert meta["source_fingerprint"] == "youtube:https://youtu.be/abc"
+    assert meta["page"] == "isolate"
+
+
 def test_delete_run_removes_directory(tmp_path, monkeypatch):
     monkeypatch.setattr(common, "DATA_DIR", tmp_path)
     run_dir = tmp_path / "abc-123"

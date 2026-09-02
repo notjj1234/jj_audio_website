@@ -84,8 +84,27 @@ _FFMPEG_PROFILES = {
 
 
 def _ffmpeg_path() -> str | None:
-    """Resolve the ffmpeg binary (bundled in the frozen app or on PATH)."""
-    return shutil.which("ffmpeg")
+    """Resolve the ffmpeg binary (bundled in the frozen app or on PATH).
+
+    Checks PATH first, then common PyInstaller bundle locations (_MEIPASS)
+    and the dev-time repo ``packaging/ffmpeg/`` directory.
+    """
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    candidates: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "ffmpeg")
+        candidates.append(Path(meipass) / "bin" / "ffmpeg")
+    candidates.append(Path(__file__).resolve().parents[2] / "packaging" / "ffmpeg" / "ffmpeg")
+    for cand in candidates:
+        try:
+            if cand.is_file() and os.access(cand, os.X_OK):
+                return str(cand)
+        except OSError:
+            continue
+    return None
 
 
 def convert_audio(src: Path, dest: Path, fmt: str) -> Path:

@@ -62,6 +62,8 @@ class IsolateJobSpec:
     prior_timing: dict[str, Any] | None = None
     low_end_restore_db: float = 0.0
     sub_bass_debleed: bool = False
+    reseparate_from: str | None = None
+    parent_run_dir: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -688,15 +690,27 @@ def _run_one_job(job_id: str) -> None:
         )
         cleanup_mix_artifacts(Path(spec.output_dir))
         artifact_map = {k: str(v) for k, v in artifacts.items()}
-        write_run_metadata(
-            Path(spec.output_dir),
-            page="isolate",
-            title=spec.title,
-            artifacts=artifacts,
-            owner=spec.owner,
-            source_kind=spec.source_kind,
-            source_fingerprint=spec.source_fingerprint,
-        )
+        # Re-separate children belong to the parent run on disk — never a new
+        # Recent run — so only the normal path writes run metadata.
+        if spec.reseparate_from is None:
+            write_run_metadata(
+                Path(spec.output_dir),
+                page="isolate",
+                title=spec.title,
+                artifacts=artifacts,
+                owner=spec.owner,
+                source_kind=spec.source_kind,
+                source_fingerprint=spec.source_fingerprint,
+                config={
+                    "model": spec.model,
+                    "quality": spec.quality,
+                    "device": spec.device,
+                    "two_pass": spec.two_pass,
+                    "guitar_refine": spec.guitar_refine,
+                    "low_end_restore_db": spec.low_end_restore_db,
+                    "sub_bass_debleed": spec.sub_bass_debleed,
+                },
+            )
         latest = read_status(job_id)
         if latest and latest.get("status") in ("cancelled", "pausing"):
             return
@@ -716,6 +730,8 @@ def _run_one_job(job_id: str) -> None:
             source_audio_path=spec.audio_path,
             custom_stems=spec.custom_stems,
             clip_length=spec.max_duration_sec,
+            reseparate_from=spec.reseparate_from,
+            parent_run_dir=spec.parent_run_dir,
             **eta_fields,
         )
     except JobAborted:
@@ -841,6 +857,101 @@ def _presence_from_artifacts(artifacts: dict[str, Any]) -> dict[str, Any]:
         return {}
 
 
+def _rewrite_parent_meta(parent_run_dir: str | None, session: Any) -> None:
+    """Replace only ``artifacts`` in the parent run's meta.json with the session's.
+
+    Preserves every other key (config, title, created_at, source_kind, ...).
+    Writes atomically. Silent no-op if the run dir is missing or meta cannot be read.
+    """
+    if not parent_run_dir:
+        return
+    meta_path = Path(parent_run_dir) / "meta.json"
+    if not meta_path.is_file():
+        return
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    meta["artifacts"] = dict(session.get("isolate_artifacts") or {})
+    tmp = meta_path.with_suffix(meta_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(meta), encoding="utf-8")
+    tmp.replace(meta_path)
+
+
+def _move_reseparate_children(children: dict[str, Path], parent_run_dir: Path) -> dict[str, Path]:
+    """Move each child wav into the parent run dir; return a parent-pathed map.
+
+    The re-separate job separated into a fresh output dir, so ``children`` are the
+    only new stems there. Moving them into the parent dir keeps the parent as the
+    single library location the mixer/Recent point at.
+    """
+    parent_run_dir.mkdir(parents=True, exist_ok=True)
+    out: dict[str, Path] = {}
+    for key, path in children.items():
+        dest = parent_run_dir / path.name
+        try:
+            Path(path).replace(dest)
+        except OSError:
+            dest = path
+        out[str(key)] = dest
+    return out
+
+
+def _apply_reseparate_job_to_session(
+    session: Any,
+    status: dict[str, Any],
+) -> bool:
+    """Merge a re-separate job's child stems into the parent run in session.
+
+    The source stem is replaced in the mixer by its children (composite keys like
+    ``other::guitar``), the run pointer re-points to the parent, and the parent's
+    meta.json ``artifacts`` is rewritten. The parent's source fingerprint/kind stay
+    authoritative. Returns False (leaving the session unchanged) when no audible
+    children were produced.
+    """
+    from ui.isolate_state import children_from_outputs, merge_reseparate
+
+    run_dir = str(status.get("run_dir") or "")
+    parent_run_dir = str(status.get("parent_run_dir") or "")
+    source_stem = str(status.get("reseparate_from") or "").strip()
+    if not run_dir or not parent_run_dir or not source_stem:
+        return False
+
+    raw_children = children_from_outputs(Path(run_dir))
+    if not raw_children:
+        return False
+
+    parent = Path(parent_run_dir)
+    moved = _move_reseparate_children(raw_children, parent)
+    # Composite keys (parent::child) are built here; session artifacts are
+    # string-valued everywhere, so stringify the moved child paths.
+    children = {f"{source_stem}::{k}": str(v) for k, v in moved.items()}
+
+    current_artifacts = session.get("isolate_artifacts") or {}
+    session["isolate_artifacts"] = merge_reseparate(
+        current_artifacts, source_stem, children
+    )
+
+    selected = dict(session.get("isolate_selected_stems") or {})
+    selected.pop(source_stem, None)
+    for key in children:
+        selected[key] = True
+    session["isolate_selected_stems"] = selected
+
+    # Children belong to the parent run; re-point the mixer's run directory there.
+    session["isolate_run_dir"] = parent_run_dir
+    session["isolate_viewing_run_dir"] = parent_run_dir
+    # Do NOT overwrite the parent's authoritative source fingerprint / kind.
+
+    _rewrite_parent_meta(parent_run_dir, session)
+
+    for key in _MIXER_RESET_KEYS:
+        session.pop(key, None)
+
+    session["isolate_consumed_job_id"] = status.get("id")
+    return True
+
+
 def apply_succeeded_job_to_session(
     session: Any,
     status: dict[str, Any],
@@ -854,6 +965,8 @@ def apply_succeeded_job_to_session(
     """
     if status.get("status") != "succeeded":
         return False
+    if status.get("reseparate_from"):
+        return _apply_reseparate_job_to_session(session, status)
     artifacts = status.get("artifacts") or {}
     wav_paths = _existing_wav_artifacts(artifacts)
     if not wav_paths:

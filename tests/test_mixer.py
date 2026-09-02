@@ -15,6 +15,8 @@ from audio_to_tab.mixer import (
     db_to_linear,
     effective_linear_gains,
     mix_stems_to_wav,
+    stem_display_name,
+    stem_energy_db,
     waveform_peaks,
 )
 
@@ -22,6 +24,19 @@ from audio_to_tab.mixer import (
 def _write_stereo_wav(path: Path, left: np.ndarray, right: np.ndarray, sr: int = 44100) -> None:
     stereo = np.column_stack([left, right]).astype(np.float32)
     sf.write(str(path), stereo, sr, subtype="PCM_16")
+
+
+def test_stem_display_name_plain_ids_unchanged():
+    assert stem_display_name("guitar") == "Guitar"
+    assert stem_display_name("vocals") == "Vocals"
+    assert stem_display_name("lead_guitar") == "Lead Guitar"
+    assert stem_display_name("no_vocals") == "Instrumental"
+
+
+def test_stem_display_name_composite_id():
+    assert stem_display_name("other::guitar") == "Guitar (from Other)"
+    assert stem_display_name("other::synth") == "Synth (from Other)"
+    assert stem_display_name("guitar::lead_guitar") == "Lead Guitar (from Guitar)"
 
 
 def test_audible_stems_solo_overrides_mute():
@@ -99,6 +114,23 @@ def test_waveform_peaks(tmp_path: Path):
     peaks = waveform_peaks(path, num_points=50)
     assert len(peaks) == 50
     assert float(peaks.max()) > 0.0
+
+
+def test_stem_energy_db_tone(tmp_path: Path):
+    t = np.linspace(0, 1, 44100, endpoint=False)
+    mono = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+    path = tmp_path / "tone.wav"
+    sf.write(str(path), mono, 44100)
+    db = stem_energy_db(path)
+    # RMS of a 0.5-amplitude sine is 0.5/sqrt(2) → 20*log10 ≈ −9 dBFS.
+    assert db == pytest.approx(20 * np.log10(0.5 / np.sqrt(2)), abs=1.0)
+
+
+def test_stem_energy_db_silent(tmp_path: Path):
+    zeros = np.zeros(44100, dtype=np.float32)
+    path = tmp_path / "silent.wav"
+    sf.write(str(path), zeros, 44100)
+    assert stem_energy_db(path) < -60.0
 
 
 def test_mix_stems_to_wav(tmp_path: Path):

@@ -243,6 +243,7 @@ def _demix_scnet(model, mix, device) -> np.ndarray:
                 batch.clear()
                 locations.clear()
 
+    counter = torch.clamp(counter, min=1e-8)
     estimated = result / counter.unsqueeze(0).unsqueeze(0)
     estimated = estimated.cpu().numpy()
     np.nan_to_num(estimated, copy=False, nan=0.0)

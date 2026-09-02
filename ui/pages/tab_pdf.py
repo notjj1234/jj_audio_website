@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime
+import logging
 from pathlib import Path
 import sys
 
 import streamlit as st
+
+logger = logging.getLogger(__name__)
 
 from ui.common import (
     AUDIO_UPLOAD_TYPES,
@@ -85,7 +88,11 @@ def main() -> None:
                         st.rerun()
 
     with st.expander("Conversion settings", expanded=not has_results):
-        title = st.text_input("Tab title", value="Guitar Tab")
+        title = st.text_input(
+            "Tab title",
+            value="Guitar Tab",
+            help="This text appears as the title on the generated tab PDF.",
+        )
         separate_stems = st.toggle(
             "Separate guitar stem — required for full mixes",
             value=can_separate,
@@ -234,6 +241,7 @@ def main() -> None:
             "Upload MP3 / WAV / FLAC / M4A",
             type=AUDIO_UPLOAD_TYPES,
         )
+        st.caption("Maximum file size: 200 MB. Files are processed locally.")
         carry_over_path = st.session_state.get("carry_over_audio_path")
         carry_over_name = st.session_state.get("carry_over_audio_name")
         using_carry_over = bool(
@@ -352,11 +360,13 @@ def main() -> None:
 
             except YouTubeDownloadError as exc:
                 st.error(str(exc))
+            except (FileNotFoundError, OSError) as exc:
+                st.error(f"File error: {exc}")
+            except ValueError as exc:
+                st.error(str(exc))
             except Exception as exc:
-                st.error(
-                    "Conversion failed — your file and settings are still here, "
-                    "so you can just try again."
-                )
+                logger.exception("Unexpected tab conversion error")
+                st.error("Conversion failed unexpectedly. Check that the audio file is valid.")
                 with st.expander("Technical details"):
                     st.code(str(exc))
 

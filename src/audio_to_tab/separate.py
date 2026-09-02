@@ -12,6 +12,7 @@ import tempfile
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 
 from audio_to_tab.ingest import temporary_output_path
@@ -62,12 +63,15 @@ def _guitar_ft_digest_sidecar(path: Path) -> Path:
 
 
 def _write_guitar_ft_digest_sidecar(path: Path) -> None:
+    sidecar = _guitar_ft_digest_sidecar(path)
+    tmp = sidecar.with_suffix(".sha256.tmp")
     try:
-        _guitar_ft_digest_sidecar(path).write_text(
-            GUITAR_FT_SHA256 + "\n", encoding="utf-8"
-        )
+        tmp.write_text(GUITAR_FT_SHA256 + "\n", encoding="utf-8")
+        tmp.replace(sidecar)
     except OSError:
-        logger.debug("Could not write guitar-ft digest sidecar for %s", path)
+        logger.info("Could not write guitar-ft digest sidecar for %s", path)
+        with suppress(OSError):
+            tmp.unlink(missing_ok=True)
 
 
 def guitar_ft_weights_cached() -> bool:
@@ -617,5 +621,9 @@ def separate_guitar_stem(
         }
         _maybe_bleed_gate(out, stem_refs)
         _apply_low_end_recovery({k: v for k, v in stem_refs.items() if v is not None})
+
+    out_p = Path(out)
+    if not out_p.exists() or out_p.stat().st_size == 0:
+        raise RuntimeError(f"Guitar stem output missing or empty: {out_p}")
 
     return out

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
 import streamlit as st
+
+logger = logging.getLogger(__name__)
 
 from ui.common import (
     desktop_app_version,
@@ -72,8 +75,8 @@ try:
 except Exception:
     try:
         st.set_page_config(page_title=f"{_WINDOW_PRODUCT} {_APP_VERSION}", layout="wide")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Could not set Streamlit page config: %s", exc)
 
 # Belt-and-braces with client.toolbarMode="viewer": the settings menu (theme) stays,
 # the Deploy button and Streamlit footer do not.

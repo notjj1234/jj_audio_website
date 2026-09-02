@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
+import soundfile as sf
 
 from ui.isolate_jobs import (
     IsolateJobSpec,
@@ -763,3 +766,195 @@ def test_format_job_error_is_one_short_sentence_without_app_paths():
     assert "libavutil" not in cleaned
     assert len(cleaned) <= 160
     assert cleaned
+
+
+def test_spec_round_trips_reseparate_fields():
+    import ui.isolate_jobs as jobs
+
+    spec = IsolateJobSpec(
+        id="r1",
+        audio_path="C:\\a.wav",
+        output_dir="C:\\out",
+        title="T",
+        reseparate_from="other",
+        parent_run_dir="C:\\parent",
+    )
+    restored = jobs.IsolateJobSpec.from_dict(spec.to_dict())
+    assert restored.reseparate_from == "other"
+    assert restored.parent_run_dir == "C:\\parent"
+
+
+def test_run_one_job_reseparate_skips_metadata_and_stores_fields(jobs_dir: Path, monkeypatch):
+    """Re-separate job does not write a new Recent run; fields travel in status."""
+    import ui.isolate_jobs as jobs
+
+    audio = jobs_dir / "other.wav"
+    audio.write_bytes(b"wav")
+    out = jobs_dir / "out"
+    out.mkdir()
+    parent = jobs_dir / "parent"
+    parent.mkdir()
+
+    metadata_calls: list = []
+
+    def fake_separate(*, audio_path, output_dir, config, on_progress, **kwargs):
+        on_progress("separate", "mock")
+        dest = Path(output_dir) / "guitar.wav"
+        dest.write_bytes(b"g")
+        return {"other::guitar": dest}
+
+    def fake_write_metadata(*args, **kwargs):
+        metadata_calls.append((args, kwargs))
+
+    monkeypatch.setattr("audio_to_tab.isolate.separate_stems", fake_separate)
+    monkeypatch.setattr("ui.media.cleanup_mix_artifacts", lambda *_a, **_k: None)
+    monkeypatch.setattr("ui.common.write_run_metadata", fake_write_metadata)
+    monkeypatch.setattr(
+        "audio_to_tab.hardware.ensure_cuda_available", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "audio_to_tab.hardware.get_desktop_probe", lambda: MagicMock()
+    )
+
+    spec = IsolateJobSpec(
+        id="resp-run",
+        audio_path=str(audio),
+        output_dir=str(out),
+        title="Other",
+        created_at=time.time(),
+        reseparate_from="other",
+        parent_run_dir=str(parent),
+    )
+    jobs.enqueue_job(spec)
+    jobs._run_one_job(spec.id)
+    status = jobs.read_status(spec.id)
+    assert status["status"] == "succeeded"
+    assert status["reseparate_from"] == "other"
+    assert status["parent_run_dir"] == str(parent)
+    assert metadata_calls == []
+
+
+def test_apply_succeeded_job_to_session_reseparate_merges_and_repoints(tmp_path: Path):
+    import ui.isolate_jobs as jobs
+
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    parent_meta = {
+        "page": "isolate",
+        "title": "Song",
+        "config": {"model": "htdemucs_6s", "quality": "balanced"},
+        "artifacts": {"other": str(parent / "other.wav")},
+    }
+    (parent / "meta.json").write_text(json.dumps(parent_meta), encoding="utf-8")
+
+    job_dir = tmp_path / "jobdir"
+    job_dir.mkdir()
+    t = np.linspace(0, 0.2, 8820, endpoint=False)
+    tone = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+    child = job_dir / "guitar.wav"
+    sf.write(str(child), tone, 44100)
+
+    session: dict = {
+        "isolate_results_source_fp": "fp-parent",
+        "isolate_source_kind": "file",
+        "isolate_artifacts": {"other": str(parent / "other.wav")},
+        "isolate_selected_stems": {"other": True},
+        "isolate_run_dir": str(parent),
+        "isolate_viewing_run_dir": str(parent),
+    }
+    ok = jobs.apply_succeeded_job_to_session(
+        session,
+        {
+            "id": "resp1",
+            "status": "succeeded",
+            "run_dir": str(job_dir),
+            "parent_run_dir": str(parent),
+            "reseparate_from": "other",
+            "artifacts": {"other::guitar": str(child)},
+        },
+        viewing_mode="latest",
+    )
+    assert ok is True
+    assert "other" not in session["isolate_artifacts"]
+    assert session["isolate_artifacts"]["other::guitar"] == str(parent / "guitar.wav")
+    assert session["isolate_selected_stems"]["other::guitar"] is True
+    assert "other" not in session["isolate_selected_stems"]
+    assert session["isolate_run_dir"] == str(parent)
+    assert session["isolate_viewing_run_dir"] == str(parent)
+    assert session["isolate_results_source_fp"] == "fp-parent"
+    assert (parent / "guitar.wav").exists()
+    meta = json.loads((parent / "meta.json").read_text(encoding="utf-8"))
+    assert "other" not in meta["artifacts"]
+    assert meta["artifacts"]["other::guitar"] == str(parent / "guitar.wav")
+    assert meta["config"] == {"model": "htdemucs_6s", "quality": "balanced"}
+
+
+def test_apply_succeeded_job_to_session_reseparate_empty_children_noop(tmp_path: Path):
+    import ui.isolate_jobs as jobs
+
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    parent_meta = {
+        "artifacts": {"other": str(parent / "other.wav")},
+        "config": {"model": "htdemucs_6s"},
+    }
+    (parent / "meta.json").write_text(json.dumps(parent_meta), encoding="utf-8")
+
+    job_dir = tmp_path / "jobdir"
+    job_dir.mkdir()
+    zero = np.zeros(8820, dtype=np.float32)
+    silent = job_dir / "guitar.wav"
+    sf.write(str(silent), zero, 44100)
+
+    session: dict = {
+        "isolate_results_source_fp": "fp-parent",
+        "isolate_artifacts": {"other": str(parent / "other.wav")},
+    }
+    ok = jobs.apply_succeeded_job_to_session(
+        session,
+        {
+            "id": "respEmpty",
+            "status": "succeeded",
+            "run_dir": str(job_dir),
+            "parent_run_dir": str(parent),
+            "reseparate_from": "other",
+            "artifacts": {"other::guitar": str(silent)},
+        },
+    )
+    assert ok is False
+    assert session["isolate_artifacts"] == {"other": str(parent / "other.wav")}
+    meta = json.loads((parent / "meta.json").read_text(encoding="utf-8"))
+    assert meta["artifacts"] == {"other": str(parent / "other.wav")}
+
+
+def test_rewrite_parent_meta_preserves_config_and_noop_on_missing(tmp_path: Path):
+    import ui.isolate_jobs as jobs
+
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    (parent / "meta.json").write_text(
+        json.dumps(
+            {
+                "page": "isolate",
+                "title": "Song",
+                "config": {"model": "htdemucs_6s"},
+                "artifacts": {"other": str(parent / "other.wav")},
+                "source_kind": "file",
+            }
+        ),
+        encoding="utf-8",
+    )
+    session = {
+        "isolate_artifacts": {
+            "other::guitar": str(parent / "guitar.wav"),
+            "vocals": str(parent / "vocals.wav"),
+        }
+    }
+    jobs._rewrite_parent_meta(str(parent), session)
+    meta = json.loads((parent / "meta.json").read_text(encoding="utf-8"))
+    assert meta["artifacts"] == session["isolate_artifacts"]
+    assert meta["config"] == {"model": "htdemucs_6s"}
+    assert meta["page"] == "isolate"
+    assert meta["source_kind"] == "file"
+
+    jobs._rewrite_parent_meta(str(tmp_path / "missing"), session)

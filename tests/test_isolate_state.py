@@ -5,7 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
+import soundfile as sf
 
 from ui.isolate_state import (
     DEFAULT_SEPARATION_PRESET,
@@ -89,6 +91,9 @@ from ui.isolate_state import (
     WORKSPACE_NEXT_KEY,
     LISTEN_PICKER_KEY,
     LISTEN_PICKER_NEXT_KEY,
+    children_from_outputs,
+    merge_reseparate,
+    stem_label_for_id,
 )
 
 
@@ -464,7 +469,7 @@ def test_isolate_reopen_handler_uses_pending_not_direct_widget_write():
     tab_new_src = main_src[main_src.find("with tab_new:") : main_src.find("with tab_mixer:")]
     assert "_render_new_workspace(demucs_ok)" in tab_new_src
     assert "if show_new" not in tab_new_src
-    assert "Could not draw New. Click Refresh." in tab_new_src
+    assert "Could not draw the new tab." in tab_new_src
     mixer_src = main_src[main_src.find("with tab_mixer:") : main_src.find("with tab_queue:")]
     assert 'if selected == "Mixer"' in mixer_src
     assert "_render_mixer_workspace(" in mixer_src
@@ -958,7 +963,7 @@ def test_intra_stage_fraction_caps_and_unestimated():
     assert estimated is True
     assert frac == pytest.approx(0.5)
     capped, _ = intra_stage_fraction(1000.0, 60.0)
-    assert capped == pytest.approx(0.95)
+    assert capped == pytest.approx(0.98)
     none, is_est = intra_stage_fraction(10.0, None)
     assert none == 0.0
     assert is_est is False
@@ -1514,4 +1519,49 @@ def test_default_region_end():
 def test_clamp_region_bounds():
     start, end = clamp_region_bounds(0, 3, 120.0, min_length=5.0)
     assert end - start >= 5.0
+
+
+def test_stem_label_for_id():
+    assert stem_label_for_id("other::guitar") == "Guitar (from Other)"
+    assert stem_label_for_id("guitar") == "Guitar"
+    assert stem_label_for_id("lead_guitar") == "Lead Guitar"
+
+
+def _write_wav(path: Path, amplitude: float):
+    t = np.linspace(0, 0.5, 22050, endpoint=False)
+    tone = (amplitude * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+    sf.write(str(path), tone, 44100)
+
+
+def test_children_from_outputs_filters_silent(tmp_path):
+    _write_wav(tmp_path / "guitar.wav", amplitude=0.5)
+    _write_wav(tmp_path / "empty.wav", amplitude=0.0)
+    out = children_from_outputs(tmp_path)
+    assert set(out.keys()) == {"guitar"}
+    assert out["guitar"] == tmp_path / "guitar.wav"
+
+
+def test_children_from_outputs_skips_diagnostics(tmp_path):
+    _write_wav(tmp_path / "guitar.wav", amplitude=0.5)
+    _write_wav(tmp_path / "guitar_diagnostic.wav", amplitude=0.5)
+    out = children_from_outputs(tmp_path)
+    assert set(out.keys()) == {"guitar"}
+
+
+def test_children_from_outputs_empty_or_missing(tmp_path):
+    assert children_from_outputs(tmp_path / "nope") == {}
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert children_from_outputs(empty) == {}
+
+
+def test_merge_reseparate_removes_source_and_adds_children():
+    artifacts = {"other": Path("/a/other.wav"), "vocals": Path("/a/vocals.wav")}
+    children = {"other::guitar": Path("/a/other::guitar.wav"), "other::synth": Path("/a/other::synth.wav")}
+    merged = merge_reseparate(artifacts, "other", children)
+    assert artifacts == {"other": Path("/a/other.wav"), "vocals": Path("/a/vocals.wav")}
+    assert "other" not in merged
+    assert merged["other::guitar"] == Path("/a/other::guitar.wav")
+    assert merged["other::synth"] == Path("/a/other::synth.wav")
+    assert merged["vocals"] == Path("/a/vocals.wav")
 

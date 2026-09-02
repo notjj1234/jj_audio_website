@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from audio_to_tab.hardware import HostProbe, resolve_desktop_speed
 from audio_to_tab.isolate import effective_isolation_quality
+from audio_to_tab.mixer import stem_display_name, stem_energy_db
 
 ISOLATION_STAGE_ORDER = (
     "ingest",
@@ -55,7 +56,7 @@ _QUALITY_TIME_FACTOR = {"fast": 1.0, "balanced": 2.0, "high": 4.0, "extreme": 6.
 _REFERENCE_P_CORES = 8.0
 _ROFORMER_REALTIME = {"cpu": 2.2, "cuda": 0.12, "mps": 1.0}
 _ROFORMER_REFINE_REALTIME = {"cpu": 1.0, "cuda": 0.06, "mps": 0.45}
-_INTRA_STAGE_CAP = 0.95
+_INTRA_STAGE_CAP = 0.98
 _GUITAR_MODEL_MARKERS = ("6s", "guitar", "roformer")
 
 # Labeled track picks → one resolved pipeline (see resolve_track_selection).
@@ -1521,3 +1522,53 @@ def running_progress_view(status: dict[str, Any], now: float) -> dict[str, Any]:
         "hint": user_progress_hint(stage, message),
         "estimated": intra_estimated,
     }
+
+
+# Near-silence threshold (dBFS) below which a re-separate child is discarded.
+RESEPARATE_SILENCE_DBFS = -40.0
+# Diagnostic marker in a filename; such files are never treated as child stems.
+_DIAGNOSTIC_FILENAME_MARKER = "diagnostic"
+
+
+def children_from_outputs(output_dir: Path) -> dict[str, Path]:
+    """Scan a re-separate output dir for audible child wav stems.
+
+    Returns ``{child_stem_id: Path}`` where ``child_stem_id`` is the raw filename
+    stem (e.g. ``guitar`` from ``guitar.wav``). Skips diagnostic-named files and
+    near-silent children (``stem_energy_db <= RESEPARATE_SILENCE_DBFS``). Returns
+    ``{}`` when the dir is missing or no audible children remain.
+    """
+    folder = Path(output_dir)
+    if not folder.is_dir():
+        return {}
+    out: dict[str, Path] = {}
+    for path in folder.iterdir():
+        if path.suffix.lower() != ".wav":
+            continue
+        name = path.stem
+        if _DIAGNOSTIC_FILENAME_MARKER in name:
+            continue
+        if stem_energy_db(path) <= RESEPARATE_SILENCE_DBFS:
+            continue
+        out[str(name)] = path
+    return out
+
+
+def merge_reseparate(
+    artifacts: dict[str, Any],
+    source_stem: str,
+    children: dict[str, Path],
+) -> dict[str, Any]:
+    """Return a new artifacts dict with ``source_stem`` removed and children added.
+
+    ``children`` keys must already be composite-prefixed by the caller
+    (e.g. ``other::guitar``). Never mutates the input ``artifacts`` dict.
+    """
+    merged = {k: v for k, v in artifacts.items() if k != source_stem}
+    merged.update(children)
+    return merged
+
+
+def stem_label_for_id(stem_id: str) -> str:
+    """Human label for a stem id, including composite ``Child (from Parent)`` ids."""
+    return stem_display_name(stem_id)

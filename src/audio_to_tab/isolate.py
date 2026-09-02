@@ -177,6 +177,8 @@ DEMUCS_MAX_SEGMENT_SEC = {
     "htdemucs_ft": 10,
 }
 
+SUBPROCESS_TIMEOUT = 300
+
 
 def isolate_timeout_multiplier(
     *,
@@ -311,23 +313,28 @@ def probe_duration_sec(path: str | Path) -> float | None:
 
     ffprobe = shutil.which("ffprobe")
     if ffprobe:
-        result = subprocess.run(
-            [
-                ffprobe,
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                str(src),
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            **subprocess_run_kwargs(),
-        )
-        if result.returncode == 0:
+        try:
+            result = subprocess.run(
+                [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    str(src),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=SUBPROCESS_TIMEOUT,
+                **subprocess_run_kwargs(),
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("ffprobe timed out after %ss probing %s", SUBPROCESS_TIMEOUT, path)
+            result = None
+        if result is not None and result.returncode == 0:
             try:
                 dur = float(result.stdout.strip())
                 if dur > 0:
@@ -337,19 +344,25 @@ def probe_duration_sec(path: str | Path) -> float | None:
 
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg:
-        result = subprocess.run(
-            [ffmpeg, "-i", str(src)],
-            capture_output=True,
-            text=True,
-            check=False,
-            **subprocess_run_kwargs(),
-        )
-        match = _FFMPEG_DURATION_RE.search(result.stderr or "")
-        if match:
-            hours, minutes, seconds = match.groups()
-            dur = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-            if dur > 0:
-                return dur
+        try:
+            result = subprocess.run(
+                [ffmpeg, "-i", str(src)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=SUBPROCESS_TIMEOUT,
+                **subprocess_run_kwargs(),
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("ffmpeg timed out after %ss probing %s", SUBPROCESS_TIMEOUT, path)
+            result = None
+        if result is not None:
+            match = _FFMPEG_DURATION_RE.search(result.stderr or "")
+            if match:
+                hours, minutes, seconds = match.groups()
+                dur = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+                if dur > 0:
+                    return dur
 
     try:
         import soundfile as sf
@@ -360,6 +373,7 @@ def probe_duration_sec(path: str | Path) -> float | None:
     except Exception:
         pass
 
+    logger.warning("All probe methods failed for %s; duration unknown", path)
     return None
 
 
@@ -599,7 +613,8 @@ def apply_fold_other_into_guitar(
                                 f">= {FOLD_SKIP_PIANO_OVERLAP:.2f}); skip mix to "
                                 "avoid keys bleed"
                             )
-                except Exception:
+                except Exception as exc:
+                    logger.warning("Piano overlap check failed; defaulting to fold: %s", exc)
                     piano_overlap = None
 
     if skip_reason:
@@ -617,6 +632,11 @@ def apply_fold_other_into_guitar(
     resolved_gain = FOLD_OTHER_MIX_GAIN if gain is None else float(gain)
     if resolved_mode in ("best_effort", "band_limited"):
         tmp_band = other.parent / f"{other.stem}_guitar_band.wav"
+        if other.stat().st_size > 500 * 1024 * 1024:
+            logger.warning(
+                "Band-limited other fold on a large file (%s MB); may cause memory pressure",
+                other.stat().st_size // (1024 * 1024),
+            )
         try:
             mix_src = _write_band_limited_other(other, tmp_band)
         except Exception as exc:
@@ -625,32 +645,34 @@ def apply_fold_other_into_guitar(
             resolved_mode = "full"
             tmp_band = None
 
-    scoring_competitors = {
-        name: artifacts[name]
-        for name in ("bass", "drums")
-        if name in artifacts and artifacts[name] is not None
-    }
-    search = apply_fold_other_gain_search(
-        guitar,
-        mix_src,
-        competitors=scoring_competitors,
-        mode=resolved_mode,
-        adaptive=adaptive_gain,
-        fixed_gain=resolved_gain,
-    )
-    if search.attempted:
-        search_path = Path(guitar).parent / "adaptive_fold_gain_diagnostics.json"
-        search_path = search.write_json(search_path)
-        artifacts["adaptive_fold_gain_diagnostics"] = search_path
+    try:
+        scoring_competitors = {
+            name: artifacts[name]
+            for name in ("bass", "drums")
+            if name in artifacts and artifacts[name] is not None
+        }
+        search = apply_fold_other_gain_search(
+            guitar,
+            mix_src,
+            competitors=scoring_competitors,
+            mode=resolved_mode,
+            adaptive=adaptive_gain,
+            fixed_gain=resolved_gain,
+        )
+        if search.attempted:
+            search_path = Path(guitar).parent / "adaptive_fold_gain_diagnostics.json"
+            search_path = search.write_json(search_path)
+            artifacts["adaptive_fold_gain_diagnostics"] = search_path
 
-    mix_stems_to_wav(
-        {"guitar": guitar, "other": mix_src},
-        output_path=guitar,
-        gains={"guitar": 1.0, "other": search.chosen_gain},
-    )
-    if tmp_band is not None:
-        with suppress(OSError):
-            tmp_band.unlink(missing_ok=True)
+        mix_stems_to_wav(
+            {"guitar": guitar, "other": mix_src},
+            output_path=guitar,
+            gains={"guitar": 1.0, "other": search.chosen_gain},
+        )
+    finally:
+        if tmp_band is not None:
+            with suppress(OSError):
+                tmp_band.unlink(missing_ok=True)
     _drop_other_stem(artifacts)
     band_note = (
         f"mixed guitar-band other ({FOLD_GUITAR_BAND_LOW_HZ:.0f}–"
@@ -906,7 +928,8 @@ def _stem_rms(path: Path) -> float:
         import soundfile as sf
 
         data, _sr = sf.read(str(path), always_2d=True)
-    except Exception:
+    except Exception as exc:
+        logger.warning("Could not read stem for RMS calculation: %s", exc)
         return 0.0
     if data.size == 0:
         return 0.0
@@ -1986,22 +2009,28 @@ def _trim_audio(
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return input_path
-    result = subprocess.run(
-        [
-            ffmpeg,
-            "-y",
-            "-ss",
-            str(start_sec),
-            "-i",
-            str(input_path),
-            "-t",
-            str(max_duration_sec),
-            str(out),
-        ],
-        capture_output=True,
-        check=False,
-        **subprocess_run_kwargs(),
-    )
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg,
+                "-y",
+                "-ss",
+                str(start_sec),
+                "-i",
+                str(input_path),
+                "-t",
+                str(max_duration_sec),
+                str(out),
+            ],
+            capture_output=True,
+            check=False,
+            timeout=SUBPROCESS_TIMEOUT,
+            **subprocess_run_kwargs(),
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"ffmpeg timed out after {SUBPROCESS_TIMEOUT}s processing {input_path}"
+        ) from None
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg trim failed: {result.stderr or result.stdout}")
     return out
@@ -2050,6 +2079,8 @@ def merge_two_pass_stems(
 def _collect_stem_wavs(root: Path) -> dict[str, Path]:
     found: dict[str, Path] = {}
     for stem_path in root.rglob("*.wav"):
+        if stem_path.stem in found:
+            logger.debug("Duplicate stem name %s; keeping later entry", stem_path.stem)
         found[stem_path.stem] = stem_path
     return found
 
@@ -2169,9 +2200,10 @@ def _maybe_refine_guitar(
             device=cfg.device,
         )
         save_guitar_refined_backup(artifacts["guitar"])
+        progress("guitar_refine", "Guitar refinement complete")
     except Exception as exc:
         logger.warning("guitar refine failed; keeping first-pass guitar stem: %s", exc)
-    progress("guitar_refine", "Refining guitar stem")
+        progress("guitar_refine", "Guitar refinement failed — using first-pass stem")
 
 
 def separate_stems(

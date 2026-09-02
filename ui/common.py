@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import sys
 import time
 import uuid
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SRC = _REPO_ROOT / "src"
@@ -62,7 +65,8 @@ def desktop_app_version() -> str:
 
         return str(__version__)
     except Exception:
-        return "0.1.3"
+        logger.warning("Could not determine app version from audio_to_tab.__version__")
+        return "unknown"
 
 
 def desktop_demo_blurb(version: str | None = None, edition: str | None = None) -> str:
@@ -103,12 +107,16 @@ def write_run_metadata(
     owner: str | None = None,
     source_kind: str | None = None,
     source_fingerprint: str | None = None,
+    config: dict | None = None,
 ) -> None:
     """
     Persist small metadata alongside a run's artifacts so it can be listed as "Recent".
 
     ``page`` identifies which page produced the run (e.g. "tab_pdf" / "isolate").
     ``owner`` is an optional browser-scoped id used to keep recent lists private.
+    ``config`` (optional) is stored as-is under a ``"config"`` key so a re-separate
+    run can default its settings from the parent run even after an app restart.
+    When ``config`` is None the key is omitted entirely.
     """
     meta = {
         "page": page,
@@ -122,6 +130,8 @@ def write_run_metadata(
         meta["source_kind"] = source_kind
     if source_fingerprint is not None:
         meta["source_fingerprint"] = source_fingerprint
+    if config is not None:
+        meta["config"] = config
     Path(run_dir).mkdir(parents=True, exist_ok=True)
     (Path(run_dir) / _META_FILENAME).write_text(json.dumps(meta), encoding="utf-8")
 

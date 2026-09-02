@@ -25,6 +25,7 @@ import hashlib
 import importlib.util
 import logging
 import os
+import pickle
 import shutil
 import urllib.error
 import urllib.request
@@ -138,7 +139,7 @@ def download_sha256_file(
     urls = (url, *mirrors)
     last_exc: BaseException | None = None
     for candidate in urls:
-        tmp = dest.with_suffix(dest.suffix + ".part")
+        tmp = dest.with_suffix(dest.suffix + f".part.{os.getpid()}")
         digest = hashlib.sha256()
         try:
             req = urllib.request.Request(candidate, headers={"User-Agent": _USER_AGENT})
@@ -273,8 +274,8 @@ def _cap_cpu_threads(device: str) -> None:
         from audio_to_tab.hardware import recommended_cpu_threads
 
         torch.set_num_threads(recommended_cpu_threads())
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Could not set recommended CPU threads: %s", exc)
 
 
 def _load_bs_roformer_config(yaml_path: Path):
@@ -330,14 +331,19 @@ def _run_via_bs_roformer_infer(
     model = get_model_from_config("bs_roformer", config)
     try:
         state = torch.load(str(ckpt_path), map_location="cpu", weights_only=True)
-    except Exception:
+    except (RuntimeError, pickle.UnpicklingError) as exc:
+        logger.warning("weights_only=True failed (%s); falling back to weights_only=False", exc)
         state = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
     if isinstance(state, dict):
         for key in ("state", "state_dict", "model_state_dict"):
             if key in state and isinstance(state[key], dict):
                 state = state[key]
                 break
-    model.load_state_dict(state, strict=False)
+    result = model.load_state_dict(state, strict=False)
+    if result.missing_keys:
+        logger.warning("Missing keys in state_dict: %s", result.missing_keys)
+    if result.unexpected_keys:
+        logger.warning("Unexpected keys in state_dict: %s", result.unexpected_keys)
     model.eval()
     model.to(dev)
 
@@ -530,14 +536,19 @@ def _instantiate_bs_roformer_model(config: dict, ckpt_path: Path, device):
         model = get_model_from_config(model_type, ConfigDict(config))
     try:
         state = torch.load(str(ckpt_path), map_location="cpu", weights_only=True)
-    except Exception:
+    except (RuntimeError, pickle.UnpicklingError) as exc:
+        logger.warning("weights_only=True failed (%s); falling back to weights_only=False", exc)
         state = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
     if isinstance(state, dict):
         for key in ("state", "state_dict", "model_state_dict"):
             if key in state and isinstance(state[key], dict):
                 state = state[key]
                 break
-    model.load_state_dict(state, strict=False)
+    result = model.load_state_dict(state, strict=False)
+    if result.missing_keys:
+        logger.warning("Missing keys in state_dict: %s", result.missing_keys)
+    if result.unexpected_keys:
+        logger.warning("Unexpected keys in state_dict: %s", result.unexpected_keys)
     model.eval()
     model.to(device)
     return model

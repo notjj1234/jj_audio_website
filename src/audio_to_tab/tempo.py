@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pretty_midi
+
+logger = logging.getLogger(__name__)
 
 MIN_PLAUSIBLE_BPM = 60.0
 MAX_PLAUSIBLE_BPM = 180.0
@@ -41,7 +44,8 @@ def estimate_tempo_from_audio(audio_path: str | Path) -> TempoEstimate | None:
         if not bpm or np.isnan(bpm):
             return None
         return TempoEstimate(bpm=_clamp_bpm(bpm), confidence="high", source="audio")
-    except Exception:
+    except Exception as exc:
+        logger.debug("Audio tempo estimation failed: %s", exc)
         return None
 
 

@@ -63,9 +63,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--device",
-        choices=["cpu", "cuda"],
+        choices=["cpu", "cuda", "mps"],
         default="cpu",
-        help="Demucs device: cpu or cuda",
+        help="Demucs device: cpu, cuda, or mps (Apple Silicon)",
     )
     parser.add_argument(
         "--max-duration",

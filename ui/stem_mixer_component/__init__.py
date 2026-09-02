@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -43,8 +44,9 @@ elif getattr(sys, "frozen", False):
     # Frozen builds must never fall back to a missing Vite dev server.
     _stem_mixer = None
 else:
-    # Dev server: npm run dev in frontend/ (port 3001)
-    _stem_mixer = components.declare_component("stem_mixer", url="http://localhost:3001")
+    # Dev server: npm run dev in frontend/ (default port 3001, override VITE_DEV_PORT).
+    _dev_port = int(os.environ.get("VITE_DEV_PORT", "3001"))
+    _stem_mixer = components.declare_component("stem_mixer", url=f"http://localhost:{_dev_port}")
 
 
 def stem_mixer(
