@@ -313,17 +313,6 @@ def test_apply_youtube_output_name_sync_queues_before_widget():
     assert ISOLATE_OUTPUT_NAME_PENDING_KEY not in session
 
 
-def test_stem_presence_selector_uses_fixed_three_columns():
-    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
-    source = page.read_text(encoding="utf-8")
-    fn_src = source[
-        source.find("def _render_stem_presence_selector") : source.find("def _build_current_mix")
-    ]
-    assert "cols_per_row = 3" in fn_src
-    assert "st.columns(cols_per_row)" in fn_src
-    assert "st.columns(len(row_names))" not in fn_src
-
-
 def test_running_progress_renderer_is_barebones():
     page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
     source = page.read_text(encoding="utf-8")
@@ -335,7 +324,7 @@ def test_running_progress_renderer_is_barebones():
     assert 'view.get("hint")' in fn_src
 
 
-def test_mixer_picker_lives_in_fragment_with_stable_run_key():
+def test_mixer_lives_in_fragment_with_stable_run_key_and_no_track_picker():
     page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
     source = page.read_text(encoding="utf-8")
     frag = source[
@@ -343,7 +332,7 @@ def test_mixer_picker_lives_in_fragment_with_stable_run_key():
             "def _resolve_audio_for_job"
         )
     ]
-    assert "_render_stem_presence_selector" in frag
+    assert "_render_stem_presence_selector" not in frag
     assert "stem_mixer_run_" in source
     assert 'key=f"stem_mixer_{fingerprint}"' not in source
     mixer_ws = source[
@@ -1101,6 +1090,18 @@ def test_listening_picker_uses_on_change_callback_to_pin():
     assert "on_change=_apply_listen_pick" in picker
     assert 'viewing_mode=str(row.get("id") or str(chosen))' in source
     assert "def _apply_listen_pick" in source
+
+
+def test_listening_switcher_renames_current_mix_from_editable_name():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    switcher = source[source.find("def _render_listening_switcher") : source.find("def _has_source_for_job")]
+    assert 'key="isolate_listen_name"' in switcher
+    assert "on_change=_rename_listen_run" in switcher
+    assert "def _rename_listen_run" in source
+    assert "rename_run_title(Path(run_dir), new_name)" in source
+    assert "isolate_rename_mix" not in switcher
+    assert "isolate_mix_name_input" not in switcher
 
 
 def test_poll_and_queue_fragments_run_every_one_second():

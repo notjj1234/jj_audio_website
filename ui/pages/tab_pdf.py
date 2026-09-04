@@ -40,6 +40,11 @@ from ui.isolate_state import (  # noqa: E402
 
 
 def main() -> None:
+    # Show the cross-page overlay only while a switch to this page is in flight;
+    # clear it for ordinary reruns (no job system on this page).
+    st.session_state["_show_global_loading"] = bool(
+        st.session_state.pop("_nav_loading", False)
+    )
     st.title("Tab PDF (demo)")
     st.error(
         "**JJs stuff — NOT A FINISHED PRODUCT**. Tab PDF barely works. "
@@ -425,6 +430,7 @@ def main() -> None:
         if st.button("Separate this in Audio Isolation →", type="primary"):
             st.session_state["carry_over_audio_path"] = source_audio_path
             st.session_state["carry_over_audio_name"] = Path(source_audio_path).name
+            st.session_state["_nav_loading"] = True
             st.switch_page(str(Path(__file__).with_name("isolate.py")))
 
 

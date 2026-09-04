@@ -18,6 +18,7 @@ from ui.common import (
     DATA_DIR,
     ensure_src_path,
     list_recent_runs,
+    rename_run_title,
     run_output_dir,
     save_upload,
 )
@@ -450,16 +451,6 @@ def _mixer_export_fingerprint(
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
 
-def _load_stem_presence(artifacts: dict) -> dict:
-    path = artifacts.get("stem_presence_diagnostics")
-    if not path or not Path(path).exists():
-        return {}
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
 def _load_bass_bleed_diagnostics(artifacts: dict) -> dict:
     path = artifacts.get("bass_bleed_diagnostics")
     if not path or not Path(path).exists():
@@ -685,17 +676,6 @@ def _load_guitar_split_diagnostics(artifacts: dict) -> dict:
         return {}
 
 
-def default_isolate_selected_stems(
-    produced_stem_names: list[str],
-    presence: dict,
-) -> dict[str, bool]:
-    """Initial Detected Instruments checkbox state — prefer present stems."""
-    return {
-        name: bool(presence.get(name, {}).get("present", True))
-        for name in produced_stem_names
-    }
-
-
 def _resolved_export_dir() -> Path:
     raw = st.session_state.get(ISOLATE_EXPORT_DIR_KEY)
     if raw:
@@ -705,39 +685,6 @@ def _resolved_export_dir() -> Path:
     path = default_export_dir()
     st.session_state[ISOLATE_EXPORT_DIR_KEY] = str(path)
     return path
-
-
-def _render_stem_presence_selector(
-    stem_paths: dict[str, Path],
-    presence: dict,
-    fingerprint: str,
-) -> None:
-    selected = st.session_state.setdefault("isolate_selected_stems", {})
-    stem_names = sort_stem_names(stem_paths.keys())
-    cols_per_row = 3
-    for row_start in range(0, len(stem_names), cols_per_row):
-        row_names = stem_names[row_start : row_start + cols_per_row]
-        cols = st.columns(cols_per_row)
-        for col, name in zip(cols, row_names):
-            with col:
-                label = stem_display_name(name)
-                info = presence.get(name)
-                if not info:
-                    help_text = "No detection data available for this track."
-                elif info.get("present", True):
-                    help_text = f"Detected — mean level {info.get('mean_dbfs', 0.0):.1f} dBFS"
-                else:
-                    help_text = (
-                        f"Not detected — mean level {info.get('mean_dbfs', 0.0):.1f} dBFS, "
-                        "but you can still include it"
-                    )
-                checked = st.checkbox(
-                    label,
-                    value=selected.get(name, True),
-                    key=f"select_stem_{fingerprint}_{name}",
-                    help=help_text,
-                )
-                selected[name] = checked
 
 
 def _build_current_mix(
@@ -1418,6 +1365,34 @@ def _ensure_workspace_tab(*, has_artifacts: bool) -> None:
     apply_workspace_tab(st.session_state, has_artifacts=has_artifacts)
 
 
+def _worker_jobs_active() -> bool:
+    """True while a separation job is queued, starting, or running."""
+    try:
+        return bool(worker_busy() or active_job_id() or queued_job_ids())
+    except Exception:
+        return False
+
+
+def _update_global_loading_flag(
+    *,
+    job_running: bool,
+    tab_changed: bool,
+    nav_requested: bool,
+) -> None:
+    """Tell the global overlay (app.py) whether to dim + show the spinner.
+
+    Show it only for a real page/tab switch or an in-progress job — a plain
+    button rerun must not flash the overlay.
+    """
+    show = job_running or tab_changed or nav_requested
+    st.session_state["_show_global_loading"] = bool(show)
+
+
+def _request_loading_overlay() -> None:
+    """Ask the global overlay to show while a cross-page switch is in flight."""
+    st.session_state["_nav_loading"] = True
+
+
 def _staged_source_name() -> str:
     pending = st.session_state.get("isolate_pending_audio_path")
     if pending and Path(str(pending)).exists():
@@ -1745,29 +1720,15 @@ def _queue_tab_fragment() -> None:
 def _mixer_and_downloads_fragment(
     stem_paths: dict[str, Path],
     *,
-    presence: dict,
     base_name: str,
     run_dir: Path,
     media_urls: dict[str, str],
     download_urls: dict[str, str],
 ) -> None:
-    """Track picker, mixer, and downloads — fragment-scoped so checkboxes do not remount the page."""
-    with _stateful_expander(
-        "Choose tracks for the mixer and downloads",
-        key="isolate_track_picker_expanded",
-        default=False,
-    ):
-        _render_stem_presence_selector(
-            stem_paths, presence, _artifact_fingerprint(stem_paths)
-        )
-
-    selected_stems = st.session_state.get("isolate_selected_stems", {})
-    selected_stem_paths = {
-        name: path for name, path in stem_paths.items() if selected_stems.get(name, True)
-    }
-    mixer_paths = selected_stem_paths if selected_stem_paths else stem_paths
+    """Mixer and downloads — fragment-scoped so the mixer does not remount the page."""
+    selected_stem_paths = stem_paths
     mixer_state = _render_live_mixer(
-        mixer_paths,
+        selected_stem_paths,
         track_title=base_name,
         base_name=base_name,
         run_dir=run_dir,
@@ -1787,9 +1748,7 @@ def _mixer_and_downloads_fragment(
 
     st.subheader("Downloads")
     if not selected_stem_paths:
-        st.info(
-            'Select at least one track under "Choose tracks for the mixer and downloads".'
-        )
+        st.info("No tracks available to download.")
         return
 
     stem_names = sort_stem_names(selected_stem_paths.keys())
@@ -2208,6 +2167,25 @@ def _apply_listen_pick(rows: list[dict]) -> None:
     _apply_library_row(row, viewing_mode=str(row.get("id") or str(chosen)), reopen_name=True)
 
 
+def _rename_listen_run() -> None:
+    """Rename the currently-chosen mix from the editable "Listening to" name field.
+
+    Runs only on Enter (on_change), so ordinary reruns never rewrite the title.
+    """
+    new_name = (st.session_state.get("isolate_listen_name") or "").strip()
+    run_dir = st.session_state.get(LISTEN_PICKER_KEY) or st.session_state.get(
+        "isolate_listen_applied_dir"
+    )
+    if not new_name or not run_dir:
+        return
+    current = st.session_state.get("isolate_base_name") or ""
+    if new_name == current:
+        return
+    if rename_run_title(Path(run_dir), new_name):
+        st.session_state["isolate_base_name"] = new_name
+        _persist_isolate_ui_state()
+
+
 def _render_listening_switcher(browser_id: str | None, rows: list[dict] | None = None) -> None:
     """Mixer library: selectbox of finished runs + delete current."""
     if rows is None:
@@ -2284,6 +2262,19 @@ def _render_listening_switcher(browser_id: str | None, rows: list[dict] | None =
             st.session_state["isolate_listen_missing"] = str(chosen)
             st.session_state.pop(LISTEN_PICKER_KEY, None)
             st.rerun()
+
+    rename_dir = chosen or st.session_state.get("isolate_listen_applied_dir")
+    if rename_dir:
+        current_name = st.session_state.get("isolate_base_name") or "tracks"
+        if st.session_state.get("isolate_listen_name_for") != rename_dir:
+            st.session_state["isolate_listen_name"] = current_name
+            st.session_state["isolate_listen_name_for"] = rename_dir
+        st.text_input(
+            label="Mix name",
+            value=current_name,
+            key="isolate_listen_name",
+            on_change=_rename_listen_run,
+        )
 
 
 def _has_source_for_job(choice: dict) -> bool:
@@ -2467,7 +2458,6 @@ def _render_mixer_workspace(browser_id: str | None) -> None:
         st.session_state.get("isolate_run_dir", next(iter(stem_paths.values())).parent)
     )
 
-    presence = _load_stem_presence(artifacts_map)
     bass_bleed = _load_bass_bleed_diagnostics(artifacts_map)
     if bass_bleed.get("flagged"):
         st.warning(
@@ -2488,7 +2478,6 @@ def _render_mixer_workspace(browser_id: str | None) -> None:
     mixer_media_urls, mixer_download_urls = register_mixer_media(stem_paths)
     _mixer_and_downloads_fragment(
         stem_paths,
-        presence=presence,
         base_name=base_name,
         run_dir=run_dir,
         media_urls=mixer_media_urls,
@@ -2502,6 +2491,7 @@ def _render_mixer_workspace(browser_id: str | None) -> None:
         if st.button("Make a tab PDF from this →"):
             st.session_state["carry_over_audio_path"] = source_audio_path
             st.session_state["carry_over_audio_name"] = Path(source_audio_path).name
+            _request_loading_overlay()
             st.switch_page(str(Path(__file__).with_name("tab_pdf.py")))
 
 
@@ -2553,7 +2543,22 @@ def main() -> None:
     if refresh_clicked:
         _refresh_isolate_from_disk(browser_id)
     _rehydrate_artifacts_from_disk(browser_id)
+
+    prev_workspace = st.session_state.get(WORKSPACE_KEY)
     _ensure_workspace_tab(has_artifacts=bool(st.session_state.get("isolate_artifacts")))
+    cur_workspace = st.session_state.get(WORKSPACE_KEY)
+
+    # Only show the global loading overlay for a page/tab switch or while a
+    # separation job is actually running — never for ordinary button reruns.
+    _update_global_loading_flag(
+        job_running=_worker_jobs_active(),
+        tab_changed=(
+            prev_workspace in WORKSPACE_TABS
+            and cur_workspace in WORKSPACE_TABS
+            and prev_workspace != cur_workspace
+        ),
+        nav_requested=bool(st.session_state.pop("_nav_loading", False)),
+    )
 
     _poll_running_jobs()
     if flash := st.session_state.pop("isolate_flash", None):

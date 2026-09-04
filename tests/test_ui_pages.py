@@ -67,18 +67,6 @@ def test_selection_fingerprint_aliases_artifact_fingerprint(isolate_page) -> Non
     assert isolate_page._selection_fingerprint(stems) == isolate_page._artifact_fingerprint(stems)
 
 
-def test_default_isolate_selected_stems_prefers_presence(isolate_page) -> None:
-    produced = ["guitar", "vocals", "drums", "bass"]
-    presence = {"guitar": {"present": False}, "vocals": {"present": True}}
-    selected = isolate_page.default_isolate_selected_stems(produced, presence)
-    assert selected == {
-        "guitar": False,
-        "vocals": True,
-        "drums": True,
-        "bass": True,
-    }
-
-
 def test_stem_paths_from_artifacts_filters_diagnostics_and_non_wav(isolate_page, tmp_path) -> None:
     guitar = tmp_path / "guitar.wav"
     vocals = tmp_path / "vocals.wav"
@@ -96,18 +84,6 @@ def test_stem_paths_from_artifacts_filters_diagnostics_and_non_wav(isolate_page,
     result = isolate_page._stem_paths_from_artifacts(artifacts)
     assert set(result) == {"guitar", "vocals"}
     assert all(p.suffix == ".wav" for p in result.values())
-
-
-def test_load_stem_presence_returns_dict_or_empty(isolate_page, tmp_path) -> None:
-    assert isolate_page._load_stem_presence({}) == {}
-    good = tmp_path / "sp.json"
-    good.write_text(json.dumps({"bass": {"present": True}}), encoding="utf-8")
-    assert isolate_page._load_stem_presence({"stem_presence_diagnostics": str(good)}) == {
-        "bass": {"present": True}
-    }
-    broken = tmp_path / "broken.json"
-    broken.write_text("not json", encoding="utf-8")
-    assert isolate_page._load_stem_presence({"stem_presence_diagnostics": str(broken)}) == {}
 
 
 def test_load_guitar_split_diagnostics_returns_dict_or_empty(isolate_page, tmp_path) -> None:

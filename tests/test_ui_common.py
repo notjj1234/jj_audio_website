@@ -103,3 +103,26 @@ def test_delete_run_already_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(common, "DATA_DIR", tmp_path)
     missing = tmp_path / "gone"
     assert common.delete_run(missing) is True
+
+
+def test_rename_run_title_updates_only_title(tmp_path):
+    run_dir = tmp_path / "run-name"
+    common.write_run_metadata(
+        run_dir,
+        page="isolate",
+        title="Old Name",
+        artifacts={"vocals": str(run_dir / "vocals.wav")},
+        config={"model": "htdemucs_6s"},
+    )
+    assert common.rename_run_title(run_dir, "New Name") is True
+    meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+    assert meta["title"] == "New Name"
+    assert meta["page"] == "isolate"
+    assert meta["config"] == {"model": "htdemucs_6s"}
+    assert "vocals" in meta["artifacts"]
+
+
+def test_rename_run_title_missing_run_returns_false(tmp_path):
+    assert common.rename_run_title(tmp_path / "nope", "X") is False
+    assert common.rename_run_title(None, "X") is False
+

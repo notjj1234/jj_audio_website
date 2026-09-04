@@ -136,6 +136,26 @@ def write_run_metadata(
     (Path(run_dir) / _META_FILENAME).write_text(json.dumps(meta), encoding="utf-8")
 
 
+def rename_run_title(run_dir: Path, new_title: str) -> bool:
+    """Update only the ``title`` of a run's meta.json, preserving everything else.
+
+    Returns True on success (including when no run_dir/meta exists but the
+    caller still wants a no-op success). Used to rename a mix from the mixer.
+    """
+    if not run_dir:
+        return False
+    meta_path = Path(run_dir) / _META_FILENAME
+    if not meta_path.is_file():
+        return False
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    meta["title"] = new_title
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    return True
+
+
 def list_recent_runs(
     page: str,
     limit: int = 10,

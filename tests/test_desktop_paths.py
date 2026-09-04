@@ -980,7 +980,15 @@ def test_streamlit_about_is_local_demo_without_hosted_urls():
     assert "backdrop-filter: blur(6px)" in text
     assert '[data-testid="stElementContainer"][data-stale="true"]' in text
     assert '[data-stale="true"]' in text
-    assert "opacity: 1 !important" in text
+    assert "st.html(" in text
+    assert "unsafe_allow_html" not in text
+    # Satoshi must not blanket-override Material Icons ([class*="st-"] broke ligatures
+    # into overlapping text: upload, _arrow_right, keyboard_double_*).
+    assert 'html, body, [class*="st-"]' not in text
+    assert "Material Symbols Rounded" in text
+    assert '[data-testid="stIconMaterial"]' in text
+    assert '[data-testid="stSidebarCollapseButton"]' in text
+    assert "visibility: visible !important" in text
     assert 'section.main [data-testid="stTabs"] button' in text
     assert "font-size: 1.4rem !important" in text
     assert "min-height: 52px !important" in text
