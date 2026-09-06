@@ -10,6 +10,24 @@ import pytest
 import soundfile as sf
 
 from ui.isolate_state import (
+    DEFAULT_OUTCOME_CARD,
+    DEFAULT_UI_MODE,
+    FAILED_JOB_STRIP_TTL_SEC,
+    MIXER_COMPONENT_KEY_PREFIX,
+    OUTCOME_CARD_ORDER,
+    dismiss_failed_job,
+    outcome_card_for_options,
+    resolve_outcome_card,
+    should_show_failed_job,
+    UI_MODE_KEY,
+    UI_MODES,
+    apply_persisted_settings,
+    is_pro_mode,
+    load_ui_mode,
+    persisted_settings_payload,
+    resolve_ui_mode,
+    roformer_speed_note,
+    write_ui_mode,
     DEFAULT_SEPARATION_PRESET,
     DEFAULT_SPEED_PRESET,
     DEFAULT_TRACK_OPTIONS,
@@ -25,6 +43,7 @@ from ui.isolate_state import (
     apply_pending_output_name,
     apply_pending_youtube_url,
     apply_stored_isolate_ui_state,
+    apply_workspace_tab,
     apply_youtube_output_name_sync,
     checklist_items,
     clamp_region_bounds,
@@ -49,6 +68,7 @@ from ui.isolate_state import (
     isolate_ui_state_payload,
     listen_picker_default,
     load_persist_isolate_user_id,
+    mixer_component_key,
     partition_queue_jobs,
     pending_upload_fp_for_stale,
     pick_library_row,
@@ -100,6 +120,165 @@ from ui.isolate_state import (
 @pytest.fixture(autouse=True)
 def _cpu_edition_by_default(monkeypatch):
     monkeypatch.delenv("AUDIO_TOOLS_EDITION", raising=False)
+
+
+def test_failed_job_leaves_the_strip_once_dismissed():
+    job = {"id": "job-1", "status": "failed", "updated_at": 1_000.0}
+    assert should_show_failed_job(job, now=1_010.0) is True
+    session: dict = {}
+    dismiss_failed_job(session, "job-1")
+    assert (
+        should_show_failed_job(
+            job, now=1_010.0, dismissed_ids=session["isolate_dismissed_job_ids"]
+        )
+        is False
+    )
+
+
+def test_failed_job_stops_owning_the_strip_after_its_ttl():
+    job = {"id": "job-1", "status": "failed", "updated_at": 1_000.0}
+    assert should_show_failed_job(job, now=1_000.0 + FAILED_JOB_STRIP_TTL_SEC - 1) is True
+    assert should_show_failed_job(job, now=1_000.0 + FAILED_JOB_STRIP_TTL_SEC + 1) is False
+
+
+def test_failed_job_without_a_timestamp_still_shows():
+    """Missing metadata must not hide a real failure."""
+    assert should_show_failed_job({"id": "j", "status": "failed"}, now=5.0) is True
+    assert should_show_failed_job({"id": "j", "updated_at": "junk"}, now=5.0) is True
+    assert should_show_failed_job(None, now=5.0) is False
+    assert should_show_failed_job({"status": "failed"}, now=5.0) is False
+
+
+def test_dismissing_twice_does_not_duplicate_the_id():
+    session: dict = {}
+    dismiss_failed_job(session, "job-1")
+    dismiss_failed_job(session, "job-1")
+    assert session["isolate_dismissed_job_ids"] == ["job-1"]
+
+
+def test_lite_outcomes_use_the_best_engine_available():
+    """Lite is presentation only — it must not quietly pick a weaker model."""
+    with_ro = resolve_outcome_card("guitar", roformer_available=True)
+    without_ro = resolve_outcome_card("guitar", roformer_available=False)
+    assert with_ro == ["guitar_roformer"]
+    assert without_ro == ["guitar_demucs_6s"]
+
+    band = resolve_outcome_card("band", roformer_available=True)
+    assert "guitar_roformer" in band
+    assert {"vocals_demucs", "drums_demucs", "bass_demucs"} <= set(band)
+
+
+def test_lite_outcomes_all_resolve_to_a_runnable_pipeline():
+    for card in OUTCOME_CARD_ORDER:
+        for roformer in (True, False):
+            options = resolve_outcome_card(card, roformer_available=roformer)
+            assert options, card
+            resolved = resolve_track_selection(options)
+            assert resolved["model"]
+            assert resolved["emit_stems"]
+
+
+def test_unknown_outcome_falls_back_to_the_default():
+    assert resolve_outcome_card("nonsense", roformer_available=True) == resolve_outcome_card(
+        DEFAULT_OUTCOME_CARD, roformer_available=True
+    )
+
+
+def test_outcome_card_round_trips_so_switching_modes_keeps_the_selection():
+    for card in OUTCOME_CARD_ORDER:
+        options = resolve_outcome_card(card, roformer_available=True)
+        assert outcome_card_for_options(options, roformer_available=True) == card
+
+
+def test_a_pro_only_selection_is_reported_as_custom_not_silently_replaced():
+    # Piano has no Lite outcome; Lite must recognise it cannot describe this.
+    custom = ["vocals_demucs", "piano_demucs"]
+    assert outcome_card_for_options(custom, roformer_available=True) is None
+    assert outcome_card_for_options([], roformer_available=True) is None
+
+
+def test_roformer_speed_note_names_the_gpu_this_host_actually_has():
+    mac = roformer_speed_note(platform="darwin")
+    win = roformer_speed_note(platform="win32")
+    linux = roformer_speed_note(platform="linux")
+    assert "Apple GPU (MPS)" in mac
+    # Windows users were previously told to look for an Apple setting.
+    assert "Apple" not in win
+    assert "NVIDIA GPU (CUDA)" in win
+    assert "Apple" not in linux
+    assert "CUDA" in linux
+    for note in (mac, win, linux):
+        assert "Speed only tunes Demucs" in note
+
+
+def test_resolve_ui_mode_defaults_to_lite_and_rejects_junk():
+    assert resolve_ui_mode("Pro") == "Pro"
+    assert resolve_ui_mode("pro") == "Pro"
+    assert resolve_ui_mode("Lite") == "Lite"
+    assert resolve_ui_mode(None) == "Lite"
+    assert resolve_ui_mode("") == "Lite"
+    assert resolve_ui_mode("expert") == "Lite"
+    assert DEFAULT_UI_MODE == "Lite"
+
+
+def test_is_pro_mode_reads_the_session():
+    assert is_pro_mode({}) is False
+    assert is_pro_mode({UI_MODE_KEY: "Pro"}) is True
+    assert is_pro_mode({UI_MODE_KEY: "Lite"}) is False
+
+
+def test_settings_survive_a_restart_round_trip():
+    session = {
+        "isolate_quality": "extreme",
+        "isolate_device": "cpu",
+        "isolate_guitar_ft": True,
+        "isolate_guitar_track": "guitar_roformer",
+        "unrelated_key": "dropped",
+    }
+    payload = persisted_settings_payload(session)
+    assert "unrelated_key" not in payload
+    assert payload["isolate_quality"] == "extreme"
+
+    fresh: dict = {}
+    apply_persisted_settings(fresh, payload)
+    assert fresh["isolate_quality"] == "extreme"
+    assert fresh["isolate_guitar_ft"] is True
+    assert fresh["isolate_guitar_track"] == "guitar_roformer"
+
+
+def test_restoring_settings_never_overwrites_a_live_choice():
+    live = {"isolate_quality": "fast"}
+    apply_persisted_settings(live, {"isolate_quality": "extreme"})
+    assert live["isolate_quality"] == "fast"
+
+
+def test_ui_state_payload_carries_mode_and_settings(tmp_path):
+    session = {UI_MODE_KEY: "Pro", "isolate_quality": "high"}
+    payload = isolate_ui_state_payload(session)
+    assert payload["mode"] == "Pro"
+    assert payload["settings"]["isolate_quality"] == "high"
+
+    restored: dict = {}
+    apply_stored_isolate_ui_state(restored, payload)
+    assert restored[UI_MODE_KEY] == "Pro"
+    assert restored["isolate_quality"] == "high"
+
+
+def test_mode_survives_relaunch_via_disk(tmp_path):
+    path = tmp_path / "isolate_ui_state.json"
+    assert load_ui_mode({}, path) == "Lite"
+    write_ui_mode(path, "Pro")
+    assert load_ui_mode({}, path) == "Pro"
+
+
+def test_writing_mode_does_not_erase_the_rest_of_the_ui_state(tmp_path):
+    path = tmp_path / "isolate_ui_state.json"
+    write_isolate_ui_state(path, {"workspace": "Mixer", "run_dir": "/runs/abc"})
+    write_ui_mode(path, "Pro")
+    stored = read_isolate_ui_state(path)
+    assert stored["mode"] == "Pro"
+    assert stored["workspace"] == "Mixer"
+    assert stored["run_dir"] == "/runs/abc"
 
 
 def test_upload_fingerprint():
@@ -313,158 +492,53 @@ def test_apply_youtube_output_name_sync_queues_before_widget():
     assert ISOLATE_OUTPUT_NAME_PENDING_KEY not in session
 
 
-def test_running_progress_renderer_is_barebones():
-    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
-    source = page.read_text(encoding="utf-8")
-    fn_src = source[
-        source.find("def _render_running_progress") : source.find("def _job_source_title")
-    ]
-    assert 'st.caption(view["message"])' not in fn_src
-    assert "checklist_md" not in fn_src
-    assert 'view.get("hint")' in fn_src
+def test_running_progress_view_keeps_raw_worker_text_out_of_the_label():
+    view = running_progress_view(
+        {
+            "status": "running",
+            "stage": "separate",
+            "message": "demucs.apply: segment 4/9 shifts=1 device=cpu",
+            "progress": 0.5,
+        },
+        now=0.0,
+    )
+    assert "demucs.apply" not in view["label"]
+    assert "device=cpu" not in view["label"]
+    assert view["hint"]
+    assert "demucs.apply" not in view["hint"]
 
 
-def test_mixer_lives_in_fragment_with_stable_run_key_and_no_track_picker():
-    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
-    source = page.read_text(encoding="utf-8")
-    frag = source[
-        source.find("def _mixer_and_downloads_fragment") : source.find(
-            "def _resolve_audio_for_job"
-        )
-    ]
-    assert "_render_stem_presence_selector" not in frag
-    assert "stem_mixer_run_" in source
-    assert 'key=f"stem_mixer_{fingerprint}"' not in source
-    mixer_ws = source[
-        source.find("def _render_mixer_workspace") : source.find("def _render_file_ready_banner")
-    ]
-    assert "_render_stem_presence_selector" not in mixer_ws
-    assert "Save all tracks" in frag
-    assert "Open folder" in frag
-    assert "Download finished" in frag
-    assert "ISOLATE_EXPORT_DIR_KEY" in frag
-    panel = source[
-        source.find("def _render_downloads_panel") : source.find("def _resolve_audio_for_job")
-    ]
-    assert "st.container(border=True" in panel
-    assert 'width="stretch"' in panel
-    assert 'key="isolate_choose_export_dir"' in panel
-    assert 'key="isolate_open_export_dir"' in panel
-    assert 'key="isolate_save_tracks"' in panel
-    assert "Browser download (zip)" not in panel
-    assert "st.download_button" not in panel
-    assert "isolate_save_as" not in panel
-    assert "Make a tab PDF from this" not in panel
-    assert "Make a tab PDF from this" in mixer_ws
-    assert 'st.caption("Other tools")' in mixer_ws
-    assert "st.divider()" in mixer_ws
+def test_running_progress_view_exposes_checklist_separately_from_the_label():
+    view = running_progress_view(
+        {"status": "running", "stage": "separate", "message": "", "progress": 0.5},
+        now=0.0,
+    )
+    # The checklist is Pro-only detail: available on the view, never folded
+    # into the one-line label that Lite shows.
+    assert view["checklist_md"]
+    assert view["checklist_md"] not in view["label"]
+    assert view["checklist_md"].count("**") >= 2
 
 
-def test_isolate_reopen_handler_uses_pending_not_direct_widget_write():
-    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
-    source = page.read_text(encoding="utf-8")
-    assert "queue_reopen_output_name(st.session_state" in source
-    assert "apply_youtube_output_name_sync(st.session_state)" in source
-    assert "queue_output_name_if_empty(st.session_state" not in source
-    assert 'st.session_state["isolate_output_name"] = title' not in source
-    assert 'st.session_state["isolate_output_name"] = path.stem' not in source
-    assert "apply_pending_output_name(st.session_state)" in source
-    assert "apply_pending_youtube_url(st.session_state)" in source
-    assert "reset_new_tab_source(st.session_state)" in source
-    assert "job_requires_roformer_backend(choice[\"model\"])" in source
-    assert "is_roformer_backend_available()" in source
-    assert "guitar_track_radio_ids" in source
-    assert "normalize_guitar_track_selection" in source
-    assert "queue_youtube_url(st.session_state" in source
-    assert '@st.dialog("Search YouTube"' in source
-    assert "st.form(" in source
-    assert "st.form_submit_button(" in source
-    assert "st.video(" in source
-    assert "Open on YouTube" in source
-    assert "desktop_notify(" in source
-    assert "jobs_needing_os_notify" in source
-    assert "_increment_upload_key" not in source
-    assert "st.popover(" not in source
-    assert "search_youtube_videos" in source
-    assert "thumbnail_url" in source
-    assert "st.image(" in source
-    assert "ISOLATE_YOUTUBE_SEARCH_OPEN_KEY" in source
-    assert "this is not parallel" not in source
-    assert "isolate_queue_expanded" not in source
-    assert "_open_mixer_workspace()" in source
-    assert "_open_queue_workspace()" in source
-    assert 'WORKSPACE_NEXT_KEY] = "Queue"' in source
-    assert "delete_library_run" in source
-    assert "_confirm_separate_dialog" not in source
-    assert "Confirm separation" not in source
-    assert "Live mixer and downloads are on Mixer." in source
-    assert "time.sleep" not in source
-    assert "tab_new.open" not in source
-    assert "streamlit_local_storage" not in source
-    assert "plan_isolate_job_poll" in source
-    assert "isolate_refresh" in source
-    assert "partition_queue_jobs" in source
-    assert 'vertical_alignment="center"' in source
-    assert 'key="isolate_delete_all_finished"' in source
-    assert "delete_finished_" in source
-    assert "stop_job_" in source
-    assert "_rehydrate_artifacts_from_disk(browser_id)" in source
-    assert "_restore_isolate_ui_state()" in source
-    assert "key=LISTEN_PICKER_KEY" in source
-    assert 'key="isolate_viewing_run_dir"' not in source
-    assert 'vertical_alignment="bottom"' in source
-    assert "LISTEN_PICKER_NEXT_KEY" in source
-    assert 'key="isolate_custom_other"' not in source
-    sep_src = source[source.find("def _render_separation_controls") : source.find("def _ffmpeg_install_hint")]
-    yt_apply_at = sep_src.find("apply_pending_youtube_url(st.session_state)")
-    yt_name_at = sep_src.find("apply_youtube_output_name_sync(st.session_state)")
-    yt_input_at = sep_src.find('key="isolate_youtube_url"')
-    assert yt_apply_at != -1 and yt_name_at != -1 and yt_input_at != -1
-    assert yt_apply_at < yt_name_at < yt_input_at
-    assert "queue_output_name_if_empty" not in sep_src
-    resolve_src = source[
-        source.find("def _resolve_audio_for_job") : source.find("def _enqueue_confirmed_job")
-    ]
-    assert "apply_now=False" in resolve_src
-    assert "choice[\"output_name\"]" in resolve_src or "choice['output_name']" in resolve_src
-    assert "queue_output_name_if_empty" not in resolve_src
-    enqueue_src = source[
-        source.find("def _enqueue_confirmed_job") : source.find("def _library_status_row")
-    ]
-    enq_at = enqueue_src.find("enqueue_job(spec)")
-    reset_at = enqueue_src.find("reset_new_tab_source(st.session_state)")
-    assert enq_at != -1 and reset_at != -1 and enq_at < reset_at
-    yt_dlg = source[
-        source.find("def _youtube_search_dialog") : source.find("def _stateful_expander")
-    ]
-    form_at = yt_dlg.find("st.form(")
-    submit_at = yt_dlg.find("st.form_submit_button(")
-    clear_at = yt_dlg.find("isolate_youtube_search_clear")
-    video_at = yt_dlg.find("st.video(")
-    assert form_at != -1 and submit_at != -1 and form_at < submit_at < clear_at
-    assert video_at != -1 and video_at > submit_at
-    poll_src = source[
-        source.find("def _poll_running_jobs") : source.find("def _queue_tab_fragment")
-    ]
-    assert "jobs_needing_os_notify" in poll_src
-    assert "desktop_notify(" in poll_src
-    main_src = source[source.find("def main()") :]
-    uid_at = main_src.find("browser_id = _get_browser_user_id()")
-    rehydrate_at = main_src.find("_rehydrate_artifacts_from_disk(browser_id)")
-    assert uid_at != -1 and rehydrate_at != -1 and uid_at < rehydrate_at
-    tabs_at = main_src.find("st.tabs(")
-    selected_at = main_src.find("selected = st.session_state.get(WORKSPACE_KEY")
-    assert tabs_at != -1 and selected_at != -1 and tabs_at < selected_at
-    tab_new_src = main_src[main_src.find("with tab_new:") : main_src.find("with tab_mixer:")]
-    assert "_render_new_workspace(demucs_ok)" in tab_new_src
-    assert "if show_new" not in tab_new_src
-    assert "Could not draw the new tab." in tab_new_src
-    mixer_src = main_src[main_src.find("with tab_mixer:") : main_src.find("with tab_queue:")]
-    assert 'if selected == "Mixer"' in mixer_src
-    assert "_render_mixer_workspace(" in mixer_src
-    queue_src = main_src[main_src.find("with tab_queue:") :]
-    assert "_queue_tab_fragment()" in queue_src
-    assert "if show_queue" not in queue_src
+def test_mixer_component_key_is_stable_for_the_same_run():
+    first = mixer_component_key("/runs/abc")
+    assert first == mixer_component_key("/runs/abc")
+    assert first != mixer_component_key("/runs/def")
+    assert first.startswith(MIXER_COMPONENT_KEY_PREFIX)
+
+
+def test_mixer_component_key_survives_a_streamlit_key_roundtrip():
+    # Streamlit keys must be plain identifiers; a path with separators would
+    # otherwise leak into the DOM id and remount the iframe.
+    key = mixer_component_key("C:\\Users\\me\\runs\\my song (live)")
+    assert key.replace("_", "").isalnum()
+
+
+def test_finishing_a_job_sends_the_user_to_the_mixer_not_the_queue():
+    session: dict = {WORKSPACE_NEXT_KEY: "Mixer"}
+    assert apply_workspace_tab(session, has_artifacts=True) == "Mixer"
+    assert session[WORKSPACE_KEY] == "Mixer"
+    assert WORKSPACE_NEXT_KEY not in session
 
 
 def test_resolve_isolate_user_id_mints_without_stored():
@@ -1112,13 +1186,18 @@ def test_poll_and_queue_fragments_run_every_one_second():
 
 
 def test_new_tab_section_and_output_name_prominent_before_advanced():
+    """Name and trim stay above Advanced, so the fields people edit aren't buried.
+
+    Anchored on widget keys and call sites rather than label copy, so rewording
+    does not fail the test but reordering does.
+    """
     page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
     source = page.read_text(encoding="utf-8")
     controls = source[
         source.find("def _render_separation_controls") : source.find("def _ffmpeg_install_hint")
     ]
-    advanced_at = controls.find('key="isolate_options_expanded"')
-    section_at = controls.find('"**Section (optional)**"')
+    advanced_at = controls.find("_render_engine_panel(")
+    section_at = controls.find("_render_region_controls(")
     output_at = controls.find('key="isolate_output_name"')
     assert section_at != -1 and advanced_at != -1 and output_at != -1
     assert output_at < section_at < advanced_at

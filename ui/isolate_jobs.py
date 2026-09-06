@@ -16,11 +16,11 @@ import threading
 import time
 import traceback
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
-from ui.common import DATA_DIR, delete_run
+from ui.common import DATA_DIR, delete_run, run_output_dir
 
 _JOBS_SUBDIR = "isolate_jobs"
 _QUEUE_LOCK = threading.Lock()
@@ -100,7 +100,11 @@ def _status_path(job_id: str) -> Path:
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    # Unique staging name per write. With a shared "<name>.tmp", the worker thread
+    # and a UI poll writing at the same moment overwrote and then consumed each
+    # other's staging file; the loser retried replace() on a path that no longer
+    # existed and raised FileNotFoundError after burning all 8 attempts.
+    tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}-{uuid.uuid4().hex[:8]}.tmp")
     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     last_exc: OSError | None = None
     for attempt in range(8):
@@ -110,6 +114,10 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
         except OSError as exc:
             last_exc = exc
             time.sleep(0.02 * (attempt + 1))
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
     if last_exc is not None:
         raise last_exc
 
@@ -169,7 +177,13 @@ def format_job_error(error: str | None) -> str:
     cleaned = _ABS_PATH_RE.sub("", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" :;-")
     if len(cleaned) > _ERROR_MAX_CHARS:
-        cleaned = cleaned[: _ERROR_MAX_CHARS - 1].rstrip() + "…"
+        head = cleaned[: _ERROR_MAX_CHARS - 1]
+        # Cut on a word boundary; a mid-word or trailing-preposition cut ("failed
+        # to load the") reads as a rendering bug rather than a truncated message.
+        space = head.rfind(" ")
+        if space > _ERROR_MAX_CHARS // 2:
+            head = head[:space]
+        cleaned = head.rstrip(" ,.;:-") + "…"
     return cleaned or "Separation failed"
 
 
@@ -195,6 +209,24 @@ def read_spec(job_id: str) -> IsolateJobSpec | None:
         return IsolateJobSpec.from_dict(data)
     except Exception:
         return None
+
+
+def requeue_job(job_id: str) -> str | None:
+    """Re-queue a failed job from its stored spec, as a fresh job.
+
+    Returns the new job id, or None when the spec or its source audio is gone —
+    the caller needs to distinguish "retrying" from "cannot retry" so the button
+    never appears to do nothing.
+    """
+    spec = read_spec(job_id)
+    if spec is None:
+        return None
+    if not spec.audio_path or not Path(spec.audio_path).is_file():
+        return None
+    # Fresh output dir: the failed run's dir can hold half-written stems that
+    # would otherwise be mistaken for results of the retry.
+    retry = replace(spec, id="", created_at=0.0, output_dir=str(run_output_dir()))
+    return enqueue_job(retry)
 
 
 def enqueue_job(spec: IsolateJobSpec) -> str:
@@ -501,6 +533,32 @@ def worker_busy() -> bool:
         if proc is not None and proc.is_alive():
             return True
         return _ACTIVE_JOB_ID is not None
+
+
+def jobs_active() -> bool:
+    """True while a separation job is queued, starting, or running."""
+    try:
+        return bool(worker_busy() or active_job_id() or queued_job_ids())
+    except Exception:
+        return False
+
+
+_SEPARATION_OVERLAY_STATUSES = frozenset({"queued", "running"})
+
+
+def separation_in_progress() -> bool:
+    """True when disk status shows a job still separating (queued/running).
+
+    Ignores in-memory ``_ACTIVE_JOB_ID`` so a just-finished job cannot keep the
+    full-page overlay stuck after Mixer opens.
+    """
+    try:
+        for job in list_jobs(limit=30):
+            if job.get("status") in _SEPARATION_OVERLAY_STATUSES:
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def _use_inline_worker() -> bool:

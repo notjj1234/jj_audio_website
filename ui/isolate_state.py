@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-from collections.abc import MutableMapping
+import sys
+from collections.abc import Iterable, Mapping, MutableMapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -136,13 +138,26 @@ ROFORMER_BACKEND_UI_HINT = (
     "BS-RoFormer guitar options need the optional runtime. "
     "In your app Python environment run: `pip install bs-roformer-infer`."
 )
-ROFORMER_SPEED_PRESET_NOTE = (
-    "Speed only tunes Demucs (--shifts) — BS-RoFormer always runs its full "
-    "transformer pass, so Faster/Balanced/Best do not change its time. Expect "
-    "roughly 2× the song length on this Mac's CPU. To go faster: shorten the "
-    "Section, use the Demucs guitar option, or pick Apple GPU (MPS) in Advanced "
-    "when this Mac has ≥12 GB RAM."
-)
+def roformer_speed_note(*, platform: str | None = None) -> str:
+    """Why the Speed control does nothing for RoFormer, in host-correct terms.
+
+    The GPU escape hatch differs per platform, so naming the wrong one (this note
+    used to say "Apple GPU (MPS)" on every host) sends Windows users looking for
+    a setting that isn't there.
+    """
+    plat = sys.platform if platform is None else platform
+    if plat == "darwin":
+        gpu_hint = "pick Apple GPU (MPS) in Advanced when this Mac has ≥12 GB RAM"
+    elif plat.startswith("win"):
+        gpu_hint = "pick NVIDIA GPU (CUDA) in Advanced if this PC has one"
+    else:
+        gpu_hint = "pick a CUDA GPU in Advanced if this machine has one"
+    return (
+        "Speed only tunes Demucs (--shifts) — BS-RoFormer always runs its full "
+        "transformer pass, so Faster/Balanced/Best do not change its time. Expect "
+        "roughly 2× the song length on CPU. To go faster: shorten the Section, "
+        f"use the Demucs guitar option, or {gpu_hint}."
+    )
 
 
 def guitar_track_radio_ids(*, roformer_available: bool) -> tuple[str, ...]:
@@ -183,6 +198,69 @@ def promote_default_guitar_option(
     if "guitar_demucs_6s" in out and promoted == "guitar_roformer":
         out[out.index("guitar_demucs_6s")] = promoted
     return out
+
+
+# Lite goal picker. These are outcomes people ask for, not engines: the engine is
+# always the strongest one this host can run, so Lite never trades quality for
+# simplicity. Pro exposes the same choices as individual stems.
+OUTCOME_CARD_ORDER: tuple[str, ...] = ("band", "guitar", "karaoke", "vocals")
+OUTCOME_CARDS: dict[str, dict[str, str]] = {
+    "band": {
+        "label": "Every part separately",
+        "help": "Vocals, drums, bass and guitar as separate tracks you can mix.",
+    },
+    "guitar": {
+        "label": "Guitar on its own",
+        "help": "Just the guitar, using the strongest model this computer can run.",
+    },
+    "karaoke": {
+        "label": "Vocals + backing track",
+        "help": "Two tracks: the singer, and everything else. Quickest option.",
+    },
+    "vocals": {
+        "label": "Vocals on its own",
+        "help": "Just the singer.",
+    },
+}
+DEFAULT_OUTCOME_CARD = "band"
+OUTCOME_CARD_KEY = "isolate_outcome_card"
+CUSTOM_OUTCOME_CARD = "custom"
+
+
+def resolve_outcome_card(card_id: str, *, roformer_available: bool) -> list[str]:
+    """Track option ids behind a Lite outcome.
+
+    Each outcome resolves to the best engine available, so a Lite user and a Pro
+    user who read every label end up running the same pipeline.
+    """
+    guitar = default_guitar_track_option(roformer_available=roformer_available)
+    card = card_id if card_id in OUTCOME_CARDS else DEFAULT_OUTCOME_CARD
+    if card == "karaoke":
+        return [VOCALS_INSTRUMENTAL_OPTION_ID]
+    if card == "guitar":
+        return [guitar]
+    if card == "vocals":
+        return ["vocals_demucs"]
+    return ["vocals_demucs", "drums_demucs", "bass_demucs", guitar]
+
+
+def outcome_card_for_options(
+    option_ids: Iterable[str],
+    *,
+    roformer_available: bool,
+) -> str | None:
+    """Which outcome describes this exact selection, or None for a custom one.
+
+    Used when switching Pro→Lite: without this, Lite would overwrite a deliberate
+    Pro selection with its own default and quietly change what gets separated.
+    """
+    wanted = {str(x) for x in (option_ids or ())}
+    if not wanted:
+        return None
+    for card in OUTCOME_CARD_ORDER:
+        if wanted == set(resolve_outcome_card(card, roformer_available=roformer_available)):
+            return card
+    return None
 
 
 def tracks_picker_help(*, roformer_available: bool) -> str:
@@ -886,6 +964,65 @@ def session_mixer_artifacts_ok(session: MutableMapping[str, Any], *, wav_exists)
     )
 
 
+UI_MODE_KEY = "ui_mode"
+UI_MODES: tuple[str, ...] = ("Lite", "Pro")
+DEFAULT_UI_MODE = "Lite"
+
+
+def resolve_ui_mode(value: Any) -> str:
+    """Normalise a stored or session mode value to a known mode.
+
+    Anything unrecognised falls back to Lite, so a corrupt state file cannot
+    strand someone in a UI they did not ask for.
+    """
+    text = str(value or "").strip().title()
+    return text if text in UI_MODES else DEFAULT_UI_MODE
+
+
+def is_pro_mode(session: MutableMapping[str, Any]) -> bool:
+    """Whether Pro controls should render. Lite and Pro run identical pipelines."""
+    return resolve_ui_mode(session.get(UI_MODE_KEY)) == "Pro"
+
+
+# Widget keys mirrored to disk so choices survive an app restart. Streamlit's
+# persist_state only spans page switches inside one session, so re-launching the
+# desktop app used to silently reset every Advanced choice back to default.
+PERSISTED_SETTING_KEYS: tuple[str, ...] = (
+    "isolate_speed_preset",
+    "isolate_speed_applied",
+    "isolate_quality",
+    "isolate_device",
+    "isolate_guitar_ft",
+    "isolate_two_pass",
+    "isolate_guitar_refine",
+    "isolate_options_expanded",
+    "isolate_vocals_instrumental_only",
+    "isolate_guitar_track",
+    "isolate_track_options",
+    "isolate_track_picker_initialized",
+    *(f"isolate_track_{oid}" for oid in DEMUCS_STEM_CHECKBOX_IDS),
+)
+
+
+def persisted_settings_payload(session: MutableMapping[str, Any]) -> dict[str, Any]:
+    """Snapshot of the setting keys worth carrying across restarts."""
+    return {key: session[key] for key in PERSISTED_SETTING_KEYS if key in session}
+
+
+def apply_persisted_settings(
+    session: MutableMapping[str, Any],
+    stored: dict[str, Any] | None,
+) -> None:
+    """Restore last-used settings without ever clobbering a live session value.
+
+    Must run before the widgets are instantiated, otherwise Streamlit treats the
+    write as a post-instantiation mutation and raises.
+    """
+    for key, value in (stored or {}).items():
+        if key in PERSISTED_SETTING_KEYS and key not in session:
+            session[key] = value
+
+
 def isolate_ui_state_payload(session: MutableMapping[str, Any]) -> dict[str, Any]:
     nxt = session.get(WORKSPACE_NEXT_KEY)
     tab = nxt if nxt in WORKSPACE_TABS else session.get(WORKSPACE_KEY)
@@ -898,6 +1035,8 @@ def isolate_ui_state_payload(session: MutableMapping[str, Any]) -> dict[str, Any
         "viewing_run_dir": str(viewing) if viewing else None,
         "run_dir": str(run_dir) if run_dir else None,
         "export_dir": str(export_dir) if export_dir else None,
+        "mode": resolve_ui_mode(session.get(UI_MODE_KEY)),
+        "settings": persisted_settings_payload(session),
     }
 
 
@@ -917,6 +1056,9 @@ def apply_stored_isolate_ui_state(
         session["isolate_run_dir"] = str(stored["run_dir"])
     if not session.get(ISOLATE_EXPORT_DIR_KEY) and stored.get("export_dir"):
         session[ISOLATE_EXPORT_DIR_KEY] = str(stored["export_dir"])
+    if UI_MODE_KEY not in session and stored.get("mode"):
+        session[UI_MODE_KEY] = resolve_ui_mode(stored["mode"])
+    apply_persisted_settings(session, stored.get("settings"))
 
 
 def read_isolate_ui_state(path: Path) -> dict[str, Any]:
@@ -935,6 +1077,64 @@ def write_isolate_ui_state(path: Path, payload: dict[str, Any]) -> None:
         tmp.replace(path)
     except OSError:
         pass
+
+
+# How long a failure keeps the top strip before it becomes Queue-only history.
+FAILED_JOB_STRIP_TTL_SEC = 15 * 60.0
+DISMISSED_JOB_IDS_KEY = "isolate_dismissed_job_ids"
+
+
+def should_show_failed_job(
+    job: Mapping[str, Any] | None,
+    *,
+    now: float,
+    dismissed_ids: Iterable[str] = (),
+    ttl_sec: float = FAILED_JOB_STRIP_TTL_SEC,
+) -> bool:
+    """Whether a failed job still earns the top strip.
+
+    A failure used to sit there until the job was manually removed, so the strip
+    became permanent furniture and every later success was reported underneath a
+    red box. It clears when dismissed, or on its own after ``ttl_sec``.
+    """
+    if not job:
+        return False
+    job_id = str(job.get("id") or "").strip()
+    if not job_id or job_id in {str(d) for d in dismissed_ids}:
+        return False
+    try:
+        failed_at = float(job.get("updated_at") or 0.0)
+    except (TypeError, ValueError):
+        return True
+    if failed_at <= 0.0:
+        return True
+    return (now - failed_at) < ttl_sec
+
+
+def dismiss_failed_job(session: MutableMapping[str, Any], job_id: str) -> None:
+    """Hide one failed job from the strip for the rest of this session."""
+    current = [str(j) for j in (session.get(DISMISSED_JOB_IDS_KEY) or [])]
+    if job_id and job_id not in current:
+        current.append(str(job_id))
+    session[DISMISSED_JOB_IDS_KEY] = current
+
+
+def load_ui_mode(session: MutableMapping[str, Any], path: Path) -> str:
+    """Resolve the interface mode for this run, seeding session from disk once."""
+    if UI_MODE_KEY not in session:
+        session[UI_MODE_KEY] = resolve_ui_mode(read_isolate_ui_state(path).get("mode"))
+    return resolve_ui_mode(session.get(UI_MODE_KEY))
+
+
+def write_ui_mode(path: Path, mode: str) -> None:
+    """Persist only the mode, merging into whatever else is already stored.
+
+    The shell writes this from the sidebar, where the rest of the isolate state
+    is not in scope — a full payload write from there would erase it.
+    """
+    payload = read_isolate_ui_state(path)
+    payload["mode"] = resolve_ui_mode(mode)
+    write_isolate_ui_state(path, payload)
 
 
 def seed_consumed_job_ids(jobs: list[dict[str, Any]]) -> list[str]:
@@ -1572,3 +1772,16 @@ def merge_reseparate(
 def stem_label_for_id(stem_id: str) -> str:
     """Human label for a stem id, including composite ``Child (from Parent)`` ids."""
     return stem_display_name(stem_id)
+
+
+MIXER_COMPONENT_KEY_PREFIX = "stem_mixer_run_"
+
+
+def mixer_component_key(key_source: str) -> str:
+    """Streamlit key for the mixer iframe: same run in, same key out.
+
+    The key must not change between reruns of the same run, or Streamlit
+    remounts the iframe and playback restarts mid-listen.
+    """
+    digest = hashlib.sha256(str(key_source).encode()).hexdigest()[:16]
+    return f"{MIXER_COMPONENT_KEY_PREFIX}{digest}"

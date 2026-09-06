@@ -184,6 +184,35 @@ def list_recent_runs(
     return runs[:limit]
 
 
+def max_upload_mb() -> int:
+    """Server upload cap in MB, straight from Streamlit's own config.
+
+    Read rather than hardcoded: the page copy and the limit Streamlit enforces
+    had drifted apart, so the UI promised 200 MB while uploads failed at 50.
+    """
+    import streamlit as st  # local: keeps this module cheap to import in tests
+
+    try:
+        return int(st.get_option("server.maxUploadSize"))
+    except Exception:
+        return 200
+
+
+def max_upload_caption() -> str:
+    return f"Maximum file size: {max_upload_mb()} MB."
+
+
+def should_show_global_loading(*, nav_requested: bool) -> bool:
+    """Whether the desktop full-page spinner overlay should be injected.
+
+    Cross-page navigation only, and only for one rerun. A running isolate job
+    deliberately does not qualify: the app stays fully usable while it runs, so
+    dimming the whole window would advertise a freeze that isn't happening.
+    Job state belongs to the status strip on the Audio Isolation page.
+    """
+    return bool(nav_requested)
+
+
 def delete_run(run_dir: str | Path) -> bool:
     """
     Delete a UI run directory and its artifacts.

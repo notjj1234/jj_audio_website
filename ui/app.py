@@ -11,10 +11,20 @@ import streamlit as st
 logger = logging.getLogger(__name__)
 
 from ui.common import (
+    DATA_DIR,
     desktop_app_version,
     desktop_demo_blurb,
     desktop_edition,
     edition_product_name,
+    should_show_global_loading,
+)
+from ui.isolate_state import (
+    ISOLATE_UI_STATE_FILENAME,
+    UI_MODE_KEY,
+    UI_MODES,
+    load_ui_mode,
+    resolve_ui_mode,
+    write_ui_mode,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -85,8 +95,12 @@ except Exception:
 # st.html (not st.markdown) — indented HTML in markdown is parsed as a code block.
 st.html(
     """
-<link href="https://fonts.cdnfonts.com/css/satoshi" rel="stylesheet" />
 <style>
+  /* No remote font stylesheet. This app tells people "processing stays on this
+     computer", and a CDN <link> contradicts that by phoning out on every launch —
+     while also being the one asset that fails when the machine is offline.
+     Satoshi is still preferred when installed locally; otherwise the system UI
+     font is used, which is what the CDN failure path already produced. */
   /* Satoshi on text only — never on Material Icons. A blanket [class*="st-"]
      override made Streamlit ligatures (upload, arrow_right, keyboard_double_*)
      render as overlapping plain text instead of icons. */
@@ -145,24 +159,30 @@ st.html(
     color: var(--text-color, inherit) !important;
   }
 
-  /* Sidebar: stop resize-drag from selecting every label */
-  [data-testid="stSidebar"],
-  [data-testid="stSidebar"] *,
+  /* Sidebar: stop resize-drag from selecting labels. Scoped to the nav chrome —
+     blanketing [data-testid="stSidebar"] * also made the version string and demo
+     blurb impossible to select, so nobody could copy them into a bug report. */
   [data-testid="stSidebarNav"],
-  [data-testid="stSidebarNav"] * {
+  [data-testid="stSidebarNav"] *,
+  [data-testid="stSidebarCollapseButton"],
+  [data-testid="stSidebarCollapseButton"] * {
     -webkit-user-select: none !important;
     user-select: none !important;
   }
-  [data-testid="stSidebar"] ::selection,
   [data-testid="stSidebarNav"] ::selection {
     background: transparent !important;
   }
-  [data-testid="stSidebarNav"] a:focus,
-  [data-testid="stSidebarNav"] a:focus-visible,
-  [data-testid="stSidebarNav"] li:focus,
-  [data-testid="stSidebarNav"] li:focus-visible {
+  /* Suppress the click ring, keep the keyboard one: outlining :focus-visible too
+     left Tab-key users with no visible caret anywhere in the nav. */
+  [data-testid="stSidebarNav"] a:focus:not(:focus-visible),
+  [data-testid="stSidebarNav"] li:focus:not(:focus-visible) {
     outline: none !important;
     box-shadow: none !important;
+  }
+  [data-testid="stSidebarNav"] a:focus-visible,
+  [data-testid="stSidebarNav"] li:focus-visible {
+    outline: 2px solid var(--primary-color, #ff4b4b) !important;
+    outline-offset: 2px !important;
   }
 
   /* Always hide Streamlit's built-in corner status widget / running stick-men.
@@ -284,66 +304,130 @@ st.html(
 """
 )
 
-# Full-page loading overlay. Injected only while a separation job is running,
-# a New/Mixer/Queue tab is switched, or a page is switched — a flag the pages
-# set in session_state each run. The overlay is pure CSS (offline-safe), never
-# steals clicks, and fades in after a short delay so fast reruns don't flash.
-_LOADING_OVERLAY_CSS = """
+# Full-page loading overlay for one-shot cross-page nav only. Decided here before
+# pg.run() so the swap paints immediately. Uses a self-contained overlay root (not
+# .stApp::before) so idle runs can unmount/clear it — in-memory worker flags
+# alone used to leave the overlay stuck on Mixer after success. Running jobs are
+# NOT an input: the app stays usable during separation, so the status strip on the
+# isolate page owns that state instead of a window-wide scrim.
+def _loading_overlay_html(label: str) -> str:
+    safe = (
+        label.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+    return f"""
 <style>
-  @keyframes audiotools-dim-in {
-    from { opacity: 0; }
-    to { opacity: 1; }
-  }
-  @keyframes audiotools-circle-spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-  }
-  .stApp::before {
-    content: "";
+  @keyframes audiotools-dim-in {{
+    from {{ opacity: 0; }}
+    to {{ opacity: 1; }}
+  }}
+  @keyframes audiotools-circle-spin {{
+    from {{ transform: rotate(0deg); }}
+    to {{ transform: rotate(360deg); }}
+  }}
+  .audiotools-global-loading-root {{
     position: fixed;
     inset: 0;
     z-index: 9990;
     pointer-events: none !important;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }}
+  .audiotools-global-loading-root .audiotools-dim {{
+    position: absolute;
+    inset: 0;
     background: rgba(0, 0, 0, 0.35);
     backdrop-filter: blur(2px);
     -webkit-backdrop-filter: blur(2px);
     opacity: 0;
     animation: audiotools-dim-in 0.2s ease both;
     animation-delay: 0.2s;
-  }
-  .stApp::after {
-    content: "";
-    position: fixed;
-    top: 50%;
-    left: 50%;
-    z-index: 9991;
+  }}
+  .audiotools-global-loading-root .audiotools-global-loading {{
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.85rem;
+    opacity: 0;
+    animation: audiotools-dim-in 0.2s ease both;
+    animation-delay: 0.2s;
+  }}
+  .audiotools-global-loading-root .audiotools-spinner {{
     width: 64px;
     height: 64px;
-    margin: -32px 0 0 -32px;
-    pointer-events: none !important;
     border-radius: 50%;
     border: 6px solid var(--text-color, rgba(255, 255, 255, 0.9));
     border-top-color: transparent;
-    opacity: 0;
-    animation:
-      audiotools-circle-spin 0.9s linear infinite,
-      audiotools-dim-in 0.2s ease both;
-    animation-delay: 0s, 0.2s;
+    animation: audiotools-circle-spin 0.9s linear infinite;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
-  }
+  }}
+  .audiotools-global-loading-root .audiotools-loading-label {{
+    color: var(--text-color, rgba(255, 255, 255, 0.95));
+    font-size: 0.95rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  }}
+</style>
+<div class="audiotools-global-loading-root" aria-live="polite" aria-busy="true">
+  <div class="audiotools-dim" aria-hidden="true"></div>
+  <div class="audiotools-global-loading">
+    <div class="audiotools-spinner" aria-hidden="true"></div>
+    <div class="audiotools-loading-label">{safe}</div>
+  </div>
+</div>
+"""
+
+
+_LOADING_OVERLAY_CLEAR_HTML = """
+<style>
+  .audiotools-global-loading-root { display: none !important; }
+  .stApp::before, .stApp::after { content: none !important; display: none !important; }
 </style>
 """
 
-if st.session_state.get("_show_global_loading", False):
-    st.html(_LOADING_OVERLAY_CSS)
+_nav_requested = bool(st.session_state.pop("_nav_loading", False))
+if should_show_global_loading(nav_requested=_nav_requested):
+    st.html(_loading_overlay_html("Loading…"))
+else:
+    st.html(_LOADING_OVERLAY_CLEAR_HTML)
 
+_ui_state_path = DATA_DIR / ISOLATE_UI_STATE_FILENAME
+
+
+def _persist_mode() -> None:
+    write_ui_mode(_ui_state_path, st.session_state.get(UI_MODE_KEY))
+
+
+# Mode is presentation only: Lite and Pro run the same pipeline with the same
+# models. Lite hides configuration; it never downgrades quality. Seeded from disk
+# before the radio instantiates so a returning user keeps their choice.
+load_ui_mode(st.session_state, _ui_state_path)
+st.sidebar.radio(
+    "Interface",
+    options=list(UI_MODES),
+    key=UI_MODE_KEY,
+    horizontal=True,
+    on_change=_persist_mode,
+    help=(
+        "Lite shows the guided essentials. Pro adds engine, performance and "
+        "diagnostic controls. Both separate audio identically — switching is safe "
+        "and keeps your current work."
+    ),
+)
 st.sidebar.caption(_DEMO_BLURB)
 
 _pages = Path(__file__).parent / "pages"
-pg = st.navigation(
-    [
-        st.Page(str(_pages / "isolate.py"), title="Audio Isolation", default=True),
-        st.Page(str(_pages / "tab_pdf.py"), title="Tab PDF (demo)"),
-    ]
-)
+_nav = [st.Page(str(_pages / "isolate.py"), title="Audio Isolation", default=True)]
+# Tab PDF is an admitted experiment ("tabs are 90% wrong"). Offering it as a
+# peer of the working feature invites people to try it first and conclude the
+# app is broken, so Lite does not list it. Pro still gets it.
+if resolve_ui_mode(st.session_state.get(UI_MODE_KEY)) == "Pro":
+    _nav.append(st.Page(str(_pages / "tab_pdf.py"), title="Tab PDF (demo)"))
+pg = st.navigation(_nav)
 pg.run()

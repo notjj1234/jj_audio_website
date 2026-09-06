@@ -22,6 +22,7 @@ from ui.isolate_jobs import (
     ensure_worker_started,
     format_job_error,
     job_has_stem_wavs,
+    jobs_active,
     jobs_status_signature,
     jobs_visible_in_queue,
     list_in_flight_jobs,
@@ -32,6 +33,7 @@ from ui.isolate_jobs import (
     read_status,
     remove_job,
     resume_job,
+    separation_in_progress,
     write_status,
 )
 from ui.isolate_state import (
@@ -78,6 +80,36 @@ def test_enqueue_persists_queued_status(jobs_dir: Path):
     assert status["title"] == "Track A"
     rows = list_jobs(limit=5)
     assert any(r["id"] == "job1" for r in rows)
+    assert jobs_active() is True
+    assert separation_in_progress() is True
+
+
+def test_jobs_active_false_when_idle(jobs_dir: Path):
+    assert jobs_active() is False
+    assert separation_in_progress() is False
+
+
+def test_separation_in_progress_true_when_queued(jobs_dir: Path):
+    write_status("q1", status="queued", stage="pending", message="Queued", progress=0.0)
+    assert separation_in_progress() is True
+
+
+def test_separation_in_progress_true_when_running(jobs_dir: Path):
+    write_status("r1", status="running", stage="separate", message="Go", progress=0.4)
+    assert separation_in_progress() is True
+
+
+def test_separation_in_progress_false_when_succeeded_even_if_memory_busy(
+    jobs_dir: Path, monkeypatch
+):
+    """Mixer open after success must not keep overlay via sticky _ACTIVE_JOB_ID."""
+    import ui.isolate_jobs as jobs
+
+    write_status("done1", status="succeeded", stage="done", message="Done", progress=1.0)
+    monkeypatch.setattr(jobs, "_ACTIVE_JOB_ID", "done1")
+    monkeypatch.setattr(jobs, "_ACTIVE_PROCESS", None)
+    assert jobs_active() is True  # memory still looks busy
+    assert separation_in_progress() is False  # disk says done — overlay must clear
 
 
 def test_write_status_updates_progress(jobs_dir: Path):

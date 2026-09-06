@@ -15,6 +15,7 @@ from ui.common import (
     AUDIO_UPLOAD_TYPES,
     ensure_src_path,
     list_recent_runs,
+    max_upload_caption,
     run_output_dir,
     save_upload,
     write_run_metadata,
@@ -40,18 +41,15 @@ from ui.isolate_state import (  # noqa: E402
 
 
 def main() -> None:
-    # Show the cross-page overlay only while a switch to this page is in flight;
-    # clear it for ordinary reruns (no job system on this page).
-    st.session_state["_show_global_loading"] = bool(
-        st.session_state.pop("_nav_loading", False)
-    )
+    # Cross-page overlay is consumed in app.py from one-shot _nav_loading.
     st.title("Tab PDF (demo)")
-    st.error(
-        "**JJs stuff — NOT A FINISHED PRODUCT**. Tab PDF barely works. "
-        "Tabs are 90% wrong and or unusable. This page is here so I can experiment with it."
-    )
+    # One banner, not two, and warning rather than error: this is a permanent
+    # property of the page, not a failure the user just caused. A red error box
+    # that is always present teaches people to ignore red boxes that matter.
     st.warning(
-        "Best on short solo-guitar clips. For full songs, isolate guitar first on "
+        "**JJs stuff — NOT A FINISHED PRODUCT**. Tab PDF barely works. "
+        "Tabs are 90% wrong and or unusable. This page is here so I can experiment with it. "
+        "Best on short solo-guitar clips — for full songs, isolate guitar first on "
         "**Audio Isolation**."
     )
 
@@ -246,7 +244,7 @@ def main() -> None:
             "Upload MP3 / WAV / FLAC / M4A",
             type=AUDIO_UPLOAD_TYPES,
         )
-        st.caption("Maximum file size: 200 MB. Files are processed locally.")
+        st.caption(f"{max_upload_caption()} Files are processed locally.")
         carry_over_path = st.session_state.get("carry_over_audio_path")
         carry_over_name = st.session_state.get("carry_over_audio_name")
         using_carry_over = bool(

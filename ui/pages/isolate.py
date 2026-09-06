@@ -64,13 +64,21 @@ from ui.isolate_jobs import (
     queued_job_ids,
     read_status,
     remove_job,
+    requeue_job,
     resume_job,
+    separation_in_progress,
     worker_busy,
 )
 from ui.isolate_state import (
+    CUSTOM_OUTCOME_CARD,
+    DEFAULT_OUTCOME_CARD,
     DEFAULT_SPEED_PRESET,
     DEFAULT_TRACK_OPTIONS,
+    OUTCOME_CARD_KEY,
+    OUTCOME_CARD_ORDER,
+    OUTCOME_CARDS,
     DEMUCS_STEM_CHECKBOX_IDS,
+    DISMISSED_JOB_IDS_KEY,
     GUITAR_TRACK_OPTION_IDS,
     ISOLATE_EXPORT_DIR_KEY,
     ISOLATE_UI_STATE_FILENAME,
@@ -78,7 +86,6 @@ from ui.isolate_state import (
     LISTEN_PICKER_KEY,
     LISTEN_PICKER_NEXT_KEY,
     ROFORMER_BACKEND_UI_HINT,
-    ROFORMER_SPEED_PRESET_NOTE,
     SPEED_PRESETS,
     TRACK_OPTIONS,
     VOCALS_INSTRUMENTAL_OPTION_ID,
@@ -92,10 +99,12 @@ from ui.isolate_state import (
     apply_workspace_tab,
     apply_youtube_output_name_sync,
     clamp_region_bounds,
+    dismiss_failed_job,
     format_source_caption,
     format_source_title,
     guitar_track_radio_ids,
     infer_source_kind,
+    is_pro_mode,
     is_stopping_previous_job,
     isolate_ui_state_payload,
     job_requires_roformer_backend,
@@ -103,8 +112,10 @@ from ui.isolate_state import (
     listen_picker_default,
     load_persist_isolate_user_id,
     migrate_track_options,
+    mixer_component_key,
     normalize_guitar_track_selection,
     os_notify_message,
+    outcome_card_for_options,
     partition_queue_jobs,
     paused_job_caption,
     pending_audio_needs_resave,
@@ -117,13 +128,16 @@ from ui.isolate_state import (
     read_isolate_ui_state,
     recent_runs_with_owner_fallback,
     reset_new_tab_source,
+    resolve_outcome_card,
     resolve_speed_preset,
     resolve_track_selection,
     resolve_youtube_job_name,
+    roformer_speed_note,
     running_progress_view,
     select_rehydrate_row,
     session_mixer_artifacts_ok,
     should_hide_stale_results,
+    should_show_failed_job,
     staged_audio_for_new_tab,
     status_strip_waiting_caption,
     stem_label_for_id,
@@ -355,12 +369,27 @@ def _wav_exists(path: str) -> bool:
     return Path(path).is_file()
 
 
-def _stem_waveform_peaks(path: Path, *, num_points: int = 80) -> list[float]:
+@st.cache_data(show_spinner=False, max_entries=64)
+def _cached_waveform_peaks(path_str: str, mtime_ns: int, num_points: int) -> list[float]:
     try:
-        return waveform_peaks(path, num_points=num_points).tolist()
+        return waveform_peaks(Path(path_str), num_points=num_points).tolist()
     except Exception as exc:
-        logger.warning("Could not compute waveform peaks for %s: %s", path, exc)
+        logger.warning("Could not compute waveform peaks for %s: %s", path_str, exc)
         return []
+
+
+def _stem_waveform_peaks(path: Path, *, num_points: int = 80) -> list[float]:
+    """Mixer waveform peaks, cached per file version.
+
+    Uncached, every stem was decoded again on each rerun of the mixer fragment —
+    six full-song stems per pass. Keyed on mtime so a guitar fix-up that rewrites
+    a stem still invalidates.
+    """
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        return []
+    return _cached_waveform_peaks(str(path), mtime_ns, num_points)
 
 
 def _artifact_fingerprint(stem_paths: dict[str, Path]) -> str:
@@ -766,7 +795,7 @@ def _render_live_mixer(
         if name in urls
     ]
     key_src = str(run_dir.resolve()) if run_dir is not None else _artifact_fingerprint(stem_paths)
-    mixer_key = "stem_mixer_run_" + hashlib.sha256(key_src.encode()).hexdigest()[:16]
+    mixer_key = mixer_component_key(key_src)
     return stem_mixer(
         stems_arg,
         initial_volumes_db={n: float(volumes.get(n, DB_DEFAULT)) for n in stem_names},
@@ -863,6 +892,155 @@ def _render_track_picker(*, persist: dict) -> tuple[list[str], dict, str | None]
         st.warning(preset_error)
         resolved = resolve_track_selection(list(DEFAULT_TRACK_OPTIONS))
     return option_ids, resolved, preset_error
+
+
+def _render_outcome_picker(*, persist: dict) -> tuple[list[str], dict, str | None]:
+    """Lite goal picker: what you want out, not which model produces it."""
+    roformer_ok = is_roformer_backend_available()
+    _init_track_picker_session()
+
+    stored_options = list(st.session_state.get("isolate_track_options") or [])
+    matched = outcome_card_for_options(stored_options, roformer_available=roformer_ok)
+    # A selection made in Pro that no outcome describes stays selectable here, so
+    # switching to Lite never rewrites what the user asked for.
+    custom_pending = matched is None and bool(stored_options)
+    card_ids = list(OUTCOME_CARD_ORDER)
+    if custom_pending:
+        card_ids.append(CUSTOM_OUTCOME_CARD)
+    if st.session_state.get(OUTCOME_CARD_KEY) not in card_ids:
+        st.session_state[OUTCOME_CARD_KEY] = matched or (
+            CUSTOM_OUTCOME_CARD if custom_pending else DEFAULT_OUTCOME_CARD
+        )
+
+    def _label(card_id: str) -> str:
+        if card_id == CUSTOM_OUTCOME_CARD:
+            return "My own selection (set in Pro)"
+        return OUTCOME_CARDS[card_id]["label"]
+
+    card = st.radio(
+        "What do you want out of this track?",
+        options=card_ids,
+        format_func=_label,
+        key=OUTCOME_CARD_KEY,
+        **persist,
+    )
+    if card == CUSTOM_OUTCOME_CARD:
+        option_ids = stored_options
+        st.caption("Kept from Pro. Switch to Pro to change which tracks you get.")
+    else:
+        option_ids = resolve_outcome_card(str(card), roformer_available=roformer_ok)
+        st.caption(OUTCOME_CARDS[str(card)]["help"])
+
+    st.session_state["isolate_track_options"] = list(option_ids)
+    preset_error: str | None = None
+    try:
+        resolved = resolve_track_selection(option_ids)
+    except ValueError as exc:
+        preset_error = str(exc)
+        st.warning(preset_error)
+        resolved = resolve_track_selection(list(DEFAULT_TRACK_OPTIONS))
+    return list(option_ids), resolved, preset_error
+
+
+def _render_engine_panel(
+    *,
+    resolved: dict,
+    speed: dict,
+    speed_id: str,
+    persist: dict,
+) -> None:
+    """Pro: how the separation is done. Model-specific toggles live here."""
+    with _stateful_expander(
+        "Engine", key="isolate_options_expanded", default=False
+    ):
+        quality_now = st.session_state.get("isolate_quality", speed["quality"])
+        # Speed and Quality are the same axis. Speed writes Quality whenever it
+        # changes, which used to silently discard a hand-picked Quality with no
+        # hint that it had happened.
+        st.caption(
+            f"Speed **{SPEED_PRESETS[speed_id]['label']}** sets Quality to "
+            f"**{speed['quality']}**. Change Quality below to override it — picking "
+            "a different Speed resets it again."
+        )
+        _closed_selectbox(
+            "Quality",
+            ["fast", "balanced", "high", "extreme"],
+            key="isolate_quality",
+            help="Higher quality is slower, especially on CPU.",
+        )
+        if quality_now != speed["quality"]:
+            st.caption(f"Overriding Speed: running **{quality_now}**, not {speed['quality']}.")
+
+        # Opt-in until eval/lead_rhythm Stage-1 3-clip listen beats stock 6s.
+        st.checkbox(
+            "Use guitar-focused Demucs weights (experimental)",
+            help=(
+                "Optional guitar-focused htdemucs_6s weights (~330 MB first download, "
+                "cached under TORCH_HOME/checkpoints). Falls back to stock if download "
+                "or load fails. Piano/synth and bass can still bleed into guitar. "
+                "Meta Demucs weights are provided for scientific/research use."
+            ),
+            key="isolate_guitar_ft",
+            **persist,
+        )
+        # Rendered unconditionally but disabled off-model, with the reason stated.
+        # Appearing and disappearing as the track picker changed made these look
+        # like a glitch, and a hidden-but-checked box still altered the run.
+        demucs_guitar = resolved["model"] == "htdemucs_6s"
+        off_model_help = (
+            ""
+            if demucs_guitar
+            else " Only applies to the Demucs 6-stem guitar option."
+        )
+        st.checkbox(
+            "Two-pass guitar isolation (experimental)",
+            disabled=not demucs_guitar,
+            help=(
+                "Runs a 4-stem split first, then isolates guitar from the leftover mix. "
+                "About twice as slow. Can reduce competing vocals/drums/bass in the "
+                "guitar stem. Stay opt-in until the stage-1 listen pass." + off_model_help
+            ),
+            key="isolate_two_pass",
+            **persist,
+        )
+        st.checkbox(
+            "Refine guitar with MelBand specialist (experimental)",
+            disabled=not demucs_guitar,
+            help=(
+                "Second-pass guitar extraction (becruily MelBand-Roformer, ~45 MB first "
+                "download). De-bleeds the Demucs guitar stem. Skipped when the refine "
+                "runtime is unavailable." + off_model_help
+            ),
+            key="isolate_guitar_refine",
+            **persist,
+        )
+        if resolved["model"] == "bs_roformer_sw" and resolved.get("guitar_refine"):
+            st.caption(
+                "BS-RoFormer-SW runs first; MelBand refine follows when guitar is selected."
+            )
+        st.caption(
+            "Guitar low-end fix-up (bass de-bleed, restore) lives on the **Mixer** tab after "
+            "separation — no need to re-run Demucs. MelBand refine improves isolation but can "
+            "soften highs — use **Guitar (BS-RoFormer)** without refine if guitar sounds dull."
+        )
+
+
+def _render_machine_panel(*, probe: object, device_options: list[str]) -> None:
+    """Pro: what this computer will run it on, plus the hardware readout."""
+    with _stateful_expander(
+        "This computer", key="isolate_machine_expanded", default=False
+    ):
+        _closed_selectbox(
+            "Device",
+            device_options,
+            key="isolate_device",
+            help=(
+                "GPU: NVIDIA CUDA on Windows; Apple GPU (MPS) on Apple Silicon "
+                "with ≥12 GB RAM. CPU is always available."
+            ),
+        )
+        st.caption(desktop_system_summary(probe))
+        st.caption(desktop_recommend_caption(probe))
 
 
 def _speed_preset_radio_label(preset_id: str) -> str:
@@ -1189,29 +1367,39 @@ def _render_separation_controls() -> dict:
         start_sec, max_duration_sec, region_label = _render_region_controls(audio_path)
         _render_section_preview(audio_path, start_sec, max_duration_sec, region_label)
 
-    track_options, resolved, preset_error = _render_track_picker(persist=persist)
+    pro = is_pro_mode(st.session_state)
+    if pro:
+        track_options, resolved, preset_error = _render_track_picker(persist=persist)
+    else:
+        track_options, resolved, preset_error = _render_outcome_picker(persist=persist)
     custom_stems = list(resolved.get("stems") or [])
     if resolved["caveat"]:
         st.caption(resolved["caveat"])
 
     probe = (
         get_desktop_probe()
-        if st.session_state.get("isolate_options_expanded")
+        if pro and st.session_state.get("isolate_options_expanded")
         else get_desktop_probe_without_torch()
     )
-    speed_id = st.radio(
-        "Speed",
-        options=list(SPEED_PRESETS.keys()),
-        format_func=_speed_preset_radio_label,
-        key="isolate_speed_preset",
-        horizontal=True,
-        **persist,
-    )
+    if pro:
+        speed_id = st.radio(
+            "Speed",
+            options=list(SPEED_PRESETS.keys()),
+            format_func=_speed_preset_radio_label,
+            key="isolate_speed_preset",
+            horizontal=True,
+            **persist,
+        )
+    else:
+        # Lite runs the same pipeline as Pro; it just does not ask. The value is
+        # whatever was last chosen in Pro, restored from disk.
+        speed_id = st.session_state.get("isolate_speed_preset", DEFAULT_SPEED_PRESET)
     speed = resolve_speed_preset(speed_id, probe, model=resolved["model"])
-    if speed["help"]:
-        st.caption(speed["help"])
-    if job_requires_roformer_backend(resolved["model"]):
-        st.caption(ROFORMER_SPEED_PRESET_NOTE)
+    if pro:
+        if speed["help"]:
+            st.caption(speed["help"])
+        if job_requires_roformer_backend(resolved["model"]):
+            st.caption(roformer_speed_note())
 
     applied = f"{speed['id']}:{resolved['model']}"
     if st.session_state.get("isolate_speed_applied") != applied:
@@ -1223,68 +1411,14 @@ def _render_separation_controls() -> dict:
     if st.session_state.get("isolate_device") not in device_options:
         st.session_state["isolate_device"] = device_options[0]
 
-    with _stateful_expander(
-        "Advanced options", key="isolate_options_expanded", default=False
-    ):
-        st.caption(desktop_system_summary(probe))
-        st.caption(desktop_recommend_caption(probe))
-        quality = _closed_selectbox(
-            "Quality",
-            ["fast", "balanced", "high", "extreme"],
-            key="isolate_quality",
-            help="Higher quality is slower, especially on CPU.",
+    if pro:
+        _render_engine_panel(
+            resolved=resolved,
+            speed=speed,
+            speed_id=str(speed_id),
+            persist=persist,
         )
-        device = _closed_selectbox(
-            "Device",
-            device_options,
-            key="isolate_device",
-            help=(
-                "GPU: NVIDIA CUDA on Windows; Apple GPU (MPS) on Apple Silicon "
-                "with ≥12 GB RAM. CPU is always available."
-            ),
-        )
-        # Opt-in until eval/lead_rhythm Stage-1 3-clip listen beats stock 6s.
-        st.checkbox(
-            "Use guitar-focused Demucs weights (experimental)",
-            help=(
-                "Optional guitar-focused htdemucs_6s weights (~330 MB first download, "
-                "cached under TORCH_HOME/checkpoints). Falls back to stock if download "
-                "or load fails. Piano/synth and bass can still bleed into guitar. "
-                "Meta Demucs weights are provided for scientific/research use."
-            ),
-            key="isolate_guitar_ft",
-            **persist,
-        )
-        if resolved["model"] == "htdemucs_6s":
-            st.checkbox(
-                "Two-pass guitar isolation (experimental)",
-                help=(
-                    "Runs a 4-stem split first, then isolates guitar from the leftover mix. "
-                    "About twice as slow. Can reduce competing vocals/drums/bass in the "
-                    "guitar stem. Stay opt-in until the stage-1 listen pass."
-                ),
-                key="isolate_two_pass",
-                **persist,
-            )
-            st.checkbox(
-                "Refine guitar with MelBand specialist (experimental)",
-                help=(
-                    "Second-pass guitar extraction (becruily MelBand-Roformer, ~45 MB first "
-                    "download). De-bleeds the Demucs guitar stem. Skipped when the refine "
-                    "runtime is unavailable."
-                ),
-                key="isolate_guitar_refine",
-                **persist,
-            )
-        elif resolved["model"] == "bs_roformer_sw" and resolved.get("guitar_refine"):
-            st.caption(
-                "BS-RoFormer-SW runs first; MelBand refine follows when guitar is selected."
-            )
-        st.caption(
-            "Guitar low-end fix-up (bass de-bleed, restore) lives on the **Mixer** tab after "
-            "separation — no need to re-run Demucs. MelBand refine improves isolation but can "
-            "soften highs — use **Guitar (BS-RoFormer)** without refine if guitar sounds dull."
-        )
+        _render_machine_panel(probe=probe, device_options=device_options)
 
     quality = st.session_state.get("isolate_quality", speed["quality"])
     device = st.session_state.get("isolate_device", speed["device"])
@@ -1295,9 +1429,11 @@ def _render_separation_controls() -> dict:
     two_pass = bool(
         st.session_state.get("isolate_two_pass") and resolved["model"] == "htdemucs_6s"
     )
+    # Only honour the checkbox for the model it is offered for. It used to apply to
+    # bs_roformer_sw / melband too, so a box ticked earlier under Demucs kept
+    # forcing a refine pass on RoFormer runs while being invisible.
     guitar_refine = bool(resolved.get("guitar_refine")) or bool(
-        st.session_state.get("isolate_guitar_refine")
-        and resolved["model"] in {"htdemucs_6s", "bs_roformer_sw", "melband_roformer_guitar"}
+        st.session_state.get("isolate_guitar_refine") and resolved["model"] == "htdemucs_6s"
     )
     return {
         "model": resolved["model"],
@@ -1356,36 +1492,8 @@ def _open_mixer_workspace() -> None:
     st.session_state[WORKSPACE_NEXT_KEY] = "Mixer"
 
 
-def _open_queue_workspace() -> None:
-    """Request Queue on the next full run, before ``st.tabs`` is instantiated."""
-    st.session_state[WORKSPACE_NEXT_KEY] = "Queue"
-
-
 def _ensure_workspace_tab(*, has_artifacts: bool) -> None:
     apply_workspace_tab(st.session_state, has_artifacts=has_artifacts)
-
-
-def _worker_jobs_active() -> bool:
-    """True while a separation job is queued, starting, or running."""
-    try:
-        return bool(worker_busy() or active_job_id() or queued_job_ids())
-    except Exception:
-        return False
-
-
-def _update_global_loading_flag(
-    *,
-    job_running: bool,
-    tab_changed: bool,
-    nav_requested: bool,
-) -> None:
-    """Tell the global overlay (app.py) whether to dim + show the spinner.
-
-    Show it only for a real page/tab switch or an in-progress job — a plain
-    button rerun must not flash the overlay.
-    """
-    show = job_running or tab_changed or nav_requested
-    st.session_state["_show_global_loading"] = bool(show)
 
 
 def _request_loading_overlay() -> None:
@@ -1407,6 +1515,10 @@ def _render_running_progress(status: dict) -> None:
     st.markdown(" · ".join(b for b in bits if b))
     if view.get("hint"):
         st.caption(view["hint"])
+    # Stage-by-stage breakdown is Pro detail. In Lite it competes with the single
+    # percentage line that answers the only question being asked: how much longer.
+    if is_pro_mode(st.session_state) and view.get("checklist_md"):
+        st.markdown(view["checklist_md"])
 
 
 def _job_source_title(job: dict) -> str:
@@ -1480,8 +1592,10 @@ def _render_job_failure(
         st.caption(summary)
     else:
         st.error(f"**{title}** failed: {summary}")
-    if detail:
-        with st.expander("Details", expanded=True, key=detail_key):
+    # Collapsed, and Pro only: an auto-expanded stack trace reads as a crash and
+    # is unactionable for anyone who did not write the pipeline.
+    if detail and is_pro_mode(st.session_state):
+        with st.expander("Technical detail", expanded=False, key=detail_key):
             st.code(detail)
 
 
@@ -1566,13 +1680,29 @@ def _render_queue_job_row(
                 ensure_worker_started()
                 st.rerun()
         with cols[2]:
-            if st.button(
+            # Two-step: this throws away minutes of finished compute and there is
+            # no undo, so a single stray click must not be enough.
+            confirm_key = f"isolate_confirm_stop_{job_id}"
+            if st.session_state.get(confirm_key):
+                if st.button(
+                    "Discard",
+                    key=f"stop_job_{job_id}",
+                    type="primary",
+                    help="Discard this job and its progress.",
+                ):
+                    st.session_state.pop(confirm_key, None)
+                    remove_job(job_id)
+                    ensure_worker_started()
+                    st.rerun()
+                if st.button("Keep going", key=f"isolate_keep_{job_id}"):
+                    st.session_state.pop(confirm_key, None)
+                    st.rerun()
+            elif st.button(
                 "Stop",
-                key=f"stop_job_{job_id}",
-                help="Cancel and remove this job.",
+                key=f"isolate_stop_ask_{job_id}",
+                help="Cancel this job. Progress so far is lost.",
             ):
-                remove_job(job_id)
-                ensure_worker_started()
+                st.session_state[confirm_key] = True
                 st.rerun()
         return
     if status == "paused" and job_id:
@@ -1598,10 +1728,57 @@ def _render_queue_job_row(
             st.rerun()
 
 
+def _render_failed_strip(failed: dict) -> None:
+    """Failure with the two things people actually want: retry, or make it go away."""
+    job_id = str(failed.get("id") or "")
+    title = _job_source_title(failed)
+    st.error(f"**{title}** failed: {format_job_error(failed.get('error'))}")
+    retry_col, dismiss_col, _ = st.columns([1, 1, 4])
+    with retry_col:
+        if st.button(
+            "Try again",
+            key=f"isolate_retry_{job_id}",
+            type="primary",
+            width="stretch",
+            help="Queue the same track with the same settings.",
+        ):
+            new_id = requeue_job(job_id)
+            if new_id:
+                dismiss_failed_job(st.session_state, job_id)
+                ensure_worker_started()
+                st.rerun()
+            else:
+                st.session_state["isolate_flash"] = (
+                    "Cannot retry — the original audio file is no longer on disk. "
+                    "Add the file again on New."
+                )
+                st.rerun()
+    with dismiss_col:
+        if st.button(
+            "Dismiss",
+            key=f"isolate_dismiss_{job_id}",
+            width="stretch",
+            help="Hide this here. The job stays on Queue.",
+        ):
+            dismiss_failed_job(st.session_state, job_id)
+            st.rerun()
+    if is_pro_mode(st.session_state):
+        detail = (failed.get("error") or "").strip()
+        if detail:
+            with st.expander("Technical detail", expanded=False, key="isolate_status_fail_details"):
+                st.code(detail)
+
+
 def _render_status_strip(jobs: list) -> None:
-    """Running / queued / failed only. Empty when idle."""
+    """Sole owner of job state on this page. Empty when idle.
+
+    Non-blocking by design: separation runs in the background and the app stays
+    usable, so this reports progress in place instead of dimming the window.
+    """
     running = None
     failed = None
+    dismissed = st.session_state.get(DISMISSED_JOB_IDS_KEY) or []
+    now = time.time()
     for job in jobs:
         jid = job.get("id")
         if not jid:
@@ -1611,7 +1788,8 @@ def _render_status_strip(jobs: list) -> None:
         if status == "running" and running is None:
             running = fresh
         elif status == "failed" and failed is None:
-            failed = fresh
+            if should_show_failed_job(fresh, now=now, dismissed_ids=dismissed):
+                failed = fresh
     waiting_ids = queued_job_ids()
     active_id = active_job_id()
     stopping_previous = False
@@ -1629,11 +1807,7 @@ def _render_status_strip(jobs: list) -> None:
             st.info(f"Separating **{_job_source_title(running)}**")
             _render_running_progress(running)
         elif failed:
-            _render_job_failure(
-                _job_source_title(failed),
-                failed.get("error"),
-                detail_key="isolate_status_fail_details",
-            )
+            _render_failed_strip(failed)
         elif stopping_previous:
             st.caption(status_strip_waiting_caption(waiting_ids, stopping_previous=True))
         elif show_queued:
@@ -2060,7 +2234,7 @@ def _enqueue_confirmed_job(choice: dict, audio_path: Path) -> None:
     st.session_state["isolate_results_source_fp"] = source_fp
     enqueue_job(spec)
     reset_new_tab_source(st.session_state)
-    st.session_state["isolate_flash"] = f"Queued **{resolved_name}**."
+    st.session_state["isolate_flash"] = f"Separating **{resolved_name}**…"
     if job_audio_sec:
         st.session_state["isolate_last_job_timing"] = {
             "audio_sec": job_audio_sec,
@@ -2070,7 +2244,7 @@ def _enqueue_confirmed_job(choice: dict, audio_path: Path) -> None:
             "two_pass": bool(choice.get("two_pass")),
             "guitar_refine": bool(choice.get("guitar_refine")),
         }
-    _open_queue_workspace()
+    # Stay on New — progress + overlay live here; Mixer opens when the job finishes.
     st.rerun()
 
 
@@ -2295,8 +2469,13 @@ def _has_source_for_job(choice: dict) -> bool:
 
 def _render_new_workspace(demucs_ok: bool) -> None:
     choice = _render_separation_controls()
+    # Jobs run one at a time. Saying "Separate tracks" while one is already
+    # running promises something immediate and then silently queues instead.
+    busy = separation_in_progress()
+    if busy:
+        st.caption("A separation is already running — this one starts when that finishes.")
     if st.button(
-        "Separate tracks",
+        "Add to queue" if busy else "Separate tracks",
         type="primary",
         disabled=not demucs_ok,
         key="isolate_separate",
@@ -2387,8 +2566,8 @@ def _enqueue_reseparate_job(
         parent_run_dir=str(run_dir),
     )
     enqueue_job(spec)
-    st.session_state["isolate_flash"] = f"Queued breakdown of **{stem_id}**."
-    _open_queue_workspace()
+    st.session_state["isolate_flash"] = f"Separating breakdown of **{stem_id}**…"
+    # Stay on Mixer — do not jump to Queue for re-separate.
     st.rerun()
 
 
@@ -2458,20 +2637,13 @@ def _render_mixer_workspace(browser_id: str | None) -> None:
         st.session_state.get("isolate_run_dir", next(iter(stem_paths.values())).parent)
     )
 
+    pro = is_pro_mode(st.session_state)
     bass_bleed = _load_bass_bleed_diagnostics(artifacts_map)
-    if bass_bleed.get("flagged"):
-        st.warning(
-            "Guitar check: "
-            f"{bass_bleed.get('reason', 'this track may contain extra bass bleed')} "
-            "Use **Guitar fix-up** below to adjust without re-separating."
-        )
-
-    _render_guitar_fixup_panel(stem_paths, run_dir, artifacts_map or {}, bass_bleed)
-
-    _render_reseparate_panel(stem_paths, run_dir)
 
     _render_mixer_region_caption(base_name)
 
+    # Mixer first. Guitar fix-up and re-separate used to sit above it, so the
+    # result people waited minutes for was below two panels of repair tooling.
     # NOTE: media URLs are generated once per session state, but Streamlit fragments
     # may re-render at different times. If URL generation becomes expensive or stale,
     # wrap with @st.cache_resource and a TTL.
@@ -2484,8 +2656,26 @@ def _render_mixer_workspace(browser_id: str | None) -> None:
         download_urls=mixer_download_urls,
     )
 
+    if bass_bleed.get("flagged"):
+        st.warning(
+            "Guitar check: "
+            f"{bass_bleed.get('reason', 'this track may contain extra bass bleed')} "
+            "Use **Guitar fix-up** below to adjust without re-separating."
+        )
+
+    if pro:
+        _render_guitar_fixup_panel(stem_paths, run_dir, artifacts_map or {}, bass_bleed)
+        _render_reseparate_panel(stem_paths, run_dir)
+    else:
+        # Available, not absent: repair is a real need, but it is a follow-up to
+        # listening rather than something to meet before you hear anything.
+        with _stateful_expander(
+            "Fix the guitar track", key="isolate_lite_fixup_expanded", default=False
+        ):
+            _render_guitar_fixup_panel(stem_paths, run_dir, artifacts_map or {}, bass_bleed)
+
     source_audio_path = st.session_state.get("isolate_source_audio_path")
-    if source_audio_path and Path(source_audio_path).exists():
+    if pro and source_audio_path and Path(source_audio_path).exists():
         st.divider()
         st.caption("Other tools")
         if st.button("Make a tab PDF from this →"):
@@ -2544,21 +2734,9 @@ def main() -> None:
         _refresh_isolate_from_disk(browser_id)
     _rehydrate_artifacts_from_disk(browser_id)
 
-    prev_workspace = st.session_state.get(WORKSPACE_KEY)
     _ensure_workspace_tab(has_artifacts=bool(st.session_state.get("isolate_artifacts")))
-    cur_workspace = st.session_state.get(WORKSPACE_KEY)
-
-    # Only show the global loading overlay for a page/tab switch or while a
-    # separation job is actually running — never for ordinary button reruns.
-    _update_global_loading_flag(
-        job_running=_worker_jobs_active(),
-        tab_changed=(
-            prev_workspace in WORKSPACE_TABS
-            and cur_workspace in WORKSPACE_TABS
-            and prev_workspace != cur_workspace
-        ),
-        nav_requested=bool(st.session_state.pop("_nav_loading", False)),
-    )
+    # The global overlay is nav-only (app.py). Job state belongs to the status
+    # strip below, which stays non-blocking because the app remains usable.
 
     _poll_running_jobs()
     if flash := st.session_state.pop("isolate_flash", None):
