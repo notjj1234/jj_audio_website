@@ -4,6 +4,12 @@ export const DB_MIN = -25;
 export const DB_MAX = 25;
 export const DB_DEFAULT = 0;
 
+export const DEFAULT_MUTED_STEMS = new Set(["metronome"]);
+
+export function defaultMuted(stemId: string): boolean {
+  return DEFAULT_MUTED_STEMS.has(stemId);
+}
+
 export type StemInfo = { id: string; label: string; url: string };
 
 export type MixerState = {
@@ -75,7 +81,7 @@ export function resetMuteSolo(stemIds: string[], state: MixerState): MixerState 
   const muted: Record<string, boolean> = {};
   const soloed: Record<string, boolean> = {};
   for (const id of stemIds) {
-    muted[id] = false;
+    muted[id] = defaultMuted(id);
     soloed[id] = false;
   }
   return { ...state, muted, soloed };

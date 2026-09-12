@@ -7,6 +7,7 @@ import {
   allMuted,
   anySoloed,
   clearSolo,
+  defaultMuted,
   effectiveGains,
   isAudible,
   resetMuteSolo,
@@ -59,7 +60,7 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
     };
     for (const s of stems) {
       next.volumesDb[s.id] = DB_DEFAULT;
-      next.muted[s.id] = false;
+      next.muted[s.id] = defaultMuted(s.id);
       next.soloed[s.id] = false;
     }
     setState(next);

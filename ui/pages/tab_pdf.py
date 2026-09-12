@@ -64,7 +64,7 @@ def main() -> None:
     # that is always present teaches people to ignore red boxes that matter.
     st.warning(
         "**JJs stuff — NOT A FINISHED PRODUCT**. Tab PDF barely works. "
-        "Tabs are 90% wrong and or unusable. This page is here so I can experiment with it. "
+        "Tabs are 100% wrong and unusable. This page is here so I can experiment with it. "
         "Best on short solo-guitar clips — for full songs, isolate guitar first on "
         "**Audio Isolation**."
     )

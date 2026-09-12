@@ -15,7 +15,13 @@ from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 from audio_to_tab.hardware import HostProbe, resolve_desktop_speed
-from audio_to_tab.isolate import effective_isolation_quality
+from audio_to_tab.isolate import (
+    DEMUCS_MODELS,
+    FOLD_OTHER_MODES,
+    QUALITY_OVERLAP,
+    QUALITY_SHIFTS,
+    effective_isolation_quality,
+)
 from audio_to_tab.mixer import stem_display_name, stem_energy_db
 from ui.common import DATA_DIR, delete_run
 from ui.stem_icons import outcome_icon_markdown, stem_icon_markdown
@@ -222,8 +228,178 @@ def promote_default_guitar_option(
     return out
 
 
-# Lite goal picker. Outcomes are goals, not engines. Lite auto-picks speed/device
-# and may prefer Demucs guitar on CPU-only hosts; Pro exposes every control.
+# Lite guitar-engine chooser. Options stay visible; RoFormer is disabled when
+# the clip is longer than ``roformer_max_audio_sec`` (or length is unknown).
+LITE_GUITAR_ENGINE_KEY = "isolate_lite_guitar_engine"
+LITE_GUITAR_ENGINE_ORDER: tuple[str, ...] = (
+    "guitar_demucs_6s",
+    "guitar_roformer",
+    "guitar_roformer_refine",
+)
+DEFAULT_LITE_GUITAR_ENGINE = "guitar_demucs_6s"
+LITE_GUITAR_ENGINE_LABELS: dict[str, str] = {
+    "guitar_demucs_6s": "Faster (Demucs)",
+    "guitar_roformer": "Better guitar (BS-RoFormer)",
+    "guitar_roformer_refine": "Best / slower (BS-RoFormer + MelBand)",
+}
+
+
+def effective_clip_seconds(
+    *,
+    file_duration_sec: float | None,
+    start_sec: float = 0.0,
+    max_duration_sec: float | None,
+) -> float | None:
+    """Length that will actually be separated, or None if unknown."""
+    if max_duration_sec is not None:
+        try:
+            return max(0.0, float(max_duration_sec))
+        except (TypeError, ValueError):
+            return None
+    if file_duration_sec is None:
+        return None
+    try:
+        return max(0.0, float(file_duration_sec) - float(start_sec or 0.0))
+    except (TypeError, ValueError):
+        return None
+
+
+def lite_guitar_engine_allowed(
+    engine_id: str,
+    *,
+    effective_sec: float | None,
+    cap_sec: float,
+    duration_known: bool,
+    roformer_available: bool,
+) -> bool:
+    """Whether Lite may run this guitar engine on the current clip."""
+    pick = str(engine_id or "").strip()
+    if pick == DEFAULT_LITE_GUITAR_ENGINE or pick == "guitar_demucs_6s":
+        return True
+    if pick not in ROFORMER_GUITAR_OPTION_IDS:
+        return False
+    if not roformer_available:
+        return False
+    if not duration_known or effective_sec is None:
+        return False
+    try:
+        return float(effective_sec) <= float(cap_sec)
+    except (TypeError, ValueError):
+        return False
+
+
+def lite_guitar_engine_disabled_reason(
+    engine_id: str,
+    *,
+    effective_sec: float | None,
+    cap_sec: float,
+    duration_known: bool,
+    roformer_available: bool,
+) -> str | None:
+    """User-facing why a Lite engine button is disabled, or None if allowed."""
+    if lite_guitar_engine_allowed(
+        engine_id,
+        effective_sec=effective_sec,
+        cap_sec=cap_sec,
+        duration_known=duration_known,
+        roformer_available=roformer_available,
+    ):
+        return None
+    pick = str(engine_id or "").strip()
+    if pick not in ROFORMER_GUITAR_OPTION_IDS:
+        return None
+    if not roformer_available:
+        return (
+            "Needs the BS-RoFormer runtime "
+            "(pip install bs-roformer-infer in your app environment)."
+        )
+    if not duration_known or effective_sec is None:
+        return (
+            "Available after the track length is known. "
+            "Upload a file or download YouTube audio."
+        )
+    return (
+        f"Needs a section ≤ {float(cap_sec):.0f} s on this PC "
+        f"(this track is {float(effective_sec):.0f} s)."
+    )
+
+
+def resolve_lite_guitar_engine(
+    selected: str | None,
+    *,
+    effective_sec: float | None,
+    cap_sec: float,
+    duration_known: bool,
+    roformer_available: bool,
+) -> tuple[str, bool]:
+    """Legal Lite guitar engine. Falls back to Demucs when the pick cannot run.
+
+    Returns ``(engine_id, fell_back)``.
+    """
+    pick = str(selected or "").strip()
+    if pick not in LITE_GUITAR_ENGINE_ORDER:
+        pick = DEFAULT_LITE_GUITAR_ENGINE
+    if lite_guitar_engine_allowed(
+        pick,
+        effective_sec=effective_sec,
+        cap_sec=cap_sec,
+        duration_known=duration_known,
+        roformer_available=roformer_available,
+    ):
+        return pick, False
+    return DEFAULT_LITE_GUITAR_ENGINE, pick != DEFAULT_LITE_GUITAR_ENGINE
+
+
+def apply_lite_guitar_engine(
+    option_ids: Iterable[str],
+    engine_id: str,
+) -> list[str]:
+    """Swap any guitar track option for the Lite engine choice."""
+    engine = str(engine_id or "").strip()
+    if engine not in LITE_GUITAR_ENGINE_ORDER:
+        engine = DEFAULT_LITE_GUITAR_ENGINE
+    had_guitar = False
+    out: list[str] = []
+    for oid in option_ids or ():
+        if str(oid) in GUITAR_TRACK_OPTION_IDS:
+            had_guitar = True
+            continue
+        out.append(str(oid))
+    if had_guitar:
+        out.append(engine)
+    return out
+
+
+def lite_roformer_enqueue_block_reason(
+    model: str,
+    *,
+    effective_sec: float | None,
+    cap_sec: float,
+    duration_known: bool,
+    roformer_available: bool,
+) -> str | None:
+    """Why Lite must not start this RoFormer job, or None if it may run."""
+    if not job_requires_roformer_backend(model):
+        return None
+    if lite_guitar_engine_allowed(
+        "guitar_roformer",
+        effective_sec=effective_sec,
+        cap_sec=cap_sec,
+        duration_known=duration_known,
+        roformer_available=roformer_available,
+    ):
+        return None
+    return lite_guitar_engine_disabled_reason(
+        "guitar_roformer",
+        effective_sec=effective_sec,
+        cap_sec=cap_sec,
+        duration_known=duration_known,
+        roformer_available=roformer_available,
+    )
+
+
+# Lite goal picker. Outcomes are goals; guitar engine is a separate Lite chooser.
+# Lite auto-picks speed/device. Pro exposes every stem/engine control.
 OUTCOME_CARD_ORDER: tuple[str, ...] = ("band", "guitar", "karaoke", "vocals")
 OUTCOME_CARDS: dict[str, dict[str, str | int]] = {
     "band": {
@@ -268,16 +444,28 @@ def resolve_outcome_card(
     *,
     roformer_available: bool,
     prefer_roformer: bool = True,
+    guitar_option: str | None = None,
 ) -> list[str]:
     """Track option ids behind a Lite outcome.
 
-    Guitar engine follows ``prefer_roformer`` (Lite gates on accelerator; Pro
-    prefers RoFormer when installed).
+    ``guitar_option`` (Lite chooser) wins when set. Otherwise guitar follows
+    ``prefer_roformer`` (Lite historically gated on accelerator; Pro prefers
+    RoFormer when installed).
     """
-    guitar = default_guitar_track_option(
-        roformer_available=roformer_available,
-        prefer_roformer=prefer_roformer,
-    )
+    if guitar_option:
+        guitar = normalize_guitar_track_selection(
+            guitar_option, roformer_available=roformer_available
+        )
+        if guitar not in GUITAR_TRACK_OPTION_IDS:
+            guitar = default_guitar_track_option(
+                roformer_available=roformer_available,
+                prefer_roformer=prefer_roformer,
+            )
+    else:
+        guitar = default_guitar_track_option(
+            roformer_available=roformer_available,
+            prefer_roformer=prefer_roformer,
+        )
     card = card_id if card_id in OUTCOME_CARDS else DEFAULT_OUTCOME_CARD
     if card == "karaoke":
         return [VOCALS_INSTRUMENTAL_OPTION_ID]
@@ -293,6 +481,7 @@ def outcome_card_for_options(
     *,
     roformer_available: bool,
     prefer_roformer: bool = True,
+    guitar_option: str | None = None,
 ) -> str | None:
     """Which outcome describes this exact selection, or None for a custom one.
 
@@ -308,6 +497,7 @@ def outcome_card_for_options(
                 card,
                 roformer_available=roformer_available,
                 prefer_roformer=prefer_roformer,
+                guitar_option=guitar_option,
             )
         ):
             return card
@@ -339,6 +529,7 @@ def toggle_custom_stem_options(
     *,
     roformer_available: bool,
     prefer_roformer: bool = True,
+    guitar_option: str | None = None,
 ) -> list[str]:
     """Turn one custom-grid stem on or off. Exits karaoke 2-stem mode."""
     if stem_id not in CUSTOM_STEM_CHOICES:
@@ -355,12 +546,21 @@ def toggle_custom_stem_options(
             current = [oid for oid in current if oid != drop]
     elif stem_id == "guitar":
         if not any(oid in GUITAR_TRACK_OPTION_IDS for oid in current):
-            current.append(
-                default_guitar_track_option(
+            if guitar_option:
+                pick = normalize_guitar_track_selection(
+                    guitar_option, roformer_available=roformer_available
+                )
+                if pick not in GUITAR_TRACK_OPTION_IDS:
+                    pick = default_guitar_track_option(
+                        roformer_available=roformer_available,
+                        prefer_roformer=prefer_roformer,
+                    )
+            else:
+                pick = default_guitar_track_option(
                     roformer_available=roformer_available,
                     prefer_roformer=prefer_roformer,
                 )
-            )
+            current.append(pick)
     else:
         current.append(STEM_TO_TRACK_OPTION[stem_id])
     return current
@@ -719,6 +919,8 @@ def custom_selected_stems(
         wanted.update(CUSTOM_STEM_OUTPUTS.get(pick, ()))
 
     selected = {name: name in wanted for name in produced}
+    if "metronome" in selected:
+        selected["metronome"] = True
     if not any(selected.values()):
         return {name: True for name in produced}
     return selected
@@ -1073,6 +1275,16 @@ def reset_new_tab_source(session: MutableMapping[str, object]) -> None:
         session.pop(key, None)
     queue_clear_youtube_url(session)
     queue_reopen_output_name(session, "")
+    tab = str(session.get(SHELL_TAB_KEY) or "")
+    if is_new_draft_tab(tab):
+        # Keep the empty draft slot in sync after Separate / +.
+        raw = session.get(DRAFT_SOURCES_KEY)
+        if not isinstance(raw, dict):
+            raw = {}
+            session[DRAFT_SOURCES_KEY] = raw
+        raw[tab] = {
+            "isolate_upload_key": session.get("isolate_upload_key"),
+        }
 
 
 def should_hide_stale_results(
@@ -1101,17 +1313,118 @@ WORKSPACE_NEXT_KEY = "_isolate_workspace_next"
 LISTEN_PICKER_KEY = "isolate_listen_picker"
 LISTEN_PICKER_NEXT_KEY = "_isolate_listen_picker_next"
 OPEN_MIX_TABS_KEY = "isolate_open_mix_tabs"
-OPEN_MIX_TABS_MAX = 8
+OPEN_MIX_TABS_MAX = 12
 NEW_DRAFT_TAB_ID = "__new__"
+NEW_DRAFT_TAB_PREFIX = "__new__"
+DRAFT_SOURCES_KEY = "isolate_draft_sources"
 SHELL_TAB_KEY = "isolate_shell_tab"
 SHELL_VIEW_KEY = "isolate_shell_view"
 SHELL_VIEW_NEXT_KEY = "_isolate_shell_view_next"
 SHELL_VIEWS = ("home", "mix")
 ISOLATE_EXPORT_DIR_KEY = "isolate_export_dir"
 
+# Live New-tab source fields snapshotted when switching between draft tabs.
+_DRAFT_SOURCE_LIVE_KEYS = (
+    "isolate_upload_key",
+    "isolate_upload_fp",
+    "isolate_pending_audio_path",
+    "isolate_pending_fp",
+    "isolate_duration_sec",
+    "isolate_duration_fp",
+    "carry_over_audio_path",
+    "carry_over_audio_name",
+    ISOLATE_OUTPUT_NAME_KEY,
+    ISOLATE_OUTPUT_NAME_PENDING_KEY,
+    ISOLATE_YOUTUBE_URL_KEY,
+    ISOLATE_YOUTUBE_URL_PENDING_KEY,
+    ISOLATE_YOUTUBE_TITLE_PENDING_KEY,
+    ISOLATE_NAMED_YOUTUBE_URL_KEY,
+    ISOLATE_AUTO_OUTPUT_NAME_KEY,
+)
+
 
 def is_new_draft_tab(tab_id: object) -> bool:
-    return str(tab_id or "") == NEW_DRAFT_TAB_ID
+    text = str(tab_id or "")
+    return text == NEW_DRAFT_TAB_ID or text.startswith(f"{NEW_DRAFT_TAB_PREFIX}:")
+
+
+def make_new_draft_tab_id() -> str:
+    """Unique New-draft id so + can open one staging tab per song."""
+    return f"{NEW_DRAFT_TAB_PREFIX}:{uuid4().hex[:10]}"
+
+
+def _draft_sources_map(session: MutableMapping[str, Any]) -> dict[str, dict[str, Any]]:
+    raw = session.get(DRAFT_SOURCES_KEY)
+    if not isinstance(raw, dict):
+        raw = {}
+        session[DRAFT_SOURCES_KEY] = raw
+    return raw
+
+
+def snapshot_draft_source(session: MutableMapping[str, Any]) -> dict[str, Any]:
+    """Capture the New-tab source fields currently in session."""
+    out: dict[str, Any] = {}
+    for key in _DRAFT_SOURCE_LIVE_KEYS:
+        if key in session:
+            out[key] = session.get(key)
+    return out
+
+
+def save_active_draft_source(session: MutableMapping[str, Any]) -> None:
+    """Persist the focused draft's source so switching tabs does not clobber it."""
+    tab = str(session.get(SHELL_TAB_KEY) or "")
+    if not is_new_draft_tab(tab):
+        return
+    _draft_sources_map(session)[tab] = snapshot_draft_source(session)
+
+
+def apply_draft_source_snapshot(
+    session: MutableMapping[str, Any],
+    snap: Mapping[str, Any] | None,
+) -> None:
+    """Replace live New-tab source fields from a draft snapshot (or clear)."""
+    data = dict(snap or {})
+    for key in _DRAFT_SOURCE_LIVE_KEYS:
+        if key in data:
+            session[key] = data[key]
+        else:
+            session.pop(key, None)
+    # Remount the uploader so Streamlit does not keep the previous file widget.
+    try:
+        current = int(session.get("isolate_upload_key") or 0)
+    except (TypeError, ValueError):
+        current = 0
+    session["isolate_upload_key"] = current + 1
+
+
+def draft_tab_title(session: Mapping[str, Any], tab_id: object) -> str:
+    """Strip label for a New draft: song name when known, else New."""
+    tid = str(tab_id or "")
+    live = is_new_draft_tab(session.get(SHELL_TAB_KEY)) and str(
+        session.get(SHELL_TAB_KEY) or ""
+    ) == tid
+    src: Mapping[str, Any]
+    if live:
+        src = session
+    else:
+        raw = session.get(DRAFT_SOURCES_KEY)
+        stored = raw.get(tid) if isinstance(raw, dict) else None
+        src = stored if isinstance(stored, dict) else {}
+    # Pending rename/clear wins so strip labels match post-+ empty drafts before
+    # apply_pending_output_name runs later in the same paint.
+    if ISOLATE_OUTPUT_NAME_PENDING_KEY in src:
+        name = str(src.get(ISOLATE_OUTPUT_NAME_PENDING_KEY) or "").strip()
+    else:
+        name = str(src.get(ISOLATE_OUTPUT_NAME_KEY) or "").strip()
+    if not name:
+        pending = src.get("isolate_pending_audio_path") or src.get("carry_over_audio_path")
+        if pending:
+            name = Path(str(pending)).stem
+    if not name:
+        name = str(src.get("carry_over_audio_name") or "").strip()
+        if name:
+            name = Path(name).stem
+    return name or "New"
 
 
 def normalize_open_mix_tabs(
@@ -1120,8 +1433,13 @@ def normalize_open_mix_tabs(
     existing: set[str] | None = None,
     cap: int = OPEN_MIX_TABS_MAX,
     require_dir: bool = True,
+    protect: Iterable[str] | None = None,
 ) -> list[str]:
-    """Dedupe run_dir paths / New draft id, optionally drop missing dirs, enforce cap."""
+    """Dedupe run_dir paths / New draft ids, optionally drop missing dirs, enforce cap.
+
+    When over cap, drop oldest mix run dirs first so New drafts and ``protect``
+    ids (active shell tab) stay available.
+    """
     if not isinstance(tabs, (list, tuple)):
         return []
     out: list[str] = []
@@ -1130,7 +1448,7 @@ def normalize_open_mix_tabs(
         path = str(raw or "").strip()
         if not path or path in seen:
             continue
-        if path == NEW_DRAFT_TAB_ID:
+        if is_new_draft_tab(path):
             seen.add(path)
             out.append(path)
             continue
@@ -1140,9 +1458,29 @@ def normalize_open_mix_tabs(
             continue
         seen.add(path)
         out.append(path)
-    if len(out) > cap:
-        out = out[-cap:]
-    return out
+    if len(out) <= cap:
+        return out
+    keep = {str(p) for p in (protect or ()) if p}
+    drafts = [p for p in out if is_new_draft_tab(p)]
+    mixes = [p for p in out if not is_new_draft_tab(p)]
+    # Drop oldest mixes first, then oldest drafts, never drop protected ids last.
+    while len(drafts) + len(mixes) > cap:
+        if mixes:
+            victim = next((m for m in mixes if m not in keep), None)
+            if victim is None:
+                victim = mixes[0]
+            mixes = [m for m in mixes if m != victim]
+            continue
+        if drafts:
+            victim = next((d for d in drafts if d not in keep), None)
+            if victim is None:
+                break
+            drafts = [d for d in drafts if d != victim]
+            continue
+        break
+    # Preserve relative order from ``out``.
+    allowed = set(drafts) | set(mixes)
+    return [p for p in out if p in allowed]
 
 
 def add_open_mix_tab(
@@ -1157,23 +1495,147 @@ def add_open_mix_tab(
     leaves strip order alone so only the active indicator moves.
     """
     path = str(run_dir or "").strip()
+    protect = [str(session.get(SHELL_TAB_KEY) or "")]
     if not path:
         return normalize_open_mix_tabs(
-            session.get(OPEN_MIX_TABS_KEY), cap=cap, require_dir=False
+            session.get(OPEN_MIX_TABS_KEY),
+            cap=cap,
+            require_dir=False,
+            protect=protect,
         )
     current = normalize_open_mix_tabs(
-        session.get(OPEN_MIX_TABS_KEY), cap=cap * 2, require_dir=False
+        session.get(OPEN_MIX_TABS_KEY),
+        cap=max(cap * 2, cap + 4),
+        require_dir=False,
+        protect=protect + [path],
     )
     if path in current:
-        if len(current) > cap:
-            current = current[-cap:]
-        session[OPEN_MIX_TABS_KEY] = current
-        return current
+        session[OPEN_MIX_TABS_KEY] = normalize_open_mix_tabs(
+            current, cap=cap, require_dir=False, protect=protect + [path]
+        )
+        return list(session[OPEN_MIX_TABS_KEY])
     current.append(path)
-    if len(current) > cap:
-        current = current[-cap:]
-    session[OPEN_MIX_TABS_KEY] = current
-    return current
+    session[OPEN_MIX_TABS_KEY] = normalize_open_mix_tabs(
+        current, cap=cap, require_dir=False, protect=protect + [path]
+    )
+    return list(session[OPEN_MIX_TABS_KEY])
+
+
+def replace_open_mix_tab(
+    session: MutableMapping[str, Any],
+    old_id: str | Path | None,
+    new_id: str | Path | None,
+    *,
+    cap: int = OPEN_MIX_TABS_MAX,
+) -> list[str]:
+    """Swap ``old_id`` for ``new_id`` in the same strip slot (draft → finished mix).
+
+    When ``old_id`` is missing, falls back to ``add_open_mix_tab``. Draft source
+    state for ``old_id`` is dropped.
+    """
+    old = str(old_id or "").strip()
+    new = str(new_id or "").strip()
+    if not new:
+        return add_open_mix_tab(session, None, cap=cap)
+    protect = [str(session.get(SHELL_TAB_KEY) or ""), new]
+    tabs = normalize_open_mix_tabs(
+        session.get(OPEN_MIX_TABS_KEY),
+        cap=max(cap * 2, cap + 4),
+        require_dir=False,
+        protect=protect + ([old] if old else []),
+    )
+    if not old or old not in tabs:
+        return add_open_mix_tab(session, new, cap=cap)
+    replaced: list[str] = []
+    seen: set[str] = set()
+    for path in tabs:
+        candidate = new if path == old else path
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        replaced.append(candidate)
+    if is_new_draft_tab(old):
+        _draft_sources_map(session).pop(old, None)
+    if str(session.get(SHELL_TAB_KEY) or "") == old:
+        session.pop(SHELL_TAB_KEY, None)
+    session[OPEN_MIX_TABS_KEY] = normalize_open_mix_tabs(
+        replaced, cap=cap, require_dir=False, protect=protect
+    )
+    return list(session[OPEN_MIX_TABS_KEY])
+
+
+def promote_job_origin_tab(
+    session: MutableMapping[str, Any],
+    status: Mapping[str, Any],
+) -> str | None:
+    """Turn a job's origin draft tab into its finished ``run_dir`` tab.
+
+    Returns the run_dir when a tab was opened or promoted, else None.
+    """
+    run_dir = str(status.get("run_dir") or "").strip()
+    if not run_dir:
+        return None
+    origin = str(status.get("origin_tab") or "").strip()
+    if origin and is_new_draft_tab(origin):
+        replace_open_mix_tab(session, origin, run_dir)
+    else:
+        add_open_mix_tab(session, run_dir)
+    return run_dir
+
+
+_DRAFT_JOB_BUSY_STATUSES = frozenset({"queued", "running", "pausing", "paused"})
+
+
+def draft_tab_job_overlays(jobs: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Map draft tab id → in-flight job overlay for the mix-tabs strip.
+
+    Used to paint a per-tab progress bar while separation runs in that slot.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for job in jobs:
+        origin = str(job.get("origin_tab") or "").strip()
+        if not is_new_draft_tab(origin):
+            continue
+        status = str(job.get("status") or "")
+        if status not in _DRAFT_JOB_BUSY_STATUSES:
+            continue
+        progress: float | None = None
+        if status == "running":
+            try:
+                progress = float(job.get("progress") or 0.0)
+            except (TypeError, ValueError):
+                progress = 0.0
+            progress = min(1.0, max(0.0, progress))
+        # Prefer a running job over a queued one if both somehow share a tab.
+        existing = out.get(origin)
+        if existing and existing.get("status") == "running" and status != "running":
+            continue
+        out[origin] = {
+            "job_id": str(job.get("id") or ""),
+            "status": status,
+            "title": str(job.get("title") or "").strip() or None,
+            "busy": True,
+            "progress": progress,
+        }
+    return out
+
+
+def mark_draft_tab_processing(
+    session: MutableMapping[str, Any],
+    tab_id: str,
+    *,
+    title: str,
+) -> None:
+    """Keep the draft strip label after source reset while a job is bound to it."""
+    if not is_new_draft_tab(tab_id):
+        return
+    name = str(title or "").strip()
+    _draft_sources_map(session)[tab_id] = {
+        "isolate_upload_key": session.get("isolate_upload_key"),
+        ISOLATE_OUTPUT_NAME_KEY: name,
+        ISOLATE_OUTPUT_NAME_PENDING_KEY: name,
+    }
+    session[SHELL_TAB_KEY] = tab_id
 
 
 def close_open_mix_tab(
@@ -1187,7 +1649,7 @@ def close_open_mix_tab(
         for p in normalize_open_mix_tabs(
             session.get(OPEN_MIX_TABS_KEY), require_dir=False
         )
-        if p == NEW_DRAFT_TAB_ID or Path(p).is_dir()
+        if is_new_draft_tab(p) or Path(p).is_dir()
     ]
     if not path or path not in tabs:
         session[OPEN_MIX_TABS_KEY] = tabs
@@ -1195,6 +1657,9 @@ def close_open_mix_tab(
     idx = tabs.index(path)
     tabs = [p for p in tabs if p != path]
     session[OPEN_MIX_TABS_KEY] = tabs
+    if is_new_draft_tab(path):
+        sources = _draft_sources_map(session)
+        sources.pop(path, None)
     if not tabs:
         return None
     if idx >= len(tabs):
@@ -1207,19 +1672,27 @@ def open_mix_tabs_for_session(
     *,
     library_dirs: Iterable[str] | None = None,
 ) -> list[str]:
+    current = normalize_open_mix_tabs(
+        session.get(OPEN_MIX_TABS_KEY), require_dir=False
+    )
+    draft_ids = {p for p in current if is_new_draft_tab(p)}
+    protect = [str(session.get(SHELL_TAB_KEY) or "")]
     if library_dirs is not None:
-        keep = {str(d) for d in library_dirs} | {NEW_DRAFT_TAB_ID}
+        keep = {str(d) for d in library_dirs} | draft_ids
         tabs = normalize_open_mix_tabs(
-            session.get(OPEN_MIX_TABS_KEY), existing=keep, require_dir=False
+            current,
+            existing=keep,
+            require_dir=False,
+            protect=protect,
         )
         tabs = [p for p in tabs if p in keep]
     else:
         tabs = [
             p
             for p in normalize_open_mix_tabs(
-                session.get(OPEN_MIX_TABS_KEY), require_dir=False
+                current, require_dir=False, protect=protect
             )
-            if p == NEW_DRAFT_TAB_ID or Path(p).is_dir()
+            if is_new_draft_tab(p) or Path(p).is_dir()
         ]
     session[OPEN_MIX_TABS_KEY] = tabs
     return tabs
@@ -1283,22 +1756,52 @@ def open_new_draft_tab(
     session: MutableMapping[str, Any],
     *,
     fresh: bool = True,
-) -> None:
-    """Open a literal New tab (Chrome-style +) and show the separate form."""
-    add_open_mix_tab(session, NEW_DRAFT_TAB_ID)
-    session[SHELL_TAB_KEY] = NEW_DRAFT_TAB_ID
+) -> str:
+    """Open a new New-draft tab (Chrome-style +) with its own source state.
+
+    Returns the draft tab id. Each + creates a distinct tab so one song can
+    stay staged while another is prepared.
+    """
+    save_active_draft_source(session)
+    draft_id = make_new_draft_tab_id()
+    add_open_mix_tab(session, draft_id)
+    session[SHELL_TAB_KEY] = draft_id
     session[SHELL_VIEW_NEXT_KEY] = "home"
     session[WORKSPACE_NEXT_KEY] = "New"
     if fresh:
         reset_new_tab_source(session)
+        _draft_sources_map(session)[draft_id] = snapshot_draft_source(session)
+    else:
+        apply_draft_source_snapshot(session, None)
+        _draft_sources_map(session)[draft_id] = snapshot_draft_source(session)
+    return draft_id
 
 
-def focus_new_draft_tab(session: MutableMapping[str, Any]) -> None:
-    """Focus an existing New tab without wiping the form."""
-    add_open_mix_tab(session, NEW_DRAFT_TAB_ID)
-    session[SHELL_TAB_KEY] = NEW_DRAFT_TAB_ID
+def focus_new_draft_tab(
+    session: MutableMapping[str, Any],
+    tab_id: str | None = None,
+) -> None:
+    """Focus an existing New draft without wiping another draft's source."""
+    save_active_draft_source(session)
+    target = str(tab_id or "").strip()
+    if not is_new_draft_tab(target):
+        # Legacy callers (no id): prefer the focused draft, else the last open one.
+        current = str(session.get(SHELL_TAB_KEY) or "")
+        if is_new_draft_tab(current):
+            target = current
+        else:
+            open_tabs = normalize_open_mix_tabs(
+                session.get(OPEN_MIX_TABS_KEY), require_dir=False
+            )
+            drafts = [p for p in open_tabs if is_new_draft_tab(p)]
+            target = drafts[-1] if drafts else make_new_draft_tab_id()
+    add_open_mix_tab(session, target)
+    snap = _draft_sources_map(session).get(target)
+    apply_draft_source_snapshot(session, snap)
+    session[SHELL_TAB_KEY] = target
     session[SHELL_VIEW_NEXT_KEY] = "home"
     session[WORKSPACE_NEXT_KEY] = "New"
+    _draft_sources_map(session)[target] = snapshot_draft_source(session)
 
 
 QUEUE_IN_FLIGHT_STATUSES = frozenset(
@@ -1468,9 +1971,23 @@ PERSISTED_SETTING_KEYS: tuple[str, ...] = (
     "isolate_quality",
     "isolate_device",
     "isolate_lite_run_on",
+    "isolate_lite_guitar_engine",
     "isolate_guitar_ft",
     "isolate_two_pass",
     "isolate_guitar_refine",
+    "isolate_demucs_shifts",
+    "isolate_demucs_overlap",
+    "isolate_demucs_segment",
+    "isolate_demucs_jobs",
+    "isolate_demucs_compute_source_quality",
+    "isolate_fold_other_mode",
+    "isolate_adaptive_fold_gain",
+    "isolate_bleed_gate",
+    "isolate_bass_bleed_mitigation",
+    "isolate_sub_bass_debleed",
+    "isolate_low_end_restore_db",
+    "isolate_guitar_ensemble",
+    "isolate_htdemucs_ft",
     "isolate_options_expanded",
     "isolate_vocals_instrumental_only",
     "isolate_guitar_track",
@@ -1478,6 +1995,183 @@ PERSISTED_SETTING_KEYS: tuple[str, ...] = (
     "isolate_track_picker_initialized",
     *(f"isolate_track_{oid}" for oid in DEMUCS_STEM_CHECKBOX_IDS),
 )
+
+DEMUCS_SHIFT_OPTIONS: tuple[str, ...] = ("0", "1", "3", "5")
+DEMUCS_OVERLAP_OPTIONS: tuple[str, ...] = ("0.25", "0.5", "0.75")
+DEFAULT_DEMUCS_SEGMENT = 8
+DEFAULT_DEMUCS_JOBS = 1
+FOLD_OTHER_MODE_ORDER: tuple[str, ...] = ("best_effort", "band_limited", "full")
+PRO_LOW_END_RESTORE_MAX_DB = 6.0
+
+
+def quality_demucs_shifts(quality: str) -> str:
+    return QUALITY_SHIFTS.get(str(quality or "").strip(), "0")
+
+
+def quality_demucs_overlap(quality: str) -> str:
+    return QUALITY_OVERLAP.get(str(quality or "").strip(), "0.25")
+
+
+def parse_demucs_segment(value: Any) -> int | None:
+    """Widget 0 / missing → model default (None). Otherwise a positive int."""
+    if value is None or value == "":
+        return DEFAULT_DEMUCS_SEGMENT
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_DEMUCS_SEGMENT
+    if n <= 0:
+        return None
+    return n
+
+
+def parse_demucs_jobs(value: Any) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return DEFAULT_DEMUCS_JOBS
+
+
+def parse_demucs_shifts(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_demucs_overlap(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_fold_other_mode(value: Any) -> str:
+    pick = str(value or "").strip()
+    if pick in FOLD_OTHER_MODES:
+        return pick
+    return "best_effort"
+
+
+def demucs_compute_is_overridden(*, quality: str, shifts: Any, overlap: Any) -> bool:
+    return (
+        str(shifts) != quality_demucs_shifts(quality)
+        or str(overlap) != quality_demucs_overlap(quality)
+    )
+
+
+def sync_demucs_compute_defaults(
+    session: MutableMapping[str, Any],
+    *,
+    quality: str,
+) -> None:
+    """Reset shift/overlap to the Quality map unless the user overrode them."""
+    q = str(quality or "fast")
+    if q not in QUALITY_SHIFTS:
+        q = "fast"
+    new_shifts = quality_demucs_shifts(q)
+    new_overlap = quality_demucs_overlap(q)
+    last_q = session.get("isolate_demucs_compute_source_quality")
+    last_q = str(last_q) if last_q in QUALITY_SHIFTS else None
+    cur_shifts = session.get("isolate_demucs_shifts")
+    cur_overlap = session.get("isolate_demucs_overlap")
+    if last_q is None:
+        if cur_shifts not in DEMUCS_SHIFT_OPTIONS:
+            session["isolate_demucs_shifts"] = new_shifts
+        if cur_overlap not in DEMUCS_OVERLAP_OPTIONS:
+            session["isolate_demucs_overlap"] = new_overlap
+    elif last_q != q:
+        if cur_shifts not in DEMUCS_SHIFT_OPTIONS or str(cur_shifts) == quality_demucs_shifts(last_q):
+            session["isolate_demucs_shifts"] = new_shifts
+        if cur_overlap not in DEMUCS_OVERLAP_OPTIONS or str(cur_overlap) == quality_demucs_overlap(last_q):
+            session["isolate_demucs_overlap"] = new_overlap
+    session["isolate_demucs_compute_source_quality"] = q
+    if "isolate_demucs_segment" not in session:
+        session["isolate_demucs_segment"] = DEFAULT_DEMUCS_SEGMENT
+    if "isolate_demucs_jobs" not in session:
+        session["isolate_demucs_jobs"] = DEFAULT_DEMUCS_JOBS
+    if session.get("isolate_fold_other_mode") not in FOLD_OTHER_MODES:
+        session["isolate_fold_other_mode"] = "best_effort"
+    if "isolate_low_end_restore_db" not in session:
+        session["isolate_low_end_restore_db"] = 0.0
+
+
+def resolve_pro_engine_job_fields(
+    session: Mapping[str, Any],
+    *,
+    is_pro: bool,
+    model: str,
+    quality: str,
+    two_stems: str | None,
+    two_pass: bool,
+    fold_other_into_guitar: bool,
+    fold_other_mode: str,
+    roformer_available: bool = True,
+) -> dict[str, Any]:
+    """Lite keeps IsolateConfig defaults. Pro reads Engine widget keys.
+
+    Untouched Pro session still matches prior behaviour (quality→shifts/overlap,
+    segment 8, jobs 1, fold best_effort, post knobs off).
+    """
+    resolved_model = str(model or "htdemucs_6s")
+    fold_mode = normalize_fold_other_mode(fold_other_mode)
+    out: dict[str, Any] = {
+        "model": resolved_model,
+        "demucs_shifts": None,
+        "demucs_overlap": None,
+        "demucs_segment": DEFAULT_DEMUCS_SEGMENT,
+        "demucs_jobs": DEFAULT_DEMUCS_JOBS,
+        "fold_other_mode": fold_mode,
+        "adaptive_fold_gain": False,
+        "bleed_gate": False,
+        "bass_bleed_mitigation": False,
+        "sub_bass_debleed": False,
+        "low_end_restore_db": 0.0,
+        "guitar_ensemble": False,
+    }
+    if not is_pro:
+        return out
+    if resolved_model == "htdemucs" and bool(session.get("isolate_htdemucs_ft")):
+        out["model"] = "htdemucs_ft"
+    out["demucs_shifts"] = parse_demucs_shifts(session.get("isolate_demucs_shifts"))
+    if out["demucs_shifts"] is not None and str(out["demucs_shifts"]) == quality_demucs_shifts(quality):
+        out["demucs_shifts"] = None
+    out["demucs_overlap"] = parse_demucs_overlap(session.get("isolate_demucs_overlap"))
+    if out["demucs_overlap"] is not None:
+        default_overlap = float(quality_demucs_overlap(quality))
+        if abs(out["demucs_overlap"] - default_overlap) < 1e-9:
+            out["demucs_overlap"] = None
+    out["demucs_segment"] = parse_demucs_segment(
+        session.get("isolate_demucs_segment", DEFAULT_DEMUCS_SEGMENT)
+    )
+    out["demucs_jobs"] = parse_demucs_jobs(
+        session.get("isolate_demucs_jobs", DEFAULT_DEMUCS_JOBS)
+    )
+    if fold_other_into_guitar:
+        out["fold_other_mode"] = normalize_fold_other_mode(
+            session.get("isolate_fold_other_mode") or fold_mode
+        )
+        out["adaptive_fold_gain"] = bool(session.get("isolate_adaptive_fold_gain"))
+    out["bleed_gate"] = bool(session.get("isolate_bleed_gate"))
+    out["bass_bleed_mitigation"] = bool(session.get("isolate_bass_bleed_mitigation"))
+    out["sub_bass_debleed"] = bool(session.get("isolate_sub_bass_debleed"))
+    try:
+        boost = float(session.get("isolate_low_end_restore_db") or 0.0)
+    except (TypeError, ValueError):
+        boost = 0.0
+    out["low_end_restore_db"] = max(0.0, min(PRO_LOW_END_RESTORE_MAX_DB, boost))
+    ensemble_ok = (
+        bool(roformer_available)
+        and not two_stems
+        and not two_pass
+        and out["model"] in DEMUCS_MODELS
+    )
+    out["guitar_ensemble"] = bool(session.get("isolate_guitar_ensemble")) and ensemble_ok
+    return out
 
 
 def persisted_settings_payload(session: MutableMapping[str, Any]) -> dict[str, Any]:
@@ -1771,6 +2465,110 @@ def plan_isolate_job_poll(
         "notify_only": not auto,
         "rerun": True,
     }
+
+
+ISOLATE_SCROLL_TOP_KEY = "_isolate_scroll_top"
+ISOLATE_SCROLL_TOP_TOKEN_KEY = "_isolate_scroll_top_token"
+MIX_TAB_EVENT_SEQ_KEY = "_mix_tabs_last_seq"
+MIX_TAB_ACTIONS = frozenset({"home", "plus", "focus", "close"})
+
+# Navigation-level Isolate actions: full remount, then scroll the main pane up.
+ISOLATE_SCROLL_TOP_ACTIONS = frozenset(
+    {
+        "enqueue_separate",
+        "shell_nav",
+        "open_mixer",
+        "poll_apply_mixer",
+    }
+)
+
+# In-place controls and 1s job polls: keep the current main-pane scroll.
+ISOLATE_PRESERVE_SCROLL_ACTIONS = frozenset(
+    {
+        "tile_pick",
+        "engine_widget",
+        "region",
+        "upload_youtube",
+        "status_control",
+        "queue_control",
+        "mixer_fader",
+        "poll_progress",
+        "poll_failed",
+    }
+)
+
+
+def request_isolate_scroll_top(session: MutableMapping[str, Any]) -> None:
+    """Ask the Isolate page to scroll ``section.main`` / ``stMain`` on the next paint."""
+    session[ISOLATE_SCROLL_TOP_KEY] = True
+    try:
+        current = int(session.get(ISOLATE_SCROLL_TOP_TOKEN_KEY) or 0)
+    except (TypeError, ValueError):
+        current = 0
+    session[ISOLATE_SCROLL_TOP_TOKEN_KEY] = current + 1
+
+
+def consume_isolate_scroll_top(session: MutableMapping[str, Any]) -> bool:
+    """True once per requested jump. The scroll iframe slot is always mounted."""
+    return bool(session.pop(ISOLATE_SCROLL_TOP_KEY, False))
+
+
+def isolate_scroll_top_token(session: Mapping[str, Any]) -> int:
+    """Monotonic token embedded in the always-on scroll iframe script."""
+    try:
+        return int(session.get(ISOLATE_SCROLL_TOP_TOKEN_KEY) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def consume_mix_tab_event(
+    result: object, last_seq: int
+) -> tuple[int, str | None, str]:
+    """Apply a mix-tabs click once. Replay of the same ``seq`` is ignored.
+
+    Returns ``(new_seq, action, tab_id)``. ``action`` is None when the payload
+    should not change the shell. Payloads without ``seq`` (older builds) still
+    apply once by synthesizing a monotonic seq from ``last_seq``.
+    """
+    try:
+        prev = int(last_seq or 0)
+    except (TypeError, ValueError):
+        prev = 0
+    if not isinstance(result, dict):
+        return prev, None, ""
+    action = str(result.get("action") or "")
+    if action not in MIX_TAB_ACTIONS:
+        return prev, None, ""
+    raw_seq = result.get("seq")
+    try:
+        seq = int(raw_seq) if raw_seq is not None else 0
+    except (TypeError, ValueError):
+        return prev, None, ""
+    if seq <= 0:
+        # Legacy iframe without seq: still accept the click once.
+        seq = prev + 1
+    if seq <= prev:
+        return prev, None, ""
+    return seq, action, str(result.get("id") or "")
+
+
+def should_request_isolate_scroll_top(action: str) -> bool:
+    """Mixed scroll policy: nav/enqueue/Mixer-open vs in-place clicks and polls.
+
+    Unknown actions preserve scroll (do not jump the main pane).
+    """
+    if action in ISOLATE_SCROLL_TOP_ACTIONS:
+        return True
+    return False
+
+
+def isolate_poll_requires_full_rerun(*, applied: bool, plan_rerun: bool) -> bool:
+    """Full-app remount only when a finished job is applied and Mixer must open.
+
+    Running/queued progress ticks and failure toasts stay fragment-local so the
+    New-tab scroll position does not reset every second.
+    """
+    return bool(applied and plan_rerun)
 
 
 ISOLATE_USER_ID_FILENAME = "isolate_user_id"
@@ -2266,6 +3064,8 @@ def children_from_outputs(output_dir: Path) -> dict[str, Path]:
             continue
         name = path.stem
         if _DIAGNOSTIC_FILENAME_MARKER in name:
+            continue
+        if name == "metronome":
             continue
         if stem_energy_db(path) <= RESEPARATE_SILENCE_DBFS:
             continue

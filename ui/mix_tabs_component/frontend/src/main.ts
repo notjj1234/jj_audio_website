@@ -5,6 +5,10 @@ type TabInfo = {
   id: string;
   title: string;
   active?: boolean;
+  /** True while a separation job is bound to this draft tab. */
+  busy?: boolean;
+  /** 0–1 when running; omit for indeterminate (queued / paused). */
+  progress?: number | null;
 };
 
 type Args = {
@@ -15,8 +19,8 @@ type Args = {
 };
 
 function applyTheme(theme?: Theme): void {
-  if (!theme) return;
   const root = document.documentElement;
+  if (!theme) return;
   if (theme.backgroundColor) {
     root.style.setProperty("--mt-bar", theme.backgroundColor);
     root.style.setProperty("--mt-bg", theme.backgroundColor);
@@ -45,8 +49,36 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+function clampProgress(raw: unknown): number | null {
+  if (raw == null || raw === "") return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  return Math.min(1, Math.max(0, n));
+}
+
+function progressMarkup(busy: boolean, progress: number | null): string {
+  if (!busy) return "";
+  if (progress == null) {
+    return `<span class="tab-progress indeterminate" aria-hidden="true"><span class="tab-progress-bar"></span></span>`;
+  }
+  const pct = Math.round(progress * 100);
+  return `<span class="tab-progress" style="--mt-progress:${pct}%" aria-hidden="true"><span class="tab-progress-bar"></span></span>`;
+}
+
+let lastSeq = 0;
+
+function nextSeq(): number {
+  let seq = Date.now();
+  if (seq <= lastSeq) seq = lastSeq + 1;
+  lastSeq = seq;
+  return seq;
+}
+
 function report(action: string, id?: string): void {
-  const payload: { action: string; id?: string } = { action };
+  const payload: { action: string; id?: string; seq: number } = {
+    action,
+    seq: nextSeq(),
+  };
   if (id != null) payload.id = id;
   Streamlit.setComponentValue(payload);
 }
@@ -64,11 +96,16 @@ function renderUI(args: Args): void {
       const id = String(t.id || "");
       const title = escapeHtml(String(t.title || id || "Mix"));
       const active = !!t.active && !homeActive;
+      const busy = !!t.busy;
+      const progress = clampProgress(t.progress);
+      const busyClass = busy ? " busy" : "";
+      const ariaBusy = busy ? ` aria-busy="true"` : "";
       return `
-        <div class="mix-tab${active ? " active" : ""}" data-id="${escapeHtml(id)}" role="tab" aria-selected="${active}">
+        <div class="mix-tab${active ? " active" : ""}${busyClass}" data-id="${escapeHtml(id)}" role="tab" aria-selected="${active}"${ariaBusy}>
           ${docIcon()}
           <span class="title" title="${title}">${title}</span>
           <button type="button" class="close" data-close="${escapeHtml(id)}" aria-label="Close tab" title="Close tab">×</button>
+          ${progressMarkup(busy, progress)}
         </div>`;
     })
     .join("");

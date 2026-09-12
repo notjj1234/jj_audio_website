@@ -14,8 +14,11 @@ from audio_to_tab.mixer import (
     DB_MIN,
     audible_stems,
     db_to_linear,
+    default_muted_for,
+    default_muted_map,
     effective_linear_gains,
     mix_stems_to_wav,
+    sort_stem_names,
     stem_display_name,
     stem_energy_db,
     waveform_peaks,
@@ -32,6 +35,7 @@ def test_stem_display_name_plain_ids_unchanged():
     assert stem_display_name("vocals") == "Vocals"
     assert stem_display_name("lead_guitar") == "Lead Guitar"
     assert stem_display_name("no_vocals") == "Instrumental"
+    assert stem_display_name("metronome") == "Metronome"
 
 
 def test_stem_display_name_composite_id():
@@ -251,3 +255,16 @@ def test_dual_guitar_rejects_identical_channels(tmp_path: Path):
     with pytest.warns(DeprecationWarning, match="split_dual_guitar_stem is deprecated"):
         stems, _ = split_dual_guitar_stem(guitar, tmp_path)
     assert stems == {}
+
+
+def test_metronome_sorts_last_and_starts_muted():
+    names = sort_stem_names(["metronome", "vocals", "drums"])
+    assert names[-1] == "metronome"
+    assert names[0] == "vocals"
+    assert default_muted_for("metronome") is True
+    assert default_muted_for("vocals") is False
+    assert default_muted_map(["vocals", "metronome"]) == {
+        "vocals": False,
+        "metronome": True,
+    }
+

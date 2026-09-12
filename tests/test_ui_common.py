@@ -37,6 +37,20 @@ def test_write_run_metadata_persists_config(tmp_path):
     assert meta["config"] == config
 
 
+def test_write_run_metadata_includes_metronome(tmp_path):
+    run_dir = tmp_path / "run-metro"
+    common.write_run_metadata(
+        run_dir,
+        page="isolate",
+        title="Party",
+        artifacts={"vocals": str(run_dir / "vocals.wav"), "metronome": str(run_dir / "metronome.wav")},
+        metronome={"bpm": 120.0, "beat_count": 32, "confidence": "high", "source": "drums"},
+    )
+    meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+    assert meta["metronome"]["bpm"] == 120.0
+    assert meta["metronome"]["source"] == "drums"
+
+
 def test_write_run_metadata_config_none_omits_key(tmp_path):
     run_dir = tmp_path / "run-no-config"
     common.write_run_metadata(
@@ -48,19 +62,7 @@ def test_write_run_metadata_config_none_omits_key(tmp_path):
     )
     meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
     assert "config" not in meta
-    run_dir = tmp_path / "run-1"
-    common.write_run_metadata(
-        run_dir,
-        page="isolate",
-        title="Party",
-        artifacts={"vocals": str(run_dir / "vocals.wav")},
-        source_kind="youtube",
-        source_fingerprint="youtube:https://youtu.be/abc",
-    )
-    meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
-    assert meta["source_kind"] == "youtube"
-    assert meta["source_fingerprint"] == "youtube:https://youtu.be/abc"
-    assert meta["page"] == "isolate"
+    assert "metronome" not in meta
 
 
 def test_delete_run_removes_directory(tmp_path, monkeypatch):

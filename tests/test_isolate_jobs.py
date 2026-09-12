@@ -30,6 +30,7 @@ from ui.isolate_jobs import (
     merge_library_runs,
     pause_job,
     queued_wait_caption,
+    read_spec,
     read_status,
     remove_job,
     resume_job,
@@ -687,6 +688,25 @@ def test_enqueue_persists_source_kind(jobs_dir: Path):
     rows = list_jobs(limit=5)
     match = next(r for r in rows if r["id"] == "ytjob")
     assert match["source_kind"] == "youtube"
+
+
+def test_enqueue_persists_origin_tab(jobs_dir: Path):
+    spec = IsolateJobSpec(
+        id="draftjob",
+        audio_path=str(jobs_dir / "a.wav"),
+        output_dir=str(jobs_dir / "out"),
+        title="Party",
+        created_at=time.time(),
+        origin_tab="__new__:abc123",
+    )
+    (jobs_dir / "a.wav").write_bytes(b"x")
+    enqueue_job(spec)
+    status = read_status("draftjob")
+    assert status is not None
+    assert status["origin_tab"] == "__new__:abc123"
+    stored = read_spec("draftjob")
+    assert stored is not None
+    assert stored.origin_tab == "__new__:abc123"
 
 
 def test_apply_succeeded_job_to_session_pins_when_requested(tmp_path: Path):

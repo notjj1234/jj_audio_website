@@ -56,8 +56,10 @@ def mix_tabs(
     """
     Render Moises-style top chrome: Home | mix tabs | +.
 
-    ``tabs`` items: ``{id, title, active?}``.
-    Returns ``{action: "home"|"focus"|"close"|"plus", id?}`` or None.
+    ``tabs`` items: ``{id, title, active?, busy?, progress?}``.
+    ``busy`` / ``progress`` (0–1) paint an in-tab loading bar while a draft
+    slot is separating.
+    Returns ``{action: "home"|"focus"|"close"|"plus", id?, seq}`` or None.
     """
     if _mix_tabs is None:
         raise RuntimeError(

@@ -198,6 +198,8 @@ def run_demucs_guitar_ft_inprocess(
     quality: str = "fast",
     segment: int | None = 7,
     jobs: int = 1,
+    shifts: int | None = None,
+    overlap: float | None = None,
 ) -> None:
     """
     Run official HTDemucs-6s with community guitar-ft weights in-process.
@@ -207,6 +209,7 @@ def run_demucs_guitar_ft_inprocess(
 
     ``segment`` (seconds) and ``jobs`` match the CLI ``--segment`` / ``--jobs``
     path so CPU runs stay chunked instead of building a full-track tensor.
+    ``shifts`` / ``overlap`` override the Quality map when set.
     """
     import torch
     import torchaudio
@@ -230,9 +233,17 @@ def run_demucs_guitar_ft_inprocess(
     model.to(dev)
     apply_recommended_cpu_threads(device=dev_name)
 
-    shifts = int({"fast": 0, "balanced": 1, "high": 3, "extreme": 5}.get(quality, 0))
-    overlap = {"fast": 0.25, "balanced": 0.25, "high": 0.5, "extreme": 0.75}.get(
-        quality, 0.25
+    shift_count = (
+        int(shifts)
+        if shifts is not None
+        else int({"fast": 0, "balanced": 1, "high": 3, "extreme": 5}.get(quality, 0))
+    )
+    overlap_val = (
+        float(overlap)
+        if overlap is not None
+        else {"fast": 0.25, "balanced": 0.25, "high": 0.5, "extreme": 0.75}.get(
+            quality, 0.25
+        )
     )
 
     wav, sr = torchaudio.load(str(audio_path))
@@ -242,8 +253,8 @@ def run_demucs_guitar_ft_inprocess(
 
     apply_kwargs: dict = {
         "device": dev,
-        "shifts": shifts,
-        "overlap": overlap,
+        "shifts": shift_count,
+        "overlap": overlap_val,
         "split": True,
         "progress": False,
         "num_workers": max(0, int(jobs)),

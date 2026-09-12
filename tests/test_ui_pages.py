@@ -114,4 +114,7 @@ def test_speed_preset_labels_resolve(isolate_page) -> None:
 
 
 def test_stem_hints_cover_key_stems(isolate_page) -> None:
-    assert {"piano", "guitar"} <= set(isolate_page.STEM_HINTS)
+    assert {"piano", "guitar", "metronome"} <= set(isolate_page.STEM_HINTS)
+    assert "default_muted_for" in (
+        Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    ).read_text(encoding="utf-8")

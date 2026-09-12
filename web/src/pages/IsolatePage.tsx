@@ -28,6 +28,7 @@ const STEM_LABELS: Record<string, string> = {
   rhythm_guitar: "Rhythm (legacy)",
   guitar1: "Guitar 1",
   guitar2: "Guitar 2",
+  metronome: "Metronome",
 };
 
 const ROFORMER_DOWNLOAD_CAVEAT =

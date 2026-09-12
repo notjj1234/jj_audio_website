@@ -245,13 +245,19 @@ st.html(
     min-height: 280px !important;
   }
 
-  /* Isolate status strip: stay at top of the scrolling main pane when present */
+  /* Isolate status strip: stay at top of the scrolling main pane when present.
+     Outer slot is always mounted (idle is empty). Min-height only on the
+     running inner block so 1s progress ticks do not shove the New-tab form. */
   .st-key-isolate_status_strip,
   div[class*="st-key-isolate_status_strip"] {
     position: sticky;
     top: 0;
     z-index: 20;
     background: var(--background-color, inherit);
+  }
+  .st-key-isolate_status_running,
+  div[class*="st-key-isolate_status_running"] {
+    min-height: 6.5rem;
   }
 
   /* Moises Home|mix|+ strip: always visible while scrolling Isolate */
@@ -265,9 +271,19 @@ st.html(
     padding-bottom: 0.2rem;
     margin-bottom: 0.15rem;
   }
+  /* Streamlit can leave leftover custom-component iframes when keys change. */
+  .st-key-isolate_mix_tabs_strip [data-testid="stCustomComponentV1"]:not(:last-of-type),
+  div[class*="st-key-isolate_mix_tabs_strip"] [data-testid="stCustomComponentV1"]:not(:last-of-type),
+  .st-key-isolate_region_picker [data-testid="stCustomComponentV1"]:not(:last-of-type),
+  div[class*="st-key-isolate_region_picker"] [data-testid="stCustomComponentV1"]:not(:last-of-type) {
+    display: none !important;
+    height: 0 !important;
+    max-height: 0 !important;
+    overflow: hidden !important;
+    pointer-events: none !important;
+  }
   .st-key-isolate_mix_tabs_strip [data-testid="stCustomComponentV1"] iframe,
-  div[class*="st-key-isolate_mix_tabs_strip"] iframe,
-  iframe[title*="mix_tabs"] {
+  div[class*="st-key-isolate_mix_tabs_strip"] iframe {
     min-height: 0 !important;
     height: 48px !important;
     max-height: 52px !important;

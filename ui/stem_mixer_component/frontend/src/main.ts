@@ -722,7 +722,7 @@ function renderUI(theme?: Theme): void {
 
   document.getElementById("btn-reset")!.onclick = () => {
     for (const stem of stemInfos) {
-      state.muted[stem.id] = false;
+      state.muted[stem.id] = stem.id === "metronome";
       state.soloed[stem.id] = false;
       state.volumesDb[stem.id] = DB_DEFAULT;
     }
@@ -1120,7 +1120,7 @@ async function onRender(event: Event): Promise<void> {
     for (const s of stems) {
       if (state.volumesDb[s.id] === undefined) state.volumesDb[s.id] = DB_DEFAULT;
       else state.volumesDb[s.id] = clampDb(state.volumesDb[s.id]);
-      if (state.muted[s.id] === undefined) state.muted[s.id] = false;
+      if (state.muted[s.id] === undefined) state.muted[s.id] = s.id === "metronome";
       if (state.soloed[s.id] === undefined) state.soloed[s.id] = false;
     }
     renderUI(data.theme);

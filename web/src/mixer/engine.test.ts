@@ -102,6 +102,13 @@ describe("mixer helpers", () => {
     expect(reset.muted).toEqual({ a: false, b: false });
     expect(reset.soloed).toEqual({ a: false, b: false });
     expect(reset.volumesDb).toEqual({ a: 0, b: 0 });
+
+    const withClick = resetMuteSolo(["vocals", "metronome"], {
+      volumesDb: { vocals: 0, metronome: 0 },
+      muted: { vocals: true, metronome: false },
+      soloed: {},
+    });
+    expect(withClick.muted).toEqual({ vocals: false, metronome: true });
   });
 
   it("ensureAudioContext resumes suspended contexts", async () => {

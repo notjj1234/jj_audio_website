@@ -90,6 +90,13 @@ _BAND = _svg(
     '<circle cx="18" cy="16" r="3"/>'
 )
 
+# Lucide: timer (ISC) — metronome click stem
+_METRONOME = _svg(
+    '<line x1="10" x2="14" y1="2" y2="2"/>'
+    '<line x1="12" x2="15" y1="14" y2="11"/>'
+    '<circle cx="12" cy="14" r="8"/>'
+)
+
 STEM_ICON_SVG: dict[str, str] = {
     "vocals": _MIC,
     "guitar": _GUITAR,
@@ -97,6 +104,7 @@ STEM_ICON_SVG: dict[str, str] = {
     "drums": _DRUMS,
     "piano": _PIANO,
     "other": _OTHER,
+    "metronome": _METRONOME,
 }
 
 OUTCOME_ICON_SVG: dict[str, str] = {

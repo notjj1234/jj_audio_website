@@ -25,6 +25,15 @@ from ui.isolate_state import (
     stem_icon_markdown,
     toggle_custom_stem_options,
     resolve_outcome_card,
+    DEFAULT_LITE_GUITAR_ENGINE,
+    LITE_GUITAR_ENGINE_LABELS,
+    LITE_GUITAR_ENGINE_ORDER,
+    apply_lite_guitar_engine,
+    effective_clip_seconds,
+    lite_guitar_engine_allowed,
+    lite_guitar_engine_disabled_reason,
+    lite_roformer_enqueue_block_reason,
+    resolve_lite_guitar_engine,
     should_show_failed_job,
     UI_MODE_KEY,
     UI_MODES,
@@ -75,6 +84,7 @@ from ui.isolate_state import (
     job_requires_roformer_backend,
     intra_stage_fraction,
     isolation_stages_for_job,
+    isolate_poll_requires_full_rerun,
     isolate_ui_state_payload,
     listen_picker_default,
     load_persist_isolate_user_id,
@@ -90,6 +100,12 @@ from ui.isolate_state import (
     queue_youtube_url,
     read_isolate_ui_state,
     recent_runs_with_owner_fallback,
+    request_isolate_scroll_top,
+    consume_isolate_scroll_top,
+    consume_mix_tab_event,
+    isolate_scroll_top_token,
+    should_request_isolate_scroll_top,
+    ISOLATE_SCROLL_TOP_KEY,
     reset_new_tab_source,
     adopt_audio_into_run,
     discard_youtube_staging,
@@ -244,6 +260,177 @@ def test_toggle_custom_stem_exits_karaoke_and_uses_best_guitar():
     assert demucs == ["guitar_demucs_6s"]
 
 
+def test_effective_clip_seconds_prefers_section_then_file():
+    assert effective_clip_seconds(
+        file_duration_sec=280.0, start_sec=10.0, max_duration_sec=90.0
+    ) == 90.0
+    assert effective_clip_seconds(
+        file_duration_sec=280.0, start_sec=10.0, max_duration_sec=None
+    ) == 270.0
+    assert (
+        effective_clip_seconds(
+            file_duration_sec=None, start_sec=0.0, max_duration_sec=None
+        )
+        is None
+    )
+
+
+def _allow_kwargs(**overrides):
+    base = dict(
+        effective_sec=120.0,
+        cap_sec=180.0,
+        duration_known=True,
+        roformer_available=True,
+    )
+    base.update(overrides)
+    return base
+
+
+def test_lite_guitar_engine_demucs_always_allowed():
+    for kwargs in (
+        _allow_kwargs(),
+        _allow_kwargs(effective_sec=280.0, cap_sec=180.0),
+        _allow_kwargs(effective_sec=None, duration_known=False),
+        _allow_kwargs(roformer_available=False),
+    ):
+        assert lite_guitar_engine_allowed(DEFAULT_LITE_GUITAR_ENGINE, **kwargs) is True
+        assert lite_guitar_engine_allowed("guitar_demucs_6s", **kwargs) is True
+        assert lite_guitar_engine_disabled_reason("guitar_demucs_6s", **kwargs) is None
+
+
+def test_lite_guitar_engine_roformer_disabled_until_length_known_or_over_cap():
+    unknown = _allow_kwargs(effective_sec=None, duration_known=False)
+    assert lite_guitar_engine_allowed("guitar_roformer", **unknown) is False
+    assert lite_guitar_engine_allowed("guitar_roformer_refine", **unknown) is False
+    reason = lite_guitar_engine_disabled_reason("guitar_roformer", **unknown)
+    assert reason is not None
+    assert "length is known" in reason
+
+    over = _allow_kwargs(effective_sec=277.0, cap_sec=180.0)
+    assert lite_guitar_engine_allowed("guitar_roformer", **over) is False
+    assert lite_guitar_engine_allowed("guitar_roformer_refine", **over) is False
+    over_reason = lite_guitar_engine_disabled_reason("guitar_roformer", **over)
+    assert over_reason is not None
+    assert "180" in over_reason
+    assert "277" in over_reason
+
+    short = _allow_kwargs(effective_sec=90.0, cap_sec=180.0)
+    assert lite_guitar_engine_allowed("guitar_roformer", **short) is True
+    assert lite_guitar_engine_allowed("guitar_roformer_refine", **short) is True
+    assert lite_guitar_engine_disabled_reason("guitar_roformer", **short) is None
+
+    at_cap = _allow_kwargs(effective_sec=180.0, cap_sec=180.0)
+    assert lite_guitar_engine_allowed("guitar_roformer", **at_cap) is True
+
+    missing = _allow_kwargs(roformer_available=False, effective_sec=90.0)
+    assert lite_guitar_engine_allowed("guitar_roformer", **missing) is False
+    missing_reason = lite_guitar_engine_disabled_reason("guitar_roformer", **missing)
+    assert missing_reason is not None
+    assert "BS-RoFormer" in missing_reason
+
+
+def test_lite_guitar_engine_falls_back_to_demucs_when_illegal():
+    over = _allow_kwargs(effective_sec=282.0, cap_sec=180.0)
+    engine, fell_back = resolve_lite_guitar_engine("guitar_roformer", **over)
+    assert engine == DEFAULT_LITE_GUITAR_ENGINE
+    assert fell_back is True
+
+    refine, refine_fell = resolve_lite_guitar_engine("guitar_roformer_refine", **over)
+    assert refine == DEFAULT_LITE_GUITAR_ENGINE
+    assert refine_fell is True
+
+    unknown = _allow_kwargs(effective_sec=None, duration_known=False)
+    engine, fell_back = resolve_lite_guitar_engine("guitar_roformer", **unknown)
+    assert engine == DEFAULT_LITE_GUITAR_ENGINE
+    assert fell_back is True
+
+    short = _allow_kwargs(effective_sec=90.0, cap_sec=180.0)
+    engine, fell_back = resolve_lite_guitar_engine("guitar_roformer_refine", **short)
+    assert engine == "guitar_roformer_refine"
+    assert fell_back is False
+
+    engine, fell_back = resolve_lite_guitar_engine("not-an-engine", **short)
+    assert engine == DEFAULT_LITE_GUITAR_ENGINE
+    assert fell_back is False
+
+    engine, fell_back = resolve_lite_guitar_engine(None, **over)
+    assert engine == DEFAULT_LITE_GUITAR_ENGINE
+    assert fell_back is False
+
+
+def test_apply_lite_guitar_engine_swaps_guitar_and_leaves_karaoke():
+    band = ["vocals_demucs", "drums_demucs", "bass_demucs", "guitar_demucs_6s"]
+    assert apply_lite_guitar_engine(band, "guitar_roformer") == [
+        "vocals_demucs",
+        "drums_demucs",
+        "bass_demucs",
+        "guitar_roformer",
+    ]
+    assert apply_lite_guitar_engine(["vocals_instrumental_demucs"], "guitar_roformer") == [
+        "vocals_instrumental_demucs"
+    ]
+    assert apply_lite_guitar_engine(["guitar_roformer"], "guitar_demucs_6s") == [
+        "guitar_demucs_6s"
+    ]
+
+
+def test_lite_outcomes_honor_explicit_guitar_engine():
+    assert LITE_GUITAR_ENGINE_ORDER == (
+        "guitar_demucs_6s",
+        "guitar_roformer",
+        "guitar_roformer_refine",
+    )
+    assert LITE_GUITAR_ENGINE_LABELS["guitar_demucs_6s"] == "Faster (Demucs)"
+    assert LITE_GUITAR_ENGINE_LABELS["guitar_roformer"] == "Better guitar (BS-RoFormer)"
+    assert (
+        LITE_GUITAR_ENGINE_LABELS["guitar_roformer_refine"]
+        == "Best / slower (BS-RoFormer + MelBand)"
+    )
+    guitar = resolve_outcome_card(
+        "guitar",
+        roformer_available=True,
+        guitar_option="guitar_demucs_6s",
+    )
+    assert guitar == ["guitar_demucs_6s"]
+    band = resolve_outcome_card(
+        "band",
+        roformer_available=True,
+        guitar_option="guitar_roformer_refine",
+    )
+    assert "guitar_roformer_refine" in band
+    assert outcome_card_for_options(
+        band,
+        roformer_available=True,
+        guitar_option="guitar_roformer_refine",
+    ) == "band"
+    added = toggle_custom_stem_options(
+        [],
+        "guitar",
+        roformer_available=True,
+        guitar_option="guitar_roformer_refine",
+    )
+    assert added == ["guitar_roformer_refine"]
+
+
+def test_lite_roformer_enqueue_is_blocked_when_over_cap_or_unknown():
+    over = _allow_kwargs(effective_sec=277.0, cap_sec=180.0)
+    reason = lite_roformer_enqueue_block_reason("bs_roformer_sw", **over)
+    assert reason is not None
+    assert "180" in reason
+    assert "277" in reason
+    assert lite_roformer_enqueue_block_reason("htdemucs_6s", **over) is None
+    assert lite_roformer_enqueue_block_reason("htdemucs", **over) is None
+
+    short = _allow_kwargs(effective_sec=90.0, cap_sec=180.0)
+    assert lite_roformer_enqueue_block_reason("bs_roformer_sw", **short) is None
+    assert lite_roformer_enqueue_block_reason("melband_roformer_guitar", **short) is None
+
+    unknown = _allow_kwargs(effective_sec=None, duration_known=False)
+    unknown_reason = lite_roformer_enqueue_block_reason("bs_roformer_sw", **unknown)
+    assert unknown_reason is not None
+    assert "length is known" in unknown_reason
+
+
 def test_custom_stem_tile_order_is_this_apps_stems_not_moises_extras():
     assert set(CUSTOM_STEM_TILE_ORDER) == set(CUSTOM_STEM_CHOICES)
     assert CUSTOM_STEM_TILE_ORDER == (
@@ -278,8 +465,11 @@ def test_lite_outcome_picker_uses_card_keys_not_pro_track_picker():
     ]
     assert "OUTCOME_CARD_KEY" in picker
     assert 'key=f"isolate_outcome_pick_{card_id}"' in tile
-    for card_id in OUTCOME_CARD_ORDER:
+    for card_id in ("band", "karaoke"):
         assert f'"{card_id}"' in picker
+    assert "**One track**" not in picker
+    assert '"guitar"' not in picker.split("_render_custom_stem_grid")[0]
+    assert '"vocals"' not in picker.split("_render_custom_stem_grid")[0]
     assert "CUSTOM_STEM_TILE_ORDER" in grid
     assert 'key=f"isolate_stem_pick_{stem_id}"' in source
     assert "icon=STEM_TILE_EMOJI" not in source
@@ -301,7 +491,7 @@ def test_lite_outcome_picker_uses_card_keys_not_pro_track_picker():
     assert 'key="isolate_guitar_track"' in track
     assert "resolve_outcome_card(" in tile
     branch = controls[controls.find("pro = is_pro_mode") : controls.find("custom_stems =")]
-    assert "_render_outcome_picker(" in branch
+    assert "_render_section_and_outcomes(" in branch
     assert "prefer_roformer=prefer_roformer" in branch
     assert "get_desktop_probe()" in controls
     assert "lite_auto_speed_id(probe)" in controls
@@ -340,7 +530,209 @@ def test_persisted_settings_include_lite_run_on():
     from ui.isolate_state import PERSISTED_SETTING_KEYS
 
     assert "isolate_lite_run_on" in PERSISTED_SETTING_KEYS
+    assert "isolate_lite_guitar_engine" in PERSISTED_SETTING_KEYS
     assert "isolate_device" in PERSISTED_SETTING_KEYS
+    assert "isolate_demucs_shifts" in PERSISTED_SETTING_KEYS
+    assert "isolate_fold_other_mode" in PERSISTED_SETTING_KEYS
+    assert "isolate_guitar_ensemble" in PERSISTED_SETTING_KEYS
+    assert "isolate_bass_bleed_mitigation" in PERSISTED_SETTING_KEYS
+    assert "isolate_htdemucs_ft" in PERSISTED_SETTING_KEYS
+
+
+def _lite_engine_kwargs(**overrides):
+    base = dict(
+        is_pro=False,
+        model="htdemucs_6s",
+        quality="fast",
+        two_stems=None,
+        two_pass=False,
+        fold_other_into_guitar=True,
+        fold_other_mode="best_effort",
+        roformer_available=True,
+    )
+    base.update(overrides)
+    return base
+
+
+def test_lite_engine_job_fields_ignore_pro_session_and_keep_defaults():
+    from ui.isolate_state import resolve_pro_engine_job_fields
+
+    session = {
+        "isolate_demucs_shifts": "5",
+        "isolate_demucs_overlap": "0.75",
+        "isolate_demucs_segment": 0,
+        "isolate_demucs_jobs": 4,
+        "isolate_sub_bass_debleed": True,
+        "isolate_bleed_gate": True,
+        "isolate_bass_bleed_mitigation": True,
+        "isolate_adaptive_fold_gain": True,
+        "isolate_guitar_ensemble": True,
+        "isolate_low_end_restore_db": 6.0,
+        "isolate_fold_other_mode": "full",
+        "isolate_htdemucs_ft": True,
+    }
+    fields = resolve_pro_engine_job_fields(session, **_lite_engine_kwargs())
+    assert fields["demucs_shifts"] is None
+    assert fields["demucs_overlap"] is None
+    assert fields["demucs_segment"] == 8
+    assert fields["demucs_jobs"] == 1
+    assert fields["fold_other_mode"] == "best_effort"
+    assert fields["adaptive_fold_gain"] is False
+    assert fields["bleed_gate"] is False
+    assert fields["bass_bleed_mitigation"] is False
+    assert fields["sub_bass_debleed"] is False
+    assert fields["low_end_restore_db"] == 0.0
+    assert fields["guitar_ensemble"] is False
+    assert fields["model"] == "htdemucs_6s"
+
+
+def test_pro_engine_job_fields_map_compute_and_guitar_post():
+    from ui.isolate_state import resolve_pro_engine_job_fields
+
+    session = {
+        "isolate_demucs_shifts": "5",
+        "isolate_demucs_overlap": "0.75",
+        "isolate_demucs_segment": 0,
+        "isolate_demucs_jobs": 2,
+        "isolate_fold_other_mode": "band_limited",
+        "isolate_adaptive_fold_gain": True,
+        "isolate_bleed_gate": True,
+        "isolate_bass_bleed_mitigation": True,
+        "isolate_sub_bass_debleed": True,
+        "isolate_low_end_restore_db": 4.0,
+        "isolate_guitar_ensemble": True,
+    }
+    fields = resolve_pro_engine_job_fields(
+        session, **_lite_engine_kwargs(is_pro=True, quality="fast")
+    )
+    assert fields["demucs_shifts"] == 5
+    assert fields["demucs_overlap"] == pytest.approx(0.75)
+    assert fields["demucs_segment"] is None
+    assert fields["demucs_jobs"] == 2
+    assert fields["fold_other_mode"] == "band_limited"
+    assert fields["adaptive_fold_gain"] is True
+    assert fields["bleed_gate"] is True
+    assert fields["bass_bleed_mitigation"] is True
+    assert fields["sub_bass_debleed"] is True
+    assert fields["low_end_restore_db"] == 4.0
+    assert fields["guitar_ensemble"] is True
+
+
+def test_pro_engine_matching_quality_map_does_not_send_shift_overrides():
+    from ui.isolate_state import resolve_pro_engine_job_fields
+
+    session = {"isolate_demucs_shifts": "0", "isolate_demucs_overlap": "0.25"}
+    fields = resolve_pro_engine_job_fields(
+        session, **_lite_engine_kwargs(is_pro=True, quality="fast")
+    )
+    assert fields["demucs_shifts"] is None
+    assert fields["demucs_overlap"] is None
+
+
+def test_sync_demucs_compute_defaults_resets_unless_overridden():
+    from ui.isolate_state import sync_demucs_compute_defaults
+
+    session: dict = {"isolate_demucs_shifts": "0", "isolate_demucs_overlap": "0.25"}
+    sync_demucs_compute_defaults(session, quality="fast")
+    assert session["isolate_demucs_shifts"] == "0"
+    sync_demucs_compute_defaults(session, quality="extreme")
+    assert session["isolate_demucs_shifts"] == "5"
+    assert session["isolate_demucs_overlap"] == "0.75"
+
+    session["isolate_demucs_shifts"] = "1"
+    sync_demucs_compute_defaults(session, quality="fast")
+    assert session["isolate_demucs_shifts"] == "1"
+    assert session["isolate_demucs_overlap"] == "0.25"
+
+
+def test_pro_htdemucs_ft_only_for_four_stem_and_ensemble_guards():
+    from ui.isolate_state import resolve_pro_engine_job_fields
+
+    session = {"isolate_htdemucs_ft": True, "isolate_guitar_ensemble": True}
+    four = resolve_pro_engine_job_fields(
+        session, **_lite_engine_kwargs(is_pro=True, model="htdemucs")
+    )
+    assert four["model"] == "htdemucs_ft"
+    assert four["guitar_ensemble"] is True
+
+    six = resolve_pro_engine_job_fields(
+        session, **_lite_engine_kwargs(is_pro=True, model="htdemucs_6s")
+    )
+    assert six["model"] == "htdemucs_6s"
+
+    blocked = resolve_pro_engine_job_fields(
+        session,
+        **_lite_engine_kwargs(is_pro=True, model="htdemucs_6s", two_pass=True),
+    )
+    assert blocked["guitar_ensemble"] is False
+
+    no_ro = resolve_pro_engine_job_fields(
+        session,
+        **_lite_engine_kwargs(is_pro=True, model="htdemucs_6s", roformer_available=False),
+    )
+    assert no_ro["guitar_ensemble"] is False
+
+
+def test_fold_mode_ignored_when_custom_keeps_other():
+    from ui.isolate_state import resolve_pro_engine_job_fields
+
+    session = {"isolate_fold_other_mode": "full", "isolate_adaptive_fold_gain": True}
+    fields = resolve_pro_engine_job_fields(
+        session,
+        **_lite_engine_kwargs(
+            is_pro=True, fold_other_into_guitar=False, fold_other_mode="best_effort"
+        ),
+    )
+    assert fields["fold_other_mode"] == "best_effort"
+    assert fields["adaptive_fold_gain"] is False
+
+
+def test_isolate_job_spec_carries_pro_engine_fields_into_config_kwargs():
+    from ui.isolate_jobs import IsolateJobSpec, isolate_config_kwargs_from_spec
+
+    default = IsolateJobSpec(
+        id="j", audio_path="a.wav", output_dir="out", title="t"
+    )
+    kwargs = isolate_config_kwargs_from_spec(default)
+    assert kwargs["demucs_shifts"] is None
+    assert kwargs["demucs_overlap"] is None
+    assert kwargs["demucs_segment"] == 8
+    assert kwargs["demucs_jobs"] == 1
+    assert kwargs["bleed_gate"] is False
+    assert kwargs["bass_bleed_mitigation"] is False
+    assert kwargs["guitar_ensemble"] is False
+    assert kwargs["lead_rhythm"] is False
+
+    spec = IsolateJobSpec(
+        id="j2",
+        audio_path="a.wav",
+        output_dir="out",
+        title="t",
+        demucs_shifts=5,
+        demucs_overlap=0.75,
+        demucs_segment=None,
+        demucs_jobs=2,
+        bleed_gate=True,
+        bass_bleed_mitigation=True,
+        adaptive_fold_gain=True,
+        guitar_ensemble=True,
+        fold_other_mode="band_limited",
+        low_end_restore_db=3.0,
+        sub_bass_debleed=True,
+    )
+    restored = IsolateJobSpec.from_dict(spec.to_dict())
+    mapped = isolate_config_kwargs_from_spec(restored)
+    assert mapped["demucs_shifts"] == 5
+    assert mapped["demucs_overlap"] == pytest.approx(0.75)
+    assert mapped["demucs_segment"] is None
+    assert mapped["demucs_jobs"] == 2
+    assert mapped["bleed_gate"] is True
+    assert mapped["bass_bleed_mitigation"] is True
+    assert mapped["adaptive_fold_gain"] is True
+    assert mapped["guitar_ensemble"] is True
+    assert mapped["fold_other_mode"] == "band_limited"
+    assert mapped["low_end_restore_db"] == pytest.approx(3.0)
+    assert mapped["sub_bass_debleed"] is True
 
 
 def test_isolate_headings_disable_anchors_and_tiles_use_fragment_rerun():
@@ -360,16 +752,23 @@ def test_isolate_headings_disable_anchors_and_tiles_use_fragment_rerun():
     assert "stHeaderActionElements" in app_css
     assert 'markdown("### Separate tracks")' not in source
     picker = source[
-        source.find("@st.fragment") : source.find("def _render_engine_panel")
+        source.find("def _render_outcome_picker") : source.find("def _render_engine_panel")
     ]
-    assert "def _render_outcome_picker" in picker
     assert "_render_engine_panel(" in picker
     assert 'key="isolate_speed_preset"' in picker
+    section_head = source[
+        max(0, source.find("def _render_section_and_outcomes") - 40) : source.find(
+            "def _render_section_and_outcomes"
+        )
+        + 40
+    ]
+    assert "@st.fragment" in section_head
     rerun_fn = source[
-        source.find("def _rerun_after_tile_pick") : source.find("def _render_custom_stem_grid")
+        source.find("def _rerun_preserve_scroll") : source.find("def _render_custom_stem_grid")
     ]
     assert 'st.rerun(scope="fragment")' in rerun_fn
     assert "is_pro_mode" not in rerun_fn
+    assert "def _rerun_scroll_top" in rerun_fn
     assert "_rerun_after_tile_pick()" in source[
         source.find("def _render_outcome_tile") : source.find("def _render_custom_stem_grid")
     ]
@@ -855,13 +1254,28 @@ def test_youtube_search_use_queues_hit_title():
         source.find("def _youtube_search_dialog") : source.find("def _stateful_expander")
     ]
     assert "queue_youtube_url(st.session_state, url, title=title)" in dialog
-    assert "ISOLATE_YOUTUBE_AUTO_DOWNLOAD_KEY" in dialog
+    assert "_download_youtube_with_status(" in dialog
+    assert "st.status(" in source[
+        source.find("def _download_youtube_with_status") : source.find(
+            "def _youtube_search_dialog"
+        )
+    ]
+    assert "Downloading" in dialog or "Downloading" in source[
+        source.find("def _download_youtube_with_status") : source.find(
+            "def _youtube_search_dialog"
+        )
+    ]
+    # Use downloads in-dialog; do not close-first + silent auto-download.
+    use_block = dialog[dialog.find('key=f"isolate_youtube_pick_') :]
+    assert "_close_youtube_search_dialog()" in use_block
+    assert use_block.find("_download_youtube_with_status(") < use_block.find(
+        "_close_youtube_search_dialog()"
+    )
     controls = source[
         source.find("def _render_separation_controls") : source.find("def _ffmpeg_install_hint")
     ]
-    assert "_stage_youtube_audio(" in controls
-    assert "ISOLATE_YOUTUBE_AUTO_DOWNLOAD_KEY" in controls
-    assert "auto_download" in controls
+    assert "_download_youtube_with_status(" in controls
+    assert 'key="isolate_youtube_download"' in controls
 
 
 def test_enqueue_confirmed_job_opens_queue_with_loading_overlay():
@@ -870,17 +1284,32 @@ def test_enqueue_confirmed_job_opens_queue_with_loading_overlay():
     enqueue = source[
         source.find("def _enqueue_confirmed_job") : source.find("def _library_status_row")
     ]
-    # Overlay on Home first; queue stays on Home below the form.
+    # Overlay first; draft-origin jobs stay on that tab instead of jumping Home.
     assert '["_isolate_pending_queue"] = True' in enqueue
     assert "_request_loading_overlay()" in enqueue
+    assert "_rerun_scroll_top()" in enqueue
+    assert "origin_tab=" in enqueue
+    assert "mark_draft_tab_processing" in enqueue
+    assert '["_isolate_keep_draft_tab"]' in enqueue
     assert 'WORKSPACE_NEXT_KEY] = "Queue"' not in enqueue
     main_tail = source[source.find('st.session_state["_isolate_form_drawn"]') :]
     assert 'pop("_isolate_pending_queue"' in main_tail
+    assert 'pop("_isolate_keep_draft_tab"' in main_tail
     assert "open_home_shell" in main_tail
-    assert '["_isolate_scroll_top"] = True' in main_tail
+    assert "_rerun_scroll_top()" in main_tail
     assert "def _scroll_main_to_top" in source
-    assert 'pop("_isolate_scroll_top"' in source
-    assert "_scroll_main_to_top()" in source
+    assert "isolate_scroll_top_token" in source
+    assert "_scroll_main_to_top(" in source
+    assert source.count("components.html") == 1
+    poll = source[
+        source.find("def _poll_running_jobs") : source.find("def _queue_tab_fragment")
+    ]
+    assert "promote_job_origin_tab" in poll
+    tabs = source[
+        source.find("def _render_moises_tab_strip") : source.find("def _has_source_for_job")
+    ]
+    assert "draft_tab_job_overlays" in tabs
+    assert 'item["busy"]' in tabs or '"busy"' in tabs
     css = (
         Path(__file__).resolve().parents[1] / "ui" / "app.py"
     ).read_text(encoding="utf-8")
@@ -1189,26 +1618,27 @@ def test_apply_listen_picker_pending_sets_widget_key():
 def test_open_mix_tabs_add_close_and_cap(tmp_path: Path):
     from ui.isolate_state import (
         OPEN_MIX_TABS_KEY,
+        OPEN_MIX_TABS_MAX,
         add_open_mix_tab,
         close_open_mix_tab,
         normalize_open_mix_tabs,
     )
 
     dirs = []
-    for i in range(10):
+    for i in range(OPEN_MIX_TABS_MAX + 2):
         d = tmp_path / f"run{i}"
         d.mkdir()
         dirs.append(str(d))
     session: dict = {}
     for d in dirs:
-        add_open_mix_tab(session, d, cap=8)
-    assert len(session[OPEN_MIX_TABS_KEY]) == 8
+        add_open_mix_tab(session, d, cap=OPEN_MIX_TABS_MAX)
+    assert len(session[OPEN_MIX_TABS_KEY]) == OPEN_MIX_TABS_MAX
     assert session[OPEN_MIX_TABS_KEY][0] == dirs[2]
-    assert session[OPEN_MIX_TABS_KEY][-1] == dirs[9]
+    assert session[OPEN_MIX_TABS_KEY][-1] == dirs[OPEN_MIX_TABS_MAX + 1]
 
     # Focusing an already-open tab must not move it to the end.
     before = list(session[OPEN_MIX_TABS_KEY])
-    add_open_mix_tab(session, dirs[2], cap=8)
+    add_open_mix_tab(session, dirs[2], cap=OPEN_MIX_TABS_MAX)
     assert session[OPEN_MIX_TABS_KEY] == before
     assert session[OPEN_MIX_TABS_KEY].count(dirs[2]) == 1
     assert session[OPEN_MIX_TABS_KEY][0] == dirs[2]
@@ -1221,15 +1651,16 @@ def test_open_mix_tabs_add_close_and_cap(tmp_path: Path):
     assert capped == [dirs[0], dirs[1]]
 
 
-def test_plus_opens_literal_new_draft_tab(tmp_path: Path):
+def test_plus_opens_distinct_new_draft_tabs(tmp_path: Path):
     from ui.isolate_state import (
+        DRAFT_SOURCES_KEY,
         NEW_DRAFT_TAB_ID,
         OPEN_MIX_TABS_KEY,
         SHELL_TAB_KEY,
-        SHELL_VIEW_KEY,
         add_open_mix_tab,
         apply_shell_view,
         close_open_mix_tab,
+        draft_tab_title,
         focus_new_draft_tab,
         is_new_draft_tab,
         open_home_shell,
@@ -1240,32 +1671,132 @@ def test_plus_opens_literal_new_draft_tab(tmp_path: Path):
     run = tmp_path / "mix"
     run.mkdir()
     session: dict = {OPEN_MIX_TABS_KEY: [str(run)]}
-    open_new_draft_tab(session, fresh=False)
-    assert session[OPEN_MIX_TABS_KEY][-1] == NEW_DRAFT_TAB_ID
-    assert session[SHELL_TAB_KEY] == NEW_DRAFT_TAB_ID
+    first = open_new_draft_tab(session, fresh=False)
+    assert is_new_draft_tab(first)
+    assert first != NEW_DRAFT_TAB_ID
+    assert session[OPEN_MIX_TABS_KEY][-1] == first
+    assert session[SHELL_TAB_KEY] == first
     assert apply_shell_view(session) == "home"
-    assert is_new_draft_tab(NEW_DRAFT_TAB_ID)
+
+    session["isolate_pending_audio_path"] = str(tmp_path / "song_a.wav")
+    session["isolate_output_name"] = "Song A"
+    second = open_new_draft_tab(session, fresh=True)
+    assert second != first
+    assert session[OPEN_MIX_TABS_KEY].count(first) == 1
+    assert session[OPEN_MIX_TABS_KEY].count(second) == 1
+    assert session[SHELL_TAB_KEY] == second
+    assert not session.get("isolate_pending_audio_path")
+    assert draft_tab_title(session, first) == "Song A"
+    assert draft_tab_title(session, second) == "New"
+
+    focus_new_draft_tab(session, first)
+    assert session[SHELL_TAB_KEY] == first
+    assert session.get("isolate_output_name") == "Song A"
+    assert "song_a" in str(session.get("isolate_pending_audio_path") or "")
 
     tabs = open_mix_tabs_for_session(session, library_dirs=[str(run)])
-    assert NEW_DRAFT_TAB_ID in tabs
-    assert str(run) in tabs
+    assert first in tabs and second in tabs and str(run) in tabs
 
     open_home_shell(session)
     assert session[SHELL_TAB_KEY] == "home"
-    assert apply_shell_view(session) == "home"
-    assert NEW_DRAFT_TAB_ID in session[OPEN_MIX_TABS_KEY]
+    assert first in session[OPEN_MIX_TABS_KEY]
 
-    focus_new_draft_tab(session)
-    assert session[SHELL_TAB_KEY] == NEW_DRAFT_TAB_ID
+    neighbor = close_open_mix_tab(session, first)
+    assert first not in session[OPEN_MIX_TABS_KEY]
+    assert first not in (session.get(DRAFT_SOURCES_KEY) or {})
+    assert neighbor in session[OPEN_MIX_TABS_KEY]
 
-    neighbor = close_open_mix_tab(session, NEW_DRAFT_TAB_ID)
-    assert NEW_DRAFT_TAB_ID not in session[OPEN_MIX_TABS_KEY]
-    assert neighbor == str(run)
-
-    # Draft survives normalize without a real directory.
+    # Legacy __new__ id still counts as a draft.
     add_open_mix_tab(session, NEW_DRAFT_TAB_ID)
+    assert is_new_draft_tab(NEW_DRAFT_TAB_ID)
     assert NEW_DRAFT_TAB_ID in session[OPEN_MIX_TABS_KEY]
-    assert session[SHELL_VIEW_KEY] == "home"
+
+
+def test_promote_draft_tab_to_run_keeps_slot(tmp_path: Path):
+    from ui.isolate_state import (
+        DRAFT_SOURCES_KEY,
+        OPEN_MIX_TABS_KEY,
+        SHELL_TAB_KEY,
+        draft_tab_job_overlays,
+        mark_draft_tab_processing,
+        open_new_draft_tab,
+        promote_job_origin_tab,
+        replace_open_mix_tab,
+    )
+
+    other = tmp_path / "other"
+    other.mkdir()
+    run = tmp_path / "finished"
+    run.mkdir()
+    session: dict = {OPEN_MIX_TABS_KEY: [str(other)]}
+    draft = open_new_draft_tab(session, fresh=True)
+    mark_draft_tab_processing(session, draft, title="My Song")
+    assert session[SHELL_TAB_KEY] == draft
+    assert session[DRAFT_SOURCES_KEY][draft]["isolate_output_name"] == "My Song"
+
+    overlays = draft_tab_job_overlays(
+        [
+            {
+                "id": "j1",
+                "status": "running",
+                "progress": 0.42,
+                "title": "My Song",
+                "origin_tab": draft,
+            },
+            {
+                "id": "j2",
+                "status": "queued",
+                "progress": 0.0,
+                "title": "Other",
+                "origin_tab": "__new__:gone",
+            },
+            {"id": "j3", "status": "succeeded", "origin_tab": draft},
+        ]
+    )
+    assert overlays[draft]["progress"] == pytest.approx(0.42)
+    assert overlays[draft]["busy"] is True
+    assert "__new__:gone" in overlays
+    assert overlays["__new__:gone"]["progress"] is None
+
+    promoted = promote_job_origin_tab(
+        session,
+        {"run_dir": str(run), "origin_tab": draft},
+    )
+    assert promoted == str(run)
+    assert session[OPEN_MIX_TABS_KEY] == [str(other), str(run)]
+    assert draft not in session[OPEN_MIX_TABS_KEY]
+    assert draft not in session.get(DRAFT_SOURCES_KEY, {})
+    assert session.get(SHELL_TAB_KEY) != draft
+
+    session2: dict = {OPEN_MIX_TABS_KEY: [str(other)]}
+    assert promote_job_origin_tab(session2, {"run_dir": str(run)}) == str(run)
+    assert session2[OPEN_MIX_TABS_KEY] == [str(other), str(run)]
+
+    session3: dict = {OPEN_MIX_TABS_KEY: [str(other)]}
+    replace_open_mix_tab(session3, "__new__:missing", str(run))
+    assert session3[OPEN_MIX_TABS_KEY] == [str(other), str(run)]
+
+
+def test_normalize_prefers_dropping_mixes_before_drafts(tmp_path: Path):
+    from ui.isolate_state import (
+        NEW_DRAFT_TAB_PREFIX,
+        normalize_open_mix_tabs,
+    )
+
+    mixes = []
+    for i in range(10):
+        d = tmp_path / f"m{i}"
+        d.mkdir()
+        mixes.append(str(d))
+    drafts = [f"{NEW_DRAFT_TAB_PREFIX}:{i}" for i in range(3)]
+    tabs = drafts + mixes
+    out = normalize_open_mix_tabs(
+        tabs, cap=8, require_dir=False, protect=[drafts[0]]
+    )
+    assert drafts[0] in out
+    assert all(d in out for d in drafts)
+    assert len(out) == 8
+    assert sum(1 for p in out if not p.startswith(NEW_DRAFT_TAB_PREFIX)) == 5
 
 
 def test_isolate_ui_state_roundtrips_open_mix_tabs():
@@ -1409,6 +1940,77 @@ def test_poll_defers_new_success_until_form_is_drawn():
     )
     assert settled["apply_job"] is None
     assert settled["rerun"] is False
+
+
+def test_scroll_policy_preserves_poll_and_jumps_on_nav():
+    assert should_request_isolate_scroll_top("poll_progress") is False
+    assert should_request_isolate_scroll_top("poll_failed") is False
+    assert should_request_isolate_scroll_top("tile_pick") is False
+    assert should_request_isolate_scroll_top("engine_widget") is False
+    assert should_request_isolate_scroll_top("region") is False
+    assert should_request_isolate_scroll_top("status_control") is False
+    assert should_request_isolate_scroll_top("mixer_fader") is False
+    assert should_request_isolate_scroll_top("unknown_widget") is False
+    assert should_request_isolate_scroll_top("enqueue_separate") is True
+    assert should_request_isolate_scroll_top("shell_nav") is True
+    assert should_request_isolate_scroll_top("open_mixer") is True
+    assert should_request_isolate_scroll_top("poll_apply_mixer") is True
+    session: dict = {}
+    request_isolate_scroll_top(session)
+    assert session[ISOLATE_SCROLL_TOP_KEY] is True
+    assert isolate_scroll_top_token(session) == 1
+    request_isolate_scroll_top(session)
+    assert isolate_scroll_top_token(session) == 2
+    assert consume_isolate_scroll_top(session) is True
+    assert consume_isolate_scroll_top(session) is False
+
+
+def test_consume_mix_tab_event_applies_once_per_seq():
+    last, action, tab_id = consume_mix_tab_event(None, 0)
+    assert last == 0 and action is None and tab_id == ""
+    last, action, tab_id = consume_mix_tab_event({"action": "plus"}, 0)
+    assert last == 1 and action == "plus"
+    last, action, tab_id = consume_mix_tab_event({"action": "plus", "seq": 10}, 0)
+    assert last == 10 and action == "plus" and tab_id == ""
+    last, action, tab_id = consume_mix_tab_event({"action": "plus", "seq": 10}, 10)
+    assert last == 10 and action is None
+    last, action, tab_id = consume_mix_tab_event(
+        {"action": "focus", "id": "/runs/a", "seq": 11}, 10
+    )
+    assert last == 11 and action == "focus" and tab_id == "/runs/a"
+    last, action, tab_id = consume_mix_tab_event({"action": "home", "seq": 12}, 11)
+    assert action == "home"
+    last, action, tab_id = consume_mix_tab_event(
+        {"action": "close", "id": "__new__", "seq": 13}, 12
+    )
+    assert action == "close" and tab_id == "__new__"
+    last, action, tab_id = consume_mix_tab_event({"action": "nope", "seq": 14}, 13)
+    assert last == 13 and action is None
+    # Missing seq still applies once (older iframe builds).
+    last, action, tab_id = consume_mix_tab_event({"action": "plus"}, 20)
+    assert last == 21 and action == "plus"
+
+
+def test_running_poll_does_not_full_rerun_or_scroll_top():
+    jobs = [
+        {"id": "run", "status": "running"},
+        {"id": "wait", "status": "queued"},
+    ]
+    seeded = plan_isolate_job_poll(
+        jobs, consumed_ids=None, viewing_id=None, form_drawn=False
+    )
+    plan = plan_isolate_job_poll(
+        jobs,
+        consumed_ids=seeded["consumed_ids"],
+        viewing_id=None,
+        form_drawn=True,
+    )
+    assert plan["apply_job"] is None
+    assert plan["rerun"] is False
+    assert isolate_poll_requires_full_rerun(applied=False, plan_rerun=plan["rerun"]) is False
+    assert should_request_isolate_scroll_top("poll_progress") is False
+    assert isolate_poll_requires_full_rerun(applied=False, plan_rerun=True) is False
+    assert isolate_poll_requires_full_rerun(applied=True, plan_rerun=True) is True
 
 
 def test_os_notify_seeds_historical_jobs_and_fires_for_new_terminal():
@@ -1748,6 +2350,44 @@ def test_poll_and_queue_fragments_run_every_one_second():
     source = page.read_text(encoding="utf-8")
     assert source.count("@st.fragment(run_every=1.0)") == 2
     assert "run_every=2.0" not in source
+    poll = source[
+        source.find("def _poll_running_jobs") : source.find("def _queue_tab_fragment")
+    ]
+    assert "isolate_poll_requires_full_rerun" in poll
+    assert "_rerun_scroll_top()" in poll
+    assert "failed_flash" not in poll
+    queue_row = source[
+        source.find("def _render_queue_job_row") : source.find("def _render_failed_strip")
+    ]
+    assert "_rerun_preserve_scroll()" in queue_row
+    assert "_rerun_scroll_top()" in queue_row
+    assert "open_mixer_" in queue_row
+    tabs = source[
+        source.find("def _render_moises_tab_strip") : source.find("def _has_source_for_job")
+    ]
+    assert tabs.count("_rerun_scroll_top()") >= 4
+    assert "st.rerun()" not in tabs
+    assert 'key="isolate_moises_tabs"' in tabs
+    assert "_mix_tabs_nonce" not in tabs
+    assert "isolate_moises_tabs_{nonce}" not in tabs
+    assert "consume_mix_tab_event" in tabs
+    status = source[
+        source.find("def _render_status_strip") : source.find("def _poll_running_jobs")
+    ]
+    assert 'key="isolate_status_strip"' in status
+    assert "st.empty()" in status
+    assert "if not (running or failed or show_queued or stopping_previous):" not in status
+    main = source[source.find("def main") :]
+    assert "isolate_scroll_top_token" in main
+    assert "consume_isolate_scroll_top" not in main
+    css = (
+        Path(__file__).resolve().parents[1] / "ui" / "app.py"
+    ).read_text(encoding="utf-8")
+    assert "st-key-isolate_status_strip" in css
+    assert "st-key-isolate_status_running" in css
+    assert "min-height: 6.5rem" in css
+    assert ":not(:last-of-type)" in css
+    assert 'iframe[title*="mix_tabs"]' not in css
 
 
 def test_new_tab_section_and_output_name_prominent_before_advanced():
@@ -1761,11 +2401,17 @@ def test_new_tab_section_and_output_name_prominent_before_advanced():
     controls = source[
         source.find("def _render_separation_controls") : source.find("def _ffmpeg_install_hint")
     ]
-    picker_at = controls.find("_render_outcome_picker(")
-    section_at = controls.find("_render_region_controls(")
+    block_at = controls.find("_render_section_and_outcomes(")
     output_at = controls.find('key="isolate_output_name"')
-    assert section_at != -1 and picker_at != -1 and output_at != -1
-    assert output_at < section_at < picker_at
+    assert block_at != -1 and output_at != -1
+    assert output_at < block_at
+    section = source[
+        source.find("def _render_section_and_outcomes") : source.find("def _persist_kwargs")
+    ]
+    region_at = section.find("_render_region_controls(")
+    picker_at = section.find("_render_outcome_picker(")
+    assert region_at != -1 and picker_at != -1
+    assert region_at < picker_at
     picker = source[
         source.find("def _render_outcome_picker") : source.find("def _render_engine_panel")
     ]
@@ -2107,6 +2753,16 @@ def test_custom_selected_stems_falls_back_to_all_when_nothing_matches():
     assert selected == {"vocals": True, "no_vocals": True}
 
 
+def test_custom_selected_stems_keeps_metronome_on():
+    selected = custom_selected_stems(
+        ["vocals", "guitar", "metronome"],
+        ["vocals"],
+    )
+    assert selected["vocals"] is True
+    assert selected["guitar"] is False
+    assert selected["metronome"] is True
+
+
 def test_resolve_speed_preset_unknown_and_auto_become_balanced():
     from audio_to_tab.hardware import HostProbe
 
@@ -2321,6 +2977,13 @@ def test_children_from_outputs_filters_silent(tmp_path):
 def test_children_from_outputs_skips_diagnostics(tmp_path):
     _write_wav(tmp_path / "guitar.wav", amplitude=0.5)
     _write_wav(tmp_path / "guitar_diagnostic.wav", amplitude=0.5)
+    out = children_from_outputs(tmp_path)
+    assert set(out.keys()) == {"guitar"}
+
+
+def test_children_from_outputs_skips_metronome(tmp_path):
+    _write_wav(tmp_path / "guitar.wav", amplitude=0.5)
+    _write_wav(tmp_path / "metronome.wav", amplitude=0.5)
     out = children_from_outputs(tmp_path)
     assert set(out.keys()) == {"guitar"}
 

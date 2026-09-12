@@ -62,8 +62,20 @@ class IsolateJobSpec:
     prior_timing: dict[str, Any] | None = None
     low_end_restore_db: float = 0.0
     sub_bass_debleed: bool = False
+    demucs_segment: int | None = 8
+    demucs_jobs: int = 1
+    demucs_shifts: int | None = None
+    demucs_overlap: float | None = None
+    adaptive_fold_gain: bool = False
+    bleed_gate: bool = False
+    bass_bleed_mitigation: bool = False
+    guitar_ensemble: bool = False
     reseparate_from: str | None = None
     parent_run_dir: str | None = None
+    # Desktop mix-tab id the job was started from (``__new__:…``). On success
+    # the UI replaces that draft slot with ``run_dir`` instead of opening a
+    # second tab.
+    origin_tab: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -76,6 +88,36 @@ class IsolateJobSpec:
         if raw_emit is not None:
             filtered["emit_stems"] = list(raw_emit)
         return cls(**filtered)
+
+
+def isolate_config_kwargs_from_spec(spec: IsolateJobSpec) -> dict[str, Any]:
+    """Map a desktop job spec onto IsolateConfig fields (no inference)."""
+    return {
+        "model": spec.model,
+        "quality": spec.quality,
+        "device": spec.device,
+        "start_sec": spec.start_sec,
+        "max_duration_sec": spec.max_duration_sec,
+        "two_stems": spec.two_stems,
+        "guitar_checkpoint": spec.guitar_checkpoint,
+        "two_pass": spec.two_pass,
+        "guitar_refine": spec.guitar_refine,
+        "emit_stems": tuple(spec.emit_stems) if spec.emit_stems else None,
+        "fold_other_into_guitar": spec.fold_other_into_guitar,
+        "fold_other_mode": spec.fold_other_mode,
+        "lead_rhythm": False,
+        "lead_rhythm_mode": "confident",
+        "low_end_restore_db": spec.low_end_restore_db,
+        "sub_bass_debleed": spec.sub_bass_debleed,
+        "demucs_segment": spec.demucs_segment,
+        "demucs_jobs": spec.demucs_jobs,
+        "demucs_shifts": spec.demucs_shifts,
+        "demucs_overlap": spec.demucs_overlap,
+        "adaptive_fold_gain": spec.adaptive_fold_gain,
+        "bleed_gate": spec.bleed_gate,
+        "bass_bleed_mitigation": spec.bass_bleed_mitigation,
+        "guitar_ensemble": spec.guitar_ensemble,
+    }
 
 
 def jobs_root() -> Path:
@@ -248,6 +290,7 @@ def enqueue_job(spec: IsolateJobSpec) -> str:
         created_at=spec.created_at,
         source_kind=spec.source_kind,
         source_fingerprint=spec.source_fingerprint,
+        origin_tab=spec.origin_tab,
     )
     ensure_worker_started()
     return spec.id
@@ -525,6 +568,8 @@ def list_jobs(*, limit: int = 20) -> list[dict[str, Any]]:
             status.setdefault("source_kind", spec.get("source_kind"))
         if spec.get("source_fingerprint"):
             status.setdefault("source_fingerprint", spec.get("source_fingerprint"))
+        if spec.get("origin_tab"):
+            status.setdefault("origin_tab", spec.get("origin_tab"))
         rows.append(status)
     rows.sort(key=lambda r: float(r.get("created_at") or 0.0), reverse=True)
     return rows[:limit]
@@ -731,25 +776,9 @@ def _run_one_job(job_id: str) -> None:
         **eta_fields,
     )
 
-    config = IsolateConfig(
-        model=spec.model,
-        quality=spec.quality,
-        device=spec.device,
-        start_sec=spec.start_sec,
-        max_duration_sec=spec.max_duration_sec,
-        two_stems=spec.two_stems,
-        guitar_checkpoint=spec.guitar_checkpoint,
-        two_pass=spec.two_pass,
-        guitar_refine=spec.guitar_refine,
-        emit_stems=tuple(spec.emit_stems) if spec.emit_stems else None,
-        fold_other_into_guitar=spec.fold_other_into_guitar,
-        fold_other_mode=spec.fold_other_mode,
-        # Default isolate path: never emit lead/rhythm.
-        lead_rhythm=False,
-        lead_rhythm_mode="confident",
-        low_end_restore_db=spec.low_end_restore_db,
-        sub_bass_debleed=spec.sub_bass_debleed,
-    )
+    config = IsolateConfig(**isolate_config_kwargs_from_spec(spec))
+    if spec.reseparate_from:
+        config.emit_metronome = False
 
     progress_state: dict[str, Any] = {"stage": "ingest", "stage_started_wall": started}
 
@@ -807,6 +836,20 @@ def _run_one_job(job_id: str) -> None:
         # Re-separate children belong to the parent run on disk — never a new
         # Recent run — so only the normal path writes run metadata.
         if spec.reseparate_from is None:
+            metro_meta = None
+            diag_path = artifacts.get("metronome_diagnostics")
+            if diag_path:
+                try:
+                    raw = json.loads(Path(diag_path).read_text(encoding="utf-8"))
+                    if isinstance(raw, dict):
+                        metro_meta = {
+                            "bpm": raw.get("bpm"),
+                            "beat_count": raw.get("beat_count"),
+                            "confidence": raw.get("confidence"),
+                            "source": raw.get("source"),
+                        }
+                except Exception:
+                    metro_meta = None
             write_run_metadata(
                 Path(spec.output_dir),
                 page="isolate",
@@ -823,7 +866,17 @@ def _run_one_job(job_id: str) -> None:
                     "guitar_refine": spec.guitar_refine,
                     "low_end_restore_db": spec.low_end_restore_db,
                     "sub_bass_debleed": spec.sub_bass_debleed,
+                    "demucs_segment": spec.demucs_segment,
+                    "demucs_jobs": spec.demucs_jobs,
+                    "demucs_shifts": spec.demucs_shifts,
+                    "demucs_overlap": spec.demucs_overlap,
+                    "fold_other_mode": spec.fold_other_mode,
+                    "adaptive_fold_gain": spec.adaptive_fold_gain,
+                    "bleed_gate": spec.bleed_gate,
+                    "bass_bleed_mitigation": spec.bass_bleed_mitigation,
+                    "guitar_ensemble": spec.guitar_ensemble,
                 },
+                metronome=metro_meta,
             )
         latest = read_status(job_id)
         if latest and latest.get("status") in ("cancelled", "pausing"):

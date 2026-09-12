@@ -313,6 +313,7 @@ def test_isolate_config_defaults_to_full_song():
 
 def test_isolate_config_default_quality_is_fast():
     assert IsolateConfig().quality == "fast"
+    assert IsolateConfig().emit_metronome is True
 
 
 def test_effective_demucs_segment_clamps_htdemucs_6s_below_transformer_max():
@@ -420,6 +421,105 @@ def test_separate_stems_collects_wavs(tmp_path: Path):
     assert "--segment" in seen_cmd[0]
     seg_idx = seen_cmd[0].index("--segment")
     assert seen_cmd[0][seg_idx + 1] == "7"
+
+
+def _write_pulse_wav(path: Path, *, bpm: float = 120.0, duration: float = 8.0, sr: int = 22050) -> None:
+    beat = 60.0 / bpm
+    n = int(sr * duration)
+    y = np.zeros(n, dtype=np.float32)
+    click = int(0.02 * sr)
+    i = 0
+    while True:
+        start = int(round(i * beat * sr))
+        if start >= n:
+            break
+        y[start : min(n, start + click)] = 0.9
+        i += 1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(path), np.column_stack([y, y]), sr, subtype="PCM_16")
+
+
+def test_separate_stems_emits_metronome_from_drums(tmp_path: Path):
+    audio = tmp_path / "song.wav"
+    audio.write_bytes(b"fake-wav")
+    out_dir = tmp_path / "stems"
+
+    def fake_normalize(src, dest=None):
+        dest = Path(dest) if dest else tmp_path / "norm.wav"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"norm")
+        return dest
+
+    def fake_run(cmd, capture_output=True, text=True, **_kwargs):
+        demucs_out = Path(cmd[cmd.index("-o") + 1])
+        track_dir = demucs_out / "htdemucs_6s" / "normalized"
+        track_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("vocals", "bass", "piano"):
+            (track_dir / f"{name}.wav").write_bytes(b"stem-" + name.encode())
+        _write_silent_wav(track_dir / "other.wav")
+        sf.write(str(track_dir / "guitar.wav"), np.zeros((256, 2), dtype=np.float32), 44100)
+        _write_pulse_wav(track_dir / "drums.wav")
+        return MagicMock(returncode=0, stderr="", stdout="")
+
+    with (
+        patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
+        patch("audio_to_tab.isolate.normalize_audio", side_effect=fake_normalize),
+        patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
+        patch("audio_to_tab.separate.run_process", side_effect=fake_run),
+    ):
+        artifacts = separate_stems(
+            audio,
+            out_dir,
+            IsolateConfig(model="htdemucs_6s", quality="fast", max_duration_sec=15),
+        )
+
+    assert "metronome" in artifacts
+    assert Path(artifacts["metronome"]).is_file()
+    assert artifacts["metronome_diagnostics"].is_file()
+    clicks, _sr = sf.read(str(artifacts["metronome"]), always_2d=True)
+    assert float(np.max(np.abs(clicks))) > 0.05
+
+
+def test_separate_stems_can_skip_metronome(tmp_path: Path):
+    audio = tmp_path / "song.wav"
+    audio.write_bytes(b"fake-wav")
+    out_dir = tmp_path / "stems"
+
+    def fake_normalize(src, dest=None):
+        dest = Path(dest) if dest else tmp_path / "norm.wav"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"norm")
+        return dest
+
+    def fake_run(cmd, capture_output=True, text=True, **_kwargs):
+        demucs_out = Path(cmd[cmd.index("-o") + 1])
+        track_dir = demucs_out / "htdemucs_6s" / "normalized"
+        track_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("vocals", "drums", "bass", "piano"):
+            (track_dir / f"{name}.wav").write_bytes(b"stem-" + name.encode())
+        _write_silent_wav(track_dir / "other.wav")
+        sf.write(str(track_dir / "guitar.wav"), np.zeros((256, 2), dtype=np.float32), 44100)
+        return MagicMock(returncode=0, stderr="", stdout="")
+
+    with (
+        patch("audio_to_tab.isolate.is_demucs_available", return_value=True),
+        patch("audio_to_tab.isolate.normalize_audio", side_effect=fake_normalize),
+        patch("audio_to_tab.isolate._trim_audio", side_effect=lambda p, *a, **k: p),
+        patch("audio_to_tab.separate.run_process", side_effect=fake_run),
+    ):
+        artifacts = separate_stems(
+            audio,
+            out_dir,
+            IsolateConfig(
+                model="htdemucs_6s",
+                quality="fast",
+                max_duration_sec=15,
+                emit_metronome=False,
+            ),
+        )
+
+    assert "metronome" not in artifacts
+    assert "metronome_diagnostics" not in artifacts
 
 
 def test_separate_stems_threads_abort_and_timeout_into_backend(tmp_path: Path):

@@ -238,6 +238,26 @@ def effective_isolation_quality(
     return current
 
 
+def resolve_demucs_shifts(quality: str, override: int | None = None) -> str:
+    """Demucs ``--shifts``: explicit override wins, else the Quality map."""
+    if override is not None:
+        try:
+            return str(int(override))
+        except (TypeError, ValueError):
+            pass
+    return QUALITY_SHIFTS.get(quality, "0")
+
+
+def resolve_demucs_overlap(quality: str, override: float | None = None) -> str:
+    """Demucs ``--overlap``: explicit override wins, else the Quality map."""
+    if override is not None:
+        try:
+            return str(float(override))
+        except (TypeError, ValueError):
+            pass
+    return QUALITY_OVERLAP.get(quality, "0.25")
+
+
 # Demucs always writes the full stem set for a model, even when an instrument
 # isn't actually present in the mix. These gate the auto-detection heuristic
 # used to flag which produced stems are audibly real vs. near-silent filler.
@@ -841,6 +861,9 @@ class IsolateConfig:
     # because htdemucs_6s was trained at 7.8s max. Must be int — Demucs argparse
     # rejects '8.0'.
     demucs_segment: int | None = 8
+    # Optional Demucs --shifts / --overlap. None = QUALITY_SHIFTS / QUALITY_OVERLAP.
+    demucs_shifts: int | None = None
+    demucs_overlap: float | None = None
     # Keep only these WAV stems after Demucs. None = keep the model's full set
     # (after optional Other→Guitar fold). Built-in UI presets cap at 4 stems.
     emit_stems: tuple[str, ...] | None = None
@@ -864,6 +887,9 @@ class IsolateConfig:
     # primary Demucs run and per-band soft-max blend the two guitar stems
     # (whichever model kept more energy in a band wins that band).
     guitar_ensemble: bool = False
+    # After stems are finalized, beat-track drums/source and emit metronome.wav.
+    # Re-separate jobs turn this off so a click track is not treated as a child.
+    emit_metronome: bool = True
 
     def __post_init__(self) -> None:
         # dual_guitar=True enables lead_rhythm (deprecated alias) with best_effort emit.
@@ -2113,13 +2139,15 @@ def _run_demucs_model(
                 quality=cfg.quality,
                 segment=effective_demucs_segment(model, cfg.demucs_segment),
                 jobs=max(1, int(cfg.demucs_jobs)),
+                shifts=cfg.demucs_shifts,
+                overlap=cfg.demucs_overlap,
             )
             return
         except Exception as exc:
             logger.warning("guitar-ft separation failed; falling back to stock 6s: %s", exc)
 
-    shifts = QUALITY_SHIFTS.get(cfg.quality, "0")
-    overlap = QUALITY_OVERLAP.get(cfg.quality, "0.25")
+    shifts = resolve_demucs_shifts(cfg.quality, cfg.demucs_shifts)
+    overlap = resolve_demucs_overlap(cfg.quality, cfg.demucs_overlap)
     demucs_args = [
         "-n",
         model,
@@ -2656,6 +2684,17 @@ def separate_stems(
         encoding="utf-8",
     )
     artifacts["stem_presence_diagnostics"] = presence_path
+
+    if cfg.emit_metronome:
+        from audio_to_tab.metronome import attach_metronome_artifact
+
+        fallback = Path(trimmed) if Path(trimmed).is_file() else None
+        if fallback is None and src.is_file():
+            fallback = src
+        try:
+            attach_metronome_artifact(artifacts, out_dir, fallback=fallback)
+        except Exception:
+            logger.debug("metronome stem skipped", exc_info=True)
 
     progress("done", "Finish")
     return artifacts

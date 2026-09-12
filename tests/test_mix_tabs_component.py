@@ -47,7 +47,20 @@ def test_mix_tabs_source_has_moises_chrome():
     assert 'report("plus")' in main
     assert 'report("focus"' in main
     assert 'report("close"' in main
+    assert "seq:" in main or "seq =" in main
     assert "mix-tab-bar" in main or "Home" in main
+    assert "tab-progress" in main
+    assert "aria-busy" in main
+    style = (
+        Path(__file__).resolve().parents[1]
+        / "ui"
+        / "mix_tabs_component"
+        / "frontend"
+        / "src"
+        / "style.css"
+    ).read_text(encoding="utf-8")
+    assert "tab-progress" in style
+    assert "mt-indeterminate" in style
 
 
 def test_mix_tabs_strip_is_sticky_in_app_css():
@@ -56,7 +69,12 @@ def test_mix_tabs_strip_is_sticky_in_app_css():
     ).read_text(encoding="utf-8")
     assert "isolate_mix_tabs_strip" in app
     assert "position: sticky" in app
+    assert ":not(:last-of-type)" in app
+    assert "isolate_region_picker" in app
     page = (
         Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
     ).read_text(encoding="utf-8")
     assert 'key="isolate_mix_tabs_strip"' in page
+    assert 'key="isolate_moises_tabs"' in page
+    assert "_mix_tabs_nonce" not in page
+    assert 'key="isolate_region_picker"' in page

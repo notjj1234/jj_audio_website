@@ -102,12 +102,53 @@ body {
 .mix-tab {
   max-width: 180px;
   padding-right: 0.35rem;
+  position: relative;
+  overflow: hidden;
 }
 
 .mix-tab .title {
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+}
+
+.mix-tab .tab-progress {
+  position: absolute;
+  left: 0.4rem;
+  right: 0.4rem;
+  bottom: 2px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(128, 128, 128, 0.28);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.mix-tab .tab-progress-bar {
+  display: block;
+  height: 100%;
+  width: var(--mt-progress, 0%);
+  border-radius: inherit;
+  background: var(--mt-accent);
+  transition: width 0.25s ease;
+}
+
+.mix-tab .tab-progress.indeterminate .tab-progress-bar {
+  width: 40%;
+  animation: mt-indeterminate 1.1s ease-in-out infinite;
+}
+
+@keyframes mt-indeterminate {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(280%);
+  }
+}
+
+.mix-tab.busy .title {
+  opacity: 0.95;
 }
 
 .mix-tab .close {

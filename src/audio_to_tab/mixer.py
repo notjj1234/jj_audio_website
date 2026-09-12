@@ -25,7 +25,10 @@ STEM_ORDER = (
     "no_other",
     "no_guitar",
     "no_piano",
+    "metronome",
 )
+
+DEFAULT_MUTED_STEMS = frozenset({"metronome"})
 
 STEM_LABELS = {
     "lead_guitar": "Lead Guitar",
@@ -38,6 +41,7 @@ STEM_LABELS = {
     "no_other": "No other",
     "no_guitar": "No guitar",
     "no_piano": "No piano",
+    "metronome": "Metronome",
 }
 
 # Volume model for live mixer + export (documented for UI/JS parity).
@@ -107,6 +111,15 @@ def stem_energy_db(path: str | Path) -> float:
 def sort_stem_names(names: list[str] | set[str]) -> list[str]:
     order = {name: i for i, name in enumerate(STEM_ORDER)}
     return sorted(names, key=lambda n: (order.get(n, 999), n))
+
+
+def default_muted_for(stem_id: str) -> bool:
+    """True for utility stems that should start silent (metronome)."""
+    return str(stem_id) in DEFAULT_MUTED_STEMS
+
+
+def default_muted_map(stem_names: list[str] | set[str]) -> dict[str, bool]:
+    return {name: default_muted_for(name) for name in stem_names}
 
 
 def db_to_linear(db: float) -> float:
