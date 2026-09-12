@@ -64,7 +64,7 @@ def stem_mixer(
 
     ``stems`` items: ``{id, label, url}`` plus optional ``downloadUrl``,
     ``downloadFilename``, ``peaks`` (waveform envelope), and ``hint``.
-    Waveforms render inline on each stem card.
+    Waveforms render inline on each stem row.
     Returns the latest control state from the browser, e.g.
     ``{volumesDb, muted, soloed, masterVolumeDb}``, or None before the first report.
     """

@@ -15,6 +15,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 
+from audio_to_tab.hardware import apply_recommended_cpu_threads, cpu_thread_env
 from audio_to_tab.ingest import temporary_output_path
 from audio_to_tab.subprocess_util import run_process, subprocess_run_kwargs
 
@@ -227,6 +228,7 @@ def run_demucs_guitar_ft_inprocess(
         dev_name = "cpu"
     dev = torch.device(dev_name)
     model.to(dev)
+    apply_recommended_cpu_threads(device=dev_name)
 
     shifts = int({"fast": 0, "balanced": 1, "high": 3, "extreme": 5}.get(quality, 0))
     overlap = {"fast": 0.25, "balanced": 0.25, "high": 0.5, "extreme": 0.75}.get(
@@ -279,6 +281,7 @@ def run_demucs(
     if getattr(sys, "frozen", False):
         from demucs.separate import main as demucs_main
 
+        apply_recommended_cpu_threads()
         try:
             demucs_main(demucs_args)
         except SystemExit as exc:
@@ -288,12 +291,15 @@ def run_demucs(
         return
 
     cmd = [sys.executable, "-m", "demucs", *demucs_args]
+    env = os.environ.copy()
+    env.update(cpu_thread_env())
     result = run_process(
         cmd,
         should_abort=should_abort,
         timeout_sec=timeout_sec,
         capture_output=True,
         text=True,
+        env=env,
         **subprocess_run_kwargs(),
     )
     if result.returncode != 0:

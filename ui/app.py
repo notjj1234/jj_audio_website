@@ -23,9 +23,9 @@ from ui.isolate_state import (
     UI_MODE_KEY,
     UI_MODES,
     load_ui_mode,
-    resolve_ui_mode,
     write_ui_mode,
 )
+from ui.satoshi_font import satoshi_font_face_css
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SRC = _REPO_ROOT / "src"
@@ -94,17 +94,15 @@ except Exception:
 # no app fade while RUNNING, mixer iframe hit-testing.
 # st.html (not st.markdown) — indented HTML in markdown is parsed as a code block.
 st.html(
-    """
-<style>
-  /* No remote font stylesheet. This app tells people "processing stays on this
-     computer", and a CDN <link> contradicts that by phoning out on every launch —
-     while also being the one asset that fails when the machine is offline.
-     Satoshi is still preferred when installed locally; otherwise the system UI
-     font is used, which is what the CDN failure path already produced. */
+    "<style>\n"
+    + satoshi_font_face_css()
+    + """
+  /* Bundled Satoshi from ui/fonts/ — no CDN. Keeps brand type on-device with
+     "processing stays on this computer" (offline-safe; no font phone-home). */
   /* Satoshi on text only — never on Material Icons. A blanket [class*="st-"]
      override made Streamlit ligatures (upload, arrow_right, keyboard_double_*)
      render as overlapping plain text instead of icons. */
-  html, body,
+  html, body, .stApp,
   [data-testid="stAppViewContainer"],
   [data-testid="stSidebar"],
   [data-testid="stMarkdownContainer"],
@@ -113,11 +111,23 @@ st.html(
   [data-testid="stCheckbox"],
   [data-testid="stRadio"],
   [data-testid="stTextInput"],
+  [data-testid="stNumberInput"],
+  [data-testid="stTextArea"],
+  [data-testid="stSelectbox"],
+  [data-testid="stMultiSelect"],
   [data-testid="stFileUploader"],
   [data-testid="stExpander"],
   [data-testid="stTabs"],
   [data-testid="stButton"],
-  section.main {
+  [data-testid="stDownloadButton"],
+  [data-testid="stSlider"],
+  [data-testid="stMetric"],
+  [data-testid="stAlert"],
+  [data-testid="stToolbar"],
+  [data-testid="stHeader"],
+  [data-testid="stBottomBlockContainer"],
+  section.main,
+  button, input, textarea, select, label, p, h1, h2, h3, h4, h5, h6, li, span {
     font-family: "Satoshi", system-ui, sans-serif !important;
   }
   .material-icons,
@@ -159,18 +169,17 @@ st.html(
     color: var(--text-color, inherit) !important;
   }
 
-  /* Sidebar: stop resize-drag from selecting labels. Scoped to the nav chrome —
-     blanketing [data-testid="stSidebar"] * also made the version string and demo
-     blurb impossible to select, so nobody could copy them into a bug report. */
-  [data-testid="stSidebarNav"],
-  [data-testid="stSidebarNav"] *,
-  [data-testid="stSidebarCollapseButton"],
-  [data-testid="stSidebarCollapseButton"] * {
+  /* Sidebar resize drag used to paint a blue text selection across nav +
+     Interface + demo caption. Disable selection on the whole sidebar. */
+  [data-testid="stSidebar"],
+  [data-testid="stSidebar"] * {
     -webkit-user-select: none !important;
     user-select: none !important;
+    -webkit-touch-callout: none !important;
   }
-  [data-testid="stSidebarNav"] ::selection {
+  [data-testid="stSidebar"] ::selection {
     background: transparent !important;
+    color: inherit !important;
   }
   /* Suppress the click ring, keep the keyboard one: outlining :focus-visible too
      left Tab-key users with no visible caret anywhere in the nav. */
@@ -215,13 +224,18 @@ st.html(
     pointer-events: none !important;
   }
 
+  /* Hide leftover heading permalinks (chain-link). Section help uses help= tooltips. */
+  [data-testid="stHeaderActionElements"] a[href^="#"],
+  [data-testid="stMarkdownContainer"] a[href^="#"].headerlink {
+    display: none !important;
+  }
+
   /* Mixer iframe: full hit target for Play/Pause (not just the border) */
   [data-testid="stCustomComponentV1"] {
     pointer-events: auto !important;
     position: relative !important;
     z-index: 60 !important;
   }
-  [data-testid="stCustomComponentV1"] iframe,
   iframe[title*="stem_mixer"],
   iframe[title*="Stem mixer"],
   iframe[title*="stem_mixer_component"] {
@@ -238,6 +252,25 @@ st.html(
     top: 0;
     z-index: 20;
     background: var(--background-color, inherit);
+  }
+
+  /* Moises Home|mix|+ strip: always visible while scrolling Isolate */
+  .st-key-isolate_mix_tabs_strip,
+  div[class*="st-key-isolate_mix_tabs_strip"] {
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 85 !important;
+    background: var(--background-color, inherit) !important;
+    padding-top: 0.15rem;
+    padding-bottom: 0.2rem;
+    margin-bottom: 0.15rem;
+  }
+  .st-key-isolate_mix_tabs_strip [data-testid="stCustomComponentV1"] iframe,
+  div[class*="st-key-isolate_mix_tabs_strip"] iframe,
+  iframe[title*="mix_tabs"] {
+    min-height: 0 !important;
+    height: 48px !important;
+    max-height: 52px !important;
   }
 
   /* YouTube search dialog: blur + dim the page behind the centered modal */
@@ -259,6 +292,64 @@ st.html(
   [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) .st-key-isolate_refresh {
     display: flex;
     justify-content: flex-end;
+  }
+
+  /* New-tab outcome/stem tiles: icon stacked above label (same for presets + custom) */
+  [class*="st-key-isolate_outcome_pick_"] button,
+  [class*="st-key-isolate_stem_pick_"] button {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    text-align: center !important;
+    gap: 0.35rem !important;
+  }
+  [class*="st-key-isolate_outcome_pick_"] button {
+    white-space: pre-line !important;
+    min-height: 7rem !important;
+    line-height: 1.35 !important;
+    padding: 0.75rem 0.85rem !important;
+    overflow-wrap: normal !important;
+    word-break: normal !important;
+  }
+  [class*="st-key-isolate_outcome_pick_"] button p,
+  [class*="st-key-isolate_stem_pick_"] button p {
+    white-space: pre-line !important;
+    text-align: center !important;
+    width: 100%;
+    overflow-wrap: normal !important;
+    word-break: normal !important;
+  }
+  [class*="st-key-isolate_stem_pick_"] button {
+    min-height: 4.1rem !important;
+    padding: 0.55rem 0.45rem !important;
+  }
+  /* Override Streamlit’s “image ≈ font height” cap; keep icon above text */
+  [class*="st-key-isolate_outcome_pick_"] button img,
+  [class*="st-key-isolate_stem_pick_"] button img,
+  [class*="st-key-isolate_outcome_pick_"] button p img,
+  [class*="st-key-isolate_stem_pick_"] button p img,
+  [class*="st-key-isolate_outcome_pick_"] button span img,
+  [class*="st-key-isolate_stem_pick_"] button span img {
+    width: 1.9rem !important;
+    height: 1.9rem !important;
+    max-width: none !important;
+    max-height: none !important;
+    vertical-align: middle !important;
+    flex-shrink: 0;
+    object-fit: contain;
+    display: block !important;
+    margin-left: auto !important;
+    margin-right: auto !important;
+    margin-top: 0 !important;
+    margin-bottom: 0.15rem !important;
+  }
+  [class*="st-key-isolate_outcome_pick_"] button img,
+  [class*="st-key-isolate_outcome_pick_"] button p img,
+  [class*="st-key-isolate_outcome_pick_"] button span img {
+    width: 2.35rem !important;
+    height: 2.35rem !important;
+    margin-bottom: 0.25rem !important;
   }
 
   /* Tighter Isolate/Tab page type: fewer stacked captions */
@@ -301,6 +392,23 @@ st.html(
     opacity: 0;
   }
 </style>
+<script>
+(function () {
+  if (window.__attSidebarSelectGuard) return;
+  window.__attSidebarSelectGuard = true;
+  function clearSidebarSelection() {
+    var sel = window.getSelection && window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+    var node = sel.anchorNode;
+    var el = node && (node.nodeType === 1 ? node : node.parentElement);
+    if (el && el.closest && el.closest('[data-testid="stSidebar"]')) {
+      sel.removeAllRanges();
+    }
+  }
+  document.addEventListener("selectionchange", clearSidebarSelection);
+  document.addEventListener("mouseup", clearSidebarSelection);
+})();
+</script>
 """
 )
 
@@ -331,7 +439,7 @@ def _loading_overlay_html(label: str) -> str:
     position: fixed;
     inset: 0;
     z-index: 9990;
-    pointer-events: none !important;
+    pointer-events: auto !important;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -404,9 +512,9 @@ def _persist_mode() -> None:
     write_ui_mode(_ui_state_path, st.session_state.get(UI_MODE_KEY))
 
 
-# Mode is presentation only: Lite and Pro run the same pipeline with the same
-# models. Lite hides configuration; it never downgrades quality. Seeded from disk
-# before the radio instantiates so a returning user keeps their choice.
+# Lite auto-profiles speed/device/guitar from RAM/GPU; Pro exposes every control.
+# Same shared engine either way. Seeded from disk before the radio instantiates
+# so a returning user keeps their Lite/Pro choice.
 load_ui_mode(st.session_state, _ui_state_path)
 st.sidebar.radio(
     "Interface",
@@ -415,19 +523,19 @@ st.sidebar.radio(
     horizontal=True,
     on_change=_persist_mode,
     help=(
-        "Lite shows the guided essentials. Pro adds engine, performance and "
-        "diagnostic controls. Both separate audio identically — switching is safe "
+        "Lite picks speed and device for this computer and shows what it detected. "
+        "Pro adds engine, performance and diagnostic controls. Switching is safe "
         "and keeps your current work."
     ),
 )
 st.sidebar.caption(_DEMO_BLURB)
 
 _pages = Path(__file__).parent / "pages"
-_nav = [st.Page(str(_pages / "isolate.py"), title="Audio Isolation", default=True)]
-# Tab PDF is an admitted experiment ("tabs are 90% wrong"). Offering it as a
-# peer of the working feature invites people to try it first and conclude the
-# app is broken, so Lite does not list it. Pro still gets it.
-if resolve_ui_mode(st.session_state.get(UI_MODE_KEY)) == "Pro":
-    _nav.append(st.Page(str(_pages / "tab_pdf.py"), title="Tab PDF (demo)"))
+_nav = [
+    st.Page(str(_pages / "isolate.py"), title="Audio Isolation", default=True),
+    # Always listed. The page itself carries the unfinished-product warning —
+    # hiding it in Lite made the sidebar look broken when users switched modes.
+    st.Page(str(_pages / "tab_pdf.py"), title="Tab PDF (demo)"),
+]
 pg = st.navigation(_nav)
 pg.run()

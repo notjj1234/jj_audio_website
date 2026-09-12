@@ -123,12 +123,16 @@ class JobManager:
         return upload_id, path
 
     def resolve_upload_key(self, upload_id: str, user_id: str) -> str | None:
+        key, _filename = self.resolve_upload(upload_id, user_id)
+        return key
+
+    def resolve_upload(self, upload_id: str, user_id: str) -> tuple[str | None, str]:
         db = db_module.SessionLocal()
         try:
             row = db.query(Upload).filter(Upload.id == upload_id, Upload.user_id == user_id).first()
             if not row:
-                return None
-            return row.storage_key
+                return None, ""
+            return row.storage_key, row.filename or "audio"
         finally:
             db.close()
 
@@ -224,7 +228,9 @@ class JobManager:
         dual_guitar: bool = False,
     ) -> JobRecord:
         if not upload_key:
-            upload_key = self.resolve_upload_key(upload_id, user_id)
+            upload_key, upload_filename = self.resolve_upload(upload_id, user_id)
+        else:
+            _, upload_filename = self.resolve_upload(upload_id, user_id)
         if not upload_key:
             raise FileNotFoundError(f"Upload not found: {upload_id}")
 
@@ -233,9 +239,11 @@ class JobManager:
         mode = lead_rhythm_mode
         if mode is None:
             mode = "best_effort" if effective_lr else "confident"
+        title = Path(upload_filename or "audio").stem
         config = {
             "upload_id": upload_id,
             "upload_key": upload_key,
+            "title": title,
             "model": model,
             "quality": quality,
             "device": device,
@@ -302,7 +310,7 @@ class JobManager:
             artifacts=arts,
             upload_path=upload_path,
             youtube_url=cfg.get("youtube_url"),
-            title=cfg.get("title", "Guitar Tab"),
+            title=str(cfg.get("title") or ""),
             separate_stems=bool(cfg.get("separate_stems", True)),
             max_duration_sec=cfg.get("max_duration_sec", 90.0),
             mix_aware_filtering=bool(cfg.get("mix_aware_filtering", True)),

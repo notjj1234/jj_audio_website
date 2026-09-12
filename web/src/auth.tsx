@@ -11,6 +11,8 @@ import * as api from "./api";
 type AuthState = {
   email: string | null;
   loading: boolean;
+  sessionError: string | null;
+  retrySession: () => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
 };
@@ -20,29 +22,43 @@ const AuthContext = createContext<AuthState | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [email, setEmail] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [sessionError, setSessionError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const bootstrap = useCallback(async () => {
+    setLoading(true);
+    setSessionError(null);
     const token = api.getAccessToken();
     if (token) {
-      api
-        .me()
-        .then((u) => setEmail(u.email))
-        .catch(() => api.setAccessToken(null))
-        .finally(() => setLoading(false));
-      return;
+      try {
+        const u = await api.me();
+        setEmail(u.email);
+        setLoading(false);
+        return;
+      } catch {
+        api.setAccessToken(null);
+      }
     }
-    api
-      .startAnonymousSession()
-      .then((res) => setEmail(res.email))
-      .catch(() => {
-        /* demo session unavailable */
-      })
-      .finally(() => setLoading(false));
+    try {
+      const res = await api.startAnonymousSession();
+      setEmail(res.email);
+    } catch (err) {
+      setEmail(null);
+      setSessionError(
+        err instanceof Error ? err.message : "Could not start a session."
+      );
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    void bootstrap();
+  }, [bootstrap]);
 
   const login = useCallback(async (e: string, password: string) => {
     const res = await api.login(e, password);
     setEmail(res.email);
+    setSessionError(null);
   }, []);
 
   const logout = useCallback(async () => {
@@ -51,7 +67,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ email, loading, login, logout }}>
+    <AuthContext.Provider
+      value={{
+        email,
+        loading,
+        sessionError,
+        retrySession: bootstrap,
+        login,
+        logout,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );

@@ -1,0 +1,95 @@
+@import url("../../../fonts/satoshi.css");
+
+:root {
+  color-scheme: light dark;
+  --rp-bg: transparent;
+  --rp-fg: #1a1a1a;
+  --rp-muted: #5c5c5c;
+  --rp-accent: #2a6f6a;
+  --rp-wave: #4a8f8a;
+  --rp-progress: #2a6f6a;
+  --rp-region: rgba(42, 111, 106, 0.28);
+  --rp-btn-bg: #e8eeed;
+  --rp-btn-border: #b8c8c6;
+  font-family: "Satoshi", system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --rp-fg: #e8e8e8;
+    --rp-muted: #a0a0a0;
+    --rp-accent: #6ec4bd;
+    --rp-wave: #4a9e97;
+    --rp-progress: #6ec4bd;
+    --rp-region: rgba(110, 196, 189, 0.32);
+    --rp-btn-bg: #2a3030;
+    --rp-btn-border: #3d4847;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--rp-bg);
+  color: var(--rp-fg);
+}
+
+#root {
+  padding: 0.35rem 0.15rem 0.5rem;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin-bottom: 0.4rem;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--rp-btn-border);
+  background: var(--rp-btn-bg);
+  color: var(--rp-fg);
+  border-radius: 4px;
+  padding: 0.3rem 0.7rem;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.meta {
+  font-size: 0.85rem;
+  color: var(--rp-muted);
+}
+
+.meta strong {
+  color: var(--rp-fg);
+  font-weight: 600;
+}
+
+.hint {
+  font-size: 0.8rem;
+  color: var(--rp-muted);
+}
+
+#waveform {
+  width: 100%;
+  min-height: 96px;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.status {
+  margin-top: 0.35rem;
+  font-size: 0.8rem;
+  color: var(--rp-muted);
+}

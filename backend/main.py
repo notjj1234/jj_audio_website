@@ -141,6 +141,7 @@ MEDIA_TYPES = {
 
 
 def _job_response(job, user_id: str) -> JobResponse:
+    title = (job.title or "").strip() or None
     return JobResponse(
         id=job.id,
         status=job.status,
@@ -149,6 +150,7 @@ def _job_response(job, user_id: str) -> JobResponse:
         message=job.message,
         error=job.error,
         artifacts=job_manager.artifact_urls(job, user_id),
+        title=title,
     )
 
 

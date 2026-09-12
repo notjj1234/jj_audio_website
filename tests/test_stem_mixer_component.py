@@ -68,7 +68,7 @@ def _mixer_main_ts() -> str:
 
 def test_load_stems_creates_context_without_resume():
     text = _mixer_main_ts()
-    load = text[text.find("async loadStems(") : text.find("applyGains(")]
+    load = text[text.find("async loadStems(") : text.find("applyGains(gains")]
     assert "createContextForDecode" in load
     assert "ensureContext()" not in load
     assert ".resume()" not in load
@@ -81,4 +81,37 @@ def test_restore_transport_does_not_auto_play():
     assert "applyTransport" not in restore
     assert "wantPlaying" not in restore
     assert "engine.seek" in restore
+
+
+def _waveform_bar_layout(n: int, width: float) -> tuple[float, float]:
+    """Mirror of waveformBarLayout in the mixer frontend."""
+    slot = width / max(1, n)
+    bar_w = slot * 0.85
+    return slot, bar_w
+
+
+def test_waveform_bars_fit_viewbox_for_512_peaks():
+    """512 bars + a 1px gap overflowed viewBox 400 and clipped ~half the wave."""
+    text = _mixer_main_ts()
+    layout = text[
+        text.find("function waveformBarLayout") : text.find("function waveformSeekHtml")
+    ]
+    draw = text[
+        text.find("function waveformSeekHtml") : text.find("function isTypingTarget")
+    ]
+    assert "width / Math.max(1, n)" in layout
+    assert "slot * 0.85" in layout
+    assert "const gap = 1" not in draw
+    assert "Math.max(0.5," not in draw
+    assert "i * slot" in draw
+
+    width = 400.0
+    n = 512
+    slot, bar_w = _waveform_bar_layout(n, width)
+    last_x = (n - 1) * slot + (slot - bar_w) / 2
+    assert last_x + bar_w <= width + 1e-9
+    first_x = (slot - bar_w) / 2
+    assert first_x >= 0
+    # Peak index i starts at i/n of the row — same mapping as playhead %.
+    assert abs((256 * slot) / width - 0.5) < 1e-9
 

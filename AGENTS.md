@@ -2,8 +2,8 @@
 
 ## Two products, one shared engine
 
-- **Desktop** (local): Streamlit `ui/`, frozen by `packaging/` (`launcher.py`, `audio_tools.spec`). Serial in-process isolate jobs.
-- **Website** (hosted): FastAPI `backend/` + React SPA `web/` + Caddy; jobs via Postgres/Redis/MinIO + arq worker (`docker-compose.yml`). **Streamlit is NOT in the hosted stack.**
+- **Desktop** (local): Streamlit `ui/`, frozen by `packaging/` (`launcher.py`, `audio_tools.spec`). Serial in-process isolate jobs. **Lite** auto-profiles speed/device/guitar from RAM/GPU (`audio_to_tab.hardware`); **Pro** exposes every control.
+- **Website** (hosted): FastAPI `backend/` + React SPA `web/` + Caddy; jobs via Postgres/Redis/MinIO + arq worker (`docker-compose.yml`). **Streamlit is NOT in the hosted stack.** Hosted Auto/`lite` processing modes live in `backend/capabilities.py`.
 - **Shared** engine: `src/audio_to_tab/` (isolate, mixer, ingest, tab-PDF pipeline). Import as `audio_to_tab`.
 
 Read `PROJECT_TREE.md` first — it is the canonical "change X → start here" map. `docs/issues.md` has the project's design-decision history (CI references it by issue id).
@@ -22,6 +22,8 @@ Read `PROJECT_TREE.md` first — it is the canonical "change X → start here" m
 - **web**: `cd web && npm install && npm run dev` (Vite dev proxies `/v1` to the API). Tests: `npm test` (`vitest run`, e.g. `web/src/mixer/engine.test.ts`). Build: `make web-build` (also runs vitest).
 - **ui**: `python -m streamlit run ui/app.py` (local demo only).
 - **mixer-build**: `make mixer-build` — rebuilds the desktop iframe mixer from `ui/stem_mixer_component/frontend/src/`. The hashed output in `frontend/build/` is **committed** (so testers need no Node); never hand-edit it — change source, run this, commit.
+- **region-picker-build**: `make region-picker-build` — rebuilds the desktop waveform region picker from `ui/region_picker_component/frontend/src/` (wavesurfer.js). Same commit rule as the mixer.
+- **mix-tabs-build**: `make mix-tabs-build` — rebuilds the Moises-style Home|mix|+ tab strip from `ui/mix_tabs_component/frontend/src/`. Same commit rule as the mixer.
 
 ## Testing quirks
 

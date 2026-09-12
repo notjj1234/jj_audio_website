@@ -138,6 +138,7 @@ class JobResponse(BaseModel):
     message: str = ""
     error: str | None = None
     artifacts: dict[str, str] = Field(default_factory=dict)
+    title: str | None = None
 
 
 class UploadResponse(BaseModel):

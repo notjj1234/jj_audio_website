@@ -67,19 +67,40 @@ for pkg in collect_packages:
 # App sources: ui/ + src/audio_to_tab + .streamlit only. Never pack website
 # (web/), hosted API (backend/), docker-compose, or secrets (.env, *.pem).
 # Skip node_modules so a local mixer `npm install` cannot bloat the freeze.
+_asset_ref_re = re.compile(r"""(?:src|href)=["'](\./assets/[^"']+)["']""")
+
+
+def _frontend_build_ok(build_dir: Path) -> bool:
+    index = build_dir / "index.html"
+    if not index.is_file():
+        return False
+    html = index.read_text(encoding="utf-8")
+    refs = _asset_ref_re.findall(html)
+    return bool(refs) and all((build_dir / ref[2:]).is_file() for ref in refs)
+
+
 _mixer_build = ROOT / "ui" / "stem_mixer_component" / "frontend" / "build"
-_mixer_index = _mixer_build / "index.html"
-_mixer_asset_re = re.compile(r"""(?:src|href)=["'](\./assets/[^"']+)["']""")
-_mixer_ok = _mixer_index.is_file()
-if _mixer_ok:
-    _mixer_html = _mixer_index.read_text(encoding="utf-8")
-    _mixer_refs = _mixer_asset_re.findall(_mixer_html)
-    _mixer_ok = bool(_mixer_refs) and all((_mixer_build / ref[2:]).is_file() for ref in _mixer_refs)
-if not _mixer_ok:
+if not _frontend_build_ok(_mixer_build):
     raise SystemExit(
         "Mixer frontend is incomplete (need index.html plus its ./assets JS/CSS). "
         "Run: make mixer-build "
         "(or npm install && npm run build in ui/stem_mixer_component/frontend)"
+    )
+
+_region_build = ROOT / "ui" / "region_picker_component" / "frontend" / "build"
+if not _frontend_build_ok(_region_build):
+    raise SystemExit(
+        "Region picker frontend is incomplete (need index.html plus its ./assets JS/CSS). "
+        "Run: make region-picker-build "
+        "(or npm install && npm run build in ui/region_picker_component/frontend)"
+    )
+
+_mix_tabs_build = ROOT / "ui" / "mix_tabs_component" / "frontend" / "build"
+if not _frontend_build_ok(_mix_tabs_build):
+    raise SystemExit(
+        "Mix tabs frontend is incomplete (need index.html plus its ./assets JS/CSS). "
+        "Run: make mix-tabs-build "
+        "(or npm install && npm run build in ui/mix_tabs_component/frontend)"
     )
 
 _ui_root = ROOT / "ui"
@@ -160,6 +181,8 @@ hiddenimports += [
     "ui.pages.isolate",
     "ui.pages.tab_pdf",
     "ui.stem_mixer_component",
+    "ui.region_picker_component",
+    "ui.mix_tabs_component",
     # webview.guilib imports its backend inside a function, one platform at a time.
     "webview.guilib",
     "webview.http",

@@ -990,3 +990,61 @@ def test_rewrite_parent_meta_preserves_config_and_noop_on_missing(tmp_path: Path
     assert meta["source_kind"] == "file"
 
     jobs._rewrite_parent_meta(str(tmp_path / "missing"), session)
+
+
+def test_finalize_promotes_running_to_succeeded_when_stems_exist(jobs_dir: Path):
+    import ui.isolate_jobs as jobs
+
+    out = jobs_dir / "out"
+    out.mkdir()
+    guitar = out / "guitar.wav"
+    guitar.write_bytes(b"RIFF")
+    (out / "meta.json").write_text(
+        json.dumps(
+            {
+                "page": "isolate",
+                "title": "Song",
+                "artifacts": {"guitar": str(guitar)},
+            }
+        ),
+        encoding="utf-8",
+    )
+    audio = jobs_dir / "a.wav"
+    audio.write_bytes(b"x")
+    spec = IsolateJobSpec(
+        id="job-recover",
+        audio_path=str(audio),
+        output_dir=str(out),
+        title="Song",
+        created_at=time.time(),
+    )
+    enqueue_job(spec)
+    write_status("job-recover", status="running", stage="separate", message="Working")
+    jobs._finalize_job_after_process("job-recover")
+    status = read_status("job-recover")
+    assert status is not None
+    assert status["status"] == "succeeded"
+    assert status["artifacts"]["guitar"] == str(guitar)
+
+
+def test_finalize_marks_failed_when_running_without_stems(jobs_dir: Path):
+    import ui.isolate_jobs as jobs
+
+    out = jobs_dir / "empty-out"
+    out.mkdir()
+    audio = jobs_dir / "a.wav"
+    audio.write_bytes(b"x")
+    spec = IsolateJobSpec(
+        id="job-dead",
+        audio_path=str(audio),
+        output_dir=str(out),
+        title="Song",
+        created_at=time.time(),
+    )
+    enqueue_job(spec)
+    write_status("job-dead", status="running", stage="separate", message="Working")
+    jobs._finalize_job_after_process("job-dead")
+    status = read_status("job-dead")
+    assert status is not None
+    assert status["status"] == "failed"
+    assert "Process exited before completion" in str(status.get("error") or "")

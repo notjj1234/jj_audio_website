@@ -9,13 +9,23 @@ from audio_to_tab.hardware import (
     MAC_ACCEL_NOTE,
     NVIDIA_ONLY_DISCLAIMER,
     HostProbe,
+    apple_chip_label,
     desktop_device_options,
     desktop_recommend,
     desktop_recommend_caption,
     desktop_system_summary,
     ensure_cuda_available,
     get_desktop_probe_without_torch,
+    lite_accelerator_available,
+    lite_auto_speed_id,
+    lite_detected_caption,
+    lite_device_choice_ids,
+    lite_device_plain_label,
+    lite_using_caption,
     recommended_cpu_threads,
+    apply_recommended_cpu_threads,
+    cpu_thread_env,
+    roformer_max_audio_sec,
     resolve_desktop_speed,
     resolve_safe_device,
     separate_progress_message,
@@ -197,6 +207,28 @@ def test_recommended_cpu_threads_clamps_by_ram(monkeypatch):
     assert recommended_cpu_threads(ram_gb=None) >= 1
 
 
+def test_cpu_thread_env_keys():
+    env = cpu_thread_env(ram_gb=8.0)
+    assert env["OMP_NUM_THREADS"] == env["MKL_NUM_THREADS"] == env["TORCH_NUM_THREADS"]
+    assert int(env["OMP_NUM_THREADS"]) >= 1
+
+
+def test_apply_recommended_cpu_threads_skips_gpu():
+    assert apply_recommended_cpu_threads(device="mps") is None
+    assert apply_recommended_cpu_threads(device="cuda") is None
+
+
+def test_roformer_max_audio_sec():
+    low = HostProbe(cuda=False, mps=False, ram_gb=8.0)
+    high = HostProbe(cuda=False, mps=True, ram_gb=16.0)
+    unknown = HostProbe(cuda=False, mps=False, ram_gb=None)
+    assert roformer_max_audio_sec(low) == 90.0
+    assert roformer_max_audio_sec(high) == 180.0
+    assert roformer_max_audio_sec(unknown) == 180.0
+    assert roformer_max_audio_sec(HostProbe(cuda=False, mps=False, ram_gb=11.9)) == 90.0
+    assert roformer_max_audio_sec(HostProbe(cuda=False, mps=False, ram_gb=12.0)) == 180.0
+
+
 def test_resolve_safe_device_downgrades_ineligible_mps():
     assert resolve_safe_device("cpu", CPU_MID) == "cpu"
     with pytest.raises(RuntimeError, match="NVIDIA CUDA"):
@@ -221,5 +253,132 @@ def test_get_desktop_probe_without_torch_does_not_import_torch(monkeypatch):
 
 def test_get_desktop_probe_without_torch_cuda_edition(monkeypatch):
     monkeypatch.setenv("AUDIO_TOOLS_EDITION", "cuda")
+    monkeypatch.setattr("audio_to_tab.hardware.sys.platform", "win32")
     probe = get_desktop_probe_without_torch()
     assert probe.cuda is True
+
+
+def test_lite_accelerator_gate_by_ram_and_platform():
+    eight = HostProbe(cuda=False, mps=True, ram_gb=8.0)
+    assert lite_accelerator_available(eight, platform="darwin") is False
+    assert lite_accelerator_available(MPS_MAC, platform="darwin") is True
+    assert lite_accelerator_available(CUDA_HIGH, platform="win32") is True
+    assert lite_accelerator_available(CUDA_HIGH, platform="darwin") is False
+    assert lite_accelerator_available(CPU_MID, platform="win32") is False
+
+
+def test_lite_device_choice_ids_cpu_plus_accelerator():
+    eight = HostProbe(cuda=False, mps=True, ram_gb=8.0)
+    assert lite_device_choice_ids(eight, platform="darwin") == []
+    assert lite_device_choice_ids(MPS_MAC, platform="darwin") == ["cpu", "mps"]
+    assert lite_device_choice_ids(CUDA_HIGH, platform="win32") == ["cpu", "cuda"]
+    assert lite_device_choice_ids(CPU_MID, platform="win32") == []
+    assert lite_device_plain_label("mps") == "Apple GPU"
+    assert lite_device_plain_label("cuda") == "NVIDIA GPU"
+    assert lite_device_plain_label("cpu") == "CPU"
+
+
+def test_lite_auto_speed_matches_desktop_recommend():
+    eight = HostProbe(cuda=False, mps=True, ram_gb=8.0)
+    assert lite_auto_speed_id(eight, platform="darwin") == "faster"
+    assert lite_auto_speed_id(MPS_MAC, platform="darwin") == "balanced"
+    assert lite_auto_speed_id(CUDA_HIGH, platform="win32") == "balanced"
+
+
+def test_lite_detected_and_using_captions_plain_language():
+    eight = HostProbe(cuda=False, mps=True, ram_gb=8.0)
+    detected = lite_detected_caption(eight, platform="darwin")
+    assert detected.startswith("Detected:")
+    assert "8" in detected
+    assert "CPU" in detected
+    assert "MPS" not in detected
+
+    m2 = HostProbe(
+        cuda=False, mps=True, ram_gb=16.0, cpu_brand="Apple M2 Pro"
+    )
+    detected_m2 = lite_detected_caption(m2, platform="darwin")
+    assert "Apple M2 Pro" in detected_m2
+    assert "16" in detected_m2
+    assert "Apple GPU" in detected_m2
+
+    intel = HostProbe(
+        cuda=False,
+        mps=False,
+        ram_gb=16.0,
+        cpu_brand="Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz",
+    )
+    detected_intel = lite_detected_caption(intel, platform="darwin")
+    assert "Intel" not in detected_intel
+    assert "CPU" in detected_intel
+
+    using_cpu = lite_using_caption(
+        eight, guitar_engine="guitar_demucs_6s", platform="darwin"
+    )
+    assert using_cpu.startswith("Using:")
+    assert "Faster" in using_cpu
+    assert "CPU" in using_cpu
+    assert "standard guitar model" in using_cpu
+    assert "Demucs" not in using_cpu
+    assert "RoFormer" not in using_cpu
+
+    using_mps = lite_using_caption(
+        MPS_MAC, guitar_engine="guitar_roformer", platform="darwin"
+    )
+    assert "Balanced" in using_mps
+    assert "Apple GPU" in using_mps
+    assert "strong guitar model" in using_mps
+    assert "MPS" not in using_mps
+
+    using_cuda = lite_using_caption(
+        CUDA_HIGH, guitar_engine="guitar_roformer", platform="win32"
+    )
+    assert "NVIDIA GPU" in using_cuda
+
+    # User Run-on override (Lite radio) must drive the Using caption.
+    using_override = lite_using_caption(
+        MPS_MAC,
+        guitar_engine="guitar_roformer",
+        platform="darwin",
+        device="cpu",
+        speed="faster",
+    )
+    assert "Faster" in using_override
+    assert "CPU" in using_override
+    assert "Apple GPU" not in using_override
+
+
+def test_apple_chip_label_only_keeps_apple_brands():
+    assert apple_chip_label("Apple M2 Pro") == "Apple M2 Pro"
+    assert apple_chip_label("  Apple M1  ") == "Apple M1"
+    assert apple_chip_label("Intel(R) Core(TM) i7") is None
+    assert apple_chip_label(None) is None
+
+
+def test_desktop_system_summary_includes_apple_chip():
+    probe = HostProbe(
+        cuda=False, mps=True, ram_gb=16.0, cpu_brand="Apple M2 Pro"
+    )
+    summary = desktop_system_summary(probe, platform="darwin")
+    assert "Apple M2 Pro" in summary
+    assert "Apple GPU" in summary
+
+
+def test_refuse_long_roformer_audio(tmp_path, monkeypatch):
+    from audio_to_tab.roformer import _refuse_long_roformer_audio, run_roformer_model
+
+    audio = tmp_path / "song.wav"
+    audio.write_bytes(b"x")
+    monkeypatch.setattr(
+        "audio_to_tab.isolate.probe_duration_sec", lambda _path: 400.0
+    )
+    monkeypatch.setattr(
+        "audio_to_tab.hardware.roformer_max_audio_sec", lambda _probe=None: 90.0
+    )
+    monkeypatch.setattr(
+        "audio_to_tab.hardware.get_desktop_probe",
+        lambda **_k: HostProbe(cuda=False, mps=False, ram_gb=8.0),
+    )
+    with pytest.raises(RuntimeError, match="90"):
+        _refuse_long_roformer_audio(audio)
+    with pytest.raises(RuntimeError, match="90"):
+        run_roformer_model(audio, tmp_path, model="bs_roformer_sw", device="cpu")

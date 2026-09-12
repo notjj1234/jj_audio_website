@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import shutil
 import sys
-from collections.abc import Iterable, Mapping, MutableMapping
+import time
+from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -14,6 +17,10 @@ from uuid import uuid4
 from audio_to_tab.hardware import HostProbe, resolve_desktop_speed
 from audio_to_tab.isolate import effective_isolation_quality
 from audio_to_tab.mixer import stem_display_name, stem_energy_db
+from ui.common import DATA_DIR, delete_run
+from ui.stem_icons import outcome_icon_markdown, stem_icon_markdown
+
+logger = logging.getLogger(__name__)
 
 ISOLATION_STAGE_ORDER = (
     "ingest",
@@ -80,19 +87,19 @@ TRACK_OPTIONS: dict[str, dict[str, Any]] = {
         "stem": "other",
     },
     "piano_demucs": {
-        "label": "Piano (Demucs 6-stem)",
+        "label": "Piano (Demucs 6-stem — heavy bleed)",
         "stem": "piano",
     },
     "guitar_demucs_6s": {
-        "label": "Guitar (Demucs 6-stem, weaker)",
+        "label": "Guitar (Demucs 6-stem, weaker — other instruments still bleed in)",
         "stem": "guitar",
     },
     "guitar_roformer": {
-        "label": "Guitar (BS-RoFormer, better, slower)",
+        "label": "Guitar (BS-RoFormer, better, slower — residual bleed remains)",
         "stem": "guitar",
     },
     "guitar_roformer_refine": {
-        "label": "Guitar (BS-RoFormer + MelBand refine, best, slowest)",
+        "label": "Guitar (BS-RoFormer + MelBand refine, best, slowest — residual bleed remains)",
         "stem": "guitar",
     },
     "vocals_instrumental_demucs": {
@@ -121,15 +128,16 @@ DEFAULT_TRACK_OPTIONS = ("vocals_demucs", "guitar_demucs_6s")
 
 ROFORMER_DOWNLOAD_CAVEAT = (
     "Downloads ~700 MB BS-RoFormer-SW weights on first use, then a guitar "
-    "specialist (~45 MB). Much slower on CPU. Community weights have no stated "
-    "license — use accordingly."
+    "specialist (~45 MB). Much slower on CPU. Residual bleed remains. "
+    "Community weights have no stated license — use accordingly."
 )
 ROFORMER_MIXED_STEMS_NOTE = (
     "All stems are separated in one BS-RoFormer pass; unselected stems are discarded."
 )
 TRACKS_PICKER_HELP = (
     "Pick the stems you want. Guitar can use Demucs (faster) or BS-RoFormer "
-    "(better quality, much slower on CPU)."
+    "(cleaner on a GPU, much slower on CPU). Neither is bleed-free, and piano "
+    "from Demucs is unreliable."
 )
 
 ROFORMER_GUITAR_OPTION_IDS = frozenset({"guitar_roformer", "guitar_roformer_refine"})
@@ -177,49 +185,77 @@ def normalize_guitar_track_selection(guitar: str, *, roformer_available: bool) -
     return "none"
 
 
-def default_guitar_track_option(*, roformer_available: bool) -> str:
-    """Preferred guitar engine for a fresh session (better model wins when present)."""
-    return "guitar_roformer" if roformer_available else "guitar_demucs_6s"
+def default_guitar_track_option(
+    *,
+    roformer_available: bool,
+    prefer_roformer: bool = True,
+) -> str:
+    """Preferred guitar engine for a fresh session / Lite outcome card.
+
+    When ``prefer_roformer`` is False (Lite on CPU-only hosts), keep Demucs even
+    if BS-RoFormer is installed. Pro seeding keeps ``prefer_roformer=True``.
+    """
+    if prefer_roformer and roformer_available:
+        return "guitar_roformer"
+    return "guitar_demucs_6s"
 
 
 def promote_default_guitar_option(
     options: list[str] | tuple[str, ...],
     *,
     roformer_available: bool,
+    prefer_roformer: bool = True,
 ) -> list[str]:
-    """Swap the default Demucs guitar pick for BS-RoFormer when the backend exists.
+    """Swap the default Demucs guitar pick for BS-RoFormer when preferred and present.
 
     Used only when seeding UI state for a brand-new session; persisted user
     picks are never rewritten by this helper (``normalize_guitar_track_selection``
     is the downgrade path, this is the upgrade path).
     """
-    promoted = default_guitar_track_option(roformer_available=roformer_available)
+    promoted = default_guitar_track_option(
+        roformer_available=roformer_available,
+        prefer_roformer=prefer_roformer,
+    )
     out = [str(x) for x in options]
     if "guitar_demucs_6s" in out and promoted == "guitar_roformer":
         out[out.index("guitar_demucs_6s")] = promoted
     return out
 
 
-# Lite goal picker. These are outcomes people ask for, not engines: the engine is
-# always the strongest one this host can run, so Lite never trades quality for
-# simplicity. Pro exposes the same choices as individual stems.
+# Lite goal picker. Outcomes are goals, not engines. Lite auto-picks speed/device
+# and may prefer Demucs guitar on CPU-only hosts; Pro exposes every control.
 OUTCOME_CARD_ORDER: tuple[str, ...] = ("band", "guitar", "karaoke", "vocals")
-OUTCOME_CARDS: dict[str, dict[str, str]] = {
+OUTCOME_CARDS: dict[str, dict[str, str | int]] = {
     "band": {
         "label": "Every part separately",
-        "help": "Vocals, drums, bass and guitar as separate tracks you can mix.",
+        "help": (
+            "Vocals, drums, bass and guitar as separate tracks. Guitar can still "
+            "pick up other instruments. Lite Faster is quicker than Balanced, not "
+            "the same quality."
+        ),
+        "stems_line": "Vocals · Drums · Bass · Guitar",
+        "n_tracks": 4,
     },
     "guitar": {
         "label": "Guitar on its own",
-        "help": "Just the guitar, using the strongest model this computer can run.",
+        "help": (
+            "Just the guitar, using the strongest model this computer can run. "
+            "Expect bleed from bass, drums, or vocals; lead and rhythm stay on one track."
+        ),
+        "stems_line": "Guitar",
+        "n_tracks": 1,
     },
     "karaoke": {
         "label": "Vocals + backing track",
         "help": "Two tracks: the singer, and everything else. Quickest option.",
+        "stems_line": "Vocals · Instrumental",
+        "n_tracks": 2,
     },
     "vocals": {
         "label": "Vocals on its own",
         "help": "Just the singer.",
+        "stems_line": "Vocals",
+        "n_tracks": 1,
     },
 }
 DEFAULT_OUTCOME_CARD = "band"
@@ -227,13 +263,21 @@ OUTCOME_CARD_KEY = "isolate_outcome_card"
 CUSTOM_OUTCOME_CARD = "custom"
 
 
-def resolve_outcome_card(card_id: str, *, roformer_available: bool) -> list[str]:
+def resolve_outcome_card(
+    card_id: str,
+    *,
+    roformer_available: bool,
+    prefer_roformer: bool = True,
+) -> list[str]:
     """Track option ids behind a Lite outcome.
 
-    Each outcome resolves to the best engine available, so a Lite user and a Pro
-    user who read every label end up running the same pipeline.
+    Guitar engine follows ``prefer_roformer`` (Lite gates on accelerator; Pro
+    prefers RoFormer when installed).
     """
-    guitar = default_guitar_track_option(roformer_available=roformer_available)
+    guitar = default_guitar_track_option(
+        roformer_available=roformer_available,
+        prefer_roformer=prefer_roformer,
+    )
     card = card_id if card_id in OUTCOME_CARDS else DEFAULT_OUTCOME_CARD
     if card == "karaoke":
         return [VOCALS_INSTRUMENTAL_OPTION_ID]
@@ -248,6 +292,7 @@ def outcome_card_for_options(
     option_ids: Iterable[str],
     *,
     roformer_available: bool,
+    prefer_roformer: bool = True,
 ) -> str | None:
     """Which outcome describes this exact selection, or None for a custom one.
 
@@ -258,9 +303,67 @@ def outcome_card_for_options(
     if not wanted:
         return None
     for card in OUTCOME_CARD_ORDER:
-        if wanted == set(resolve_outcome_card(card, roformer_available=roformer_available)):
+        if wanted == set(
+            resolve_outcome_card(
+                card,
+                roformer_available=roformer_available,
+                prefer_roformer=prefer_roformer,
+            )
+        ):
             return card
     return None
+
+
+def custom_stems_from_options(option_ids: Iterable[str]) -> list[str]:
+    """Which custom-grid stems are on for this option list.
+
+    Karaoke (vocals + instrumental) is a 2-stem path, not the six-stem grid.
+    """
+    ids = [str(x) for x in (option_ids or ())]
+    if ids == [VOCALS_INSTRUMENTAL_OPTION_ID]:
+        return []
+    present: set[str] = set()
+    for oid in ids:
+        spec = TRACK_OPTIONS.get(oid)
+        if not spec:
+            continue
+        stem = str(spec["stem"])
+        if stem in CUSTOM_STEM_CHOICES:
+            present.add(stem)
+    return [stem for stem in CUSTOM_STEM_TILE_ORDER if stem in present]
+
+
+def toggle_custom_stem_options(
+    option_ids: Iterable[str],
+    stem_id: str,
+    *,
+    roformer_available: bool,
+    prefer_roformer: bool = True,
+) -> list[str]:
+    """Turn one custom-grid stem on or off. Exits karaoke 2-stem mode."""
+    if stem_id not in CUSTOM_STEM_CHOICES:
+        return [str(x) for x in (option_ids or ())]
+    current = [str(x) for x in (option_ids or ())]
+    if current == [VOCALS_INSTRUMENTAL_OPTION_ID]:
+        current = []
+    selected = set(custom_stems_from_options(current))
+    if stem_id in selected:
+        if stem_id == "guitar":
+            current = [oid for oid in current if oid not in GUITAR_TRACK_OPTION_IDS]
+        else:
+            drop = STEM_TO_TRACK_OPTION[stem_id]
+            current = [oid for oid in current if oid != drop]
+    elif stem_id == "guitar":
+        if not any(oid in GUITAR_TRACK_OPTION_IDS for oid in current):
+            current.append(
+                default_guitar_track_option(
+                    roformer_available=roformer_available,
+                    prefer_roformer=prefer_roformer,
+                )
+            )
+    else:
+        current.append(STEM_TO_TRACK_OPTION[stem_id])
+    return current
 
 
 def tracks_picker_help(*, roformer_available: bool) -> str:
@@ -316,6 +419,22 @@ CUSTOM_STEM_CHOICES: dict[str, str] = {
     "guitar": "Guitar",
     "piano": "Piano",
     "other": "Other",
+}
+# Display order for the New-tab custom grid (not Moises’ extra locked row).
+CUSTOM_STEM_TILE_ORDER: tuple[str, ...] = (
+    "vocals",
+    "guitar",
+    "bass",
+    "drums",
+    "piano",
+    "other",
+)
+STEM_TO_TRACK_OPTION: dict[str, str] = {
+    "vocals": "vocals_demucs",
+    "drums": "drums_demucs",
+    "bass": "bass_demucs",
+    "piano": "piano_demucs",
+    "other": "other_demucs",
 }
 
 CUSTOM_STEM_OUTPUTS: dict[str, tuple[str, ...]] = {
@@ -401,11 +520,42 @@ def resolve_speed_preset(
     }
 
 
+LITE_MAX_DURATION_SEC = 90.0
+
+
 def default_region_end(duration_sec: float, *, min_length: float = 30.0) -> float:
     """Pick a sensible default section end for the region slider."""
     if duration_sec <= min_length:
         return duration_sec
     return min(duration_sec, min_length)
+
+
+def clamp_lite_clip(
+    start_sec: float,
+    max_duration_sec: float | None,
+    file_duration_sec: float | None,
+    *,
+    cap: float = LITE_MAX_DURATION_SEC,
+) -> tuple[float, float, bool]:
+    """Optional helper: shorten a clip to ``cap`` (Safer: first 90 s logic).
+
+    Desktop Lite enqueue no longer calls this — full-file is allowed with a
+    visible warning. Returns ``(start_sec, length_sec, clamped)``.
+    """
+    start = max(0.0, float(start_sec or 0.0))
+    remaining: float | None = None
+    if file_duration_sec is not None:
+        remaining = max(0.0, float(file_duration_sec) - start)
+    if max_duration_sec is None:
+        requested = remaining if remaining is not None else cap
+    else:
+        requested = float(max_duration_sec)
+        if remaining is not None:
+            requested = min(requested, remaining)
+    requested = max(0.0, requested)
+    length = min(requested, cap)
+    clamped = length + 1e-6 < requested
+    return start, length, clamped
 
 
 def clamp_region_bounds(
@@ -607,6 +757,7 @@ ISOLATE_OUTPUT_NAME_KEY = "isolate_output_name"
 ISOLATE_OUTPUT_NAME_PENDING_KEY = "isolate_output_name_pending"
 ISOLATE_YOUTUBE_URL_KEY = "isolate_youtube_url"
 ISOLATE_YOUTUBE_URL_PENDING_KEY = "isolate_youtube_url_pending"
+ISOLATE_YOUTUBE_TITLE_PENDING_KEY = "isolate_youtube_title_pending"
 ISOLATE_NAMED_YOUTUBE_URL_KEY = "isolate_named_youtube_url"
 ISOLATE_AUTO_OUTPUT_NAME_KEY = "isolate_auto_output_name"
 
@@ -657,16 +808,22 @@ def sync_output_name_on_youtube(
     output_name: str,
     auto_output_name: str | None,
     downloaded_stem: str | None = None,
+    preferred_label: str | None = None,
 ) -> tuple[str, str, str, bool]:
     """When the YouTube URL changes, replace an auto Output name.
 
     Returns ``(name, named_url, auto_name, changed)``. A user-edited name is
     kept for the same URL; a new URL always takes the new label.
+    ``preferred_label`` is the search-hit title (beats video-id fallback).
     """
     url = (youtube_url or "").strip()
     if not url:
         return output_name, last_named_url or "", auto_output_name or "", False
-    label = (downloaded_stem or "").strip() or youtube_label_from_url(url)
+    label = (
+        (downloaded_stem or "").strip()
+        or (preferred_label or "").strip()
+        or youtube_label_from_url(url)
+    )
     last = (last_named_url or "").strip()
     current = (output_name or "").strip()
     auto = (auto_output_name or "").strip()
@@ -685,9 +842,12 @@ def apply_youtube_output_name_sync(
     apply_now: bool = True,
 ) -> str | None:
     """Queue (and optionally apply) a YouTube Output name before the text_input."""
-    if not session.get("isolate_youtube_enabled"):
-        return None
     url = str(session.get(ISOLATE_YOUTUBE_URL_KEY) or "").strip()
+    if not url:
+        return None
+    preferred = None
+    if ISOLATE_YOUTUBE_TITLE_PENDING_KEY in session:
+        preferred = str(session.pop(ISOLATE_YOUTUBE_TITLE_PENDING_KEY) or "").strip() or None
     name, named_url, auto, changed = sync_output_name_on_youtube(
         youtube_url=url,
         last_named_url=(
@@ -699,6 +859,7 @@ def apply_youtube_output_name_sync(
             str(session.get(ISOLATE_AUTO_OUTPUT_NAME_KEY) or "") or None
         ),
         downloaded_stem=downloaded_stem,
+        preferred_label=preferred,
     )
     session[ISOLATE_NAMED_YOUTUBE_URL_KEY] = named_url
     session[ISOLATE_AUTO_OUTPUT_NAME_KEY] = auto
@@ -736,11 +897,22 @@ def apply_pending_output_name(session: MutableMapping[str, object]) -> str | Non
 def queue_clear_youtube_url(session: MutableMapping[str, object]) -> None:
     """Clear the YouTube field on the next run. MUST NOT write the widget-bound key."""
     session[ISOLATE_YOUTUBE_URL_PENDING_KEY] = ""
+    session.pop(ISOLATE_YOUTUBE_TITLE_PENDING_KEY, None)
 
 
-def queue_youtube_url(session: MutableMapping[str, object], url: str) -> None:
+def queue_youtube_url(
+    session: MutableMapping[str, object],
+    url: str,
+    *,
+    title: str | None = None,
+) -> None:
     """Set the YouTube URL on the next run (e.g. after picking a search hit)."""
     session[ISOLATE_YOUTUBE_URL_PENDING_KEY] = (url or "").strip()
+    cleaned = (title or "").strip()
+    if cleaned:
+        session[ISOLATE_YOUTUBE_TITLE_PENDING_KEY] = cleaned
+    else:
+        session.pop(ISOLATE_YOUTUBE_TITLE_PENDING_KEY, None)
 
 
 def apply_pending_youtube_url(session: MutableMapping[str, object]) -> str | None:
@@ -753,13 +925,137 @@ def apply_pending_youtube_url(session: MutableMapping[str, object]) -> str | Non
     return value
 
 
+def adopt_audio_into_run(audio_path: Path, output_dir: Path) -> Path:
+    """Copy ``audio_path`` into ``output_dir`` (same basename) for job ownership.
+
+    No-op when the file already lives inside ``output_dir``.
+    """
+    src = Path(audio_path)
+    dest_dir = Path(output_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / src.name
+    try:
+        if src.resolve() == dest.resolve():
+            return dest
+        if src.parent.resolve() == dest_dir.resolve():
+            return src
+    except OSError:
+        pass
+    shutil.copy2(src, dest)
+    return dest
+
+
+def is_youtube_staging_path(path: str | Path | None, fingerprint: str | None) -> bool:
+    """True when ``path`` is a DATA_DIR run-child file staged from YouTube."""
+    if not path or not fingerprint:
+        return False
+    if not str(fingerprint).startswith("youtube:"):
+        return False
+    try:
+        file_path = Path(path).resolve()
+        data_root = DATA_DIR.resolve()
+    except OSError:
+        return False
+    if not file_path.is_file():
+        return False
+    run_dir = file_path.parent
+    try:
+        run_dir.relative_to(data_root)
+    except ValueError:
+        return False
+    if run_dir == data_root or run_dir.parent != data_root:
+        return False
+    return True
+
+
+def staging_paths_still_needed(path: str | Path | None) -> bool:
+    """True when a queued/running job still points at this staging folder."""
+    if not path:
+        return False
+    try:
+        staging_dir = Path(path).resolve()
+        if staging_dir.is_file():
+            staging_dir = staging_dir.parent
+    except OSError:
+        return False
+    try:
+        from ui.isolate_jobs import list_jobs, read_spec
+    except Exception:
+        return False
+    try:
+        jobs = list_jobs(limit=50)
+    except Exception:
+        return False
+    for job in jobs:
+        status = str(job.get("status") or "")
+        if status not in {"queued", "running", "pausing", "paused"}:
+            continue
+        job_id = str(job.get("id") or "")
+        if not job_id:
+            continue
+        spec = read_spec(job_id)
+        if spec is None or not spec.audio_path:
+            continue
+        try:
+            audio = Path(spec.audio_path).resolve()
+        except OSError:
+            continue
+        if audio == staging_dir or staging_dir in audio.parents:
+            return True
+    return False
+
+
+def discard_youtube_staging(
+    path: str | Path | None,
+    *,
+    fingerprint: str | None,
+    retain_paths: Sequence[str | Path] = (),
+) -> bool:
+    """Delete a YouTube staging run folder when safe. Never raises."""
+    if not is_youtube_staging_path(path, fingerprint):
+        return False
+    try:
+        file_path = Path(path).resolve()
+        staging_dir = file_path.parent
+    except OSError:
+        return False
+    retain: set[Path] = set()
+    for raw in retain_paths:
+        try:
+            retain.add(Path(raw).resolve())
+        except OSError:
+            continue
+    if file_path in retain or staging_dir in retain:
+        return False
+    for kept in retain:
+        try:
+            if staging_dir in kept.parents or kept == staging_dir:
+                return False
+        except Exception:
+            continue
+    if staging_paths_still_needed(staging_dir):
+        return False
+    try:
+        return bool(delete_run(staging_dir))
+    except Exception:
+        logger.debug("discard_youtube_staging failed for %s", staging_dir, exc_info=True)
+        return False
+
+
 def reset_new_tab_source(session: MutableMapping[str, object]) -> None:
     """Remount the uploader and clear New-tab source after a job is queued.
 
-    Does not delete staged audio on disk. Must not write widget-bound
+    May delete a YouTube staging folder under ``DATA_DIR`` when the pending
+    fingerprint is ``youtube:…``. Must not write widget-bound
     ``isolate_output_name`` / ``isolate_youtube_url`` keys — those go through
     pending keys so the next run can apply them before the widgets mount.
     """
+    pending_path = session.get("isolate_pending_audio_path")
+    pending_fp = session.get("isolate_pending_fp") or session.get("isolate_upload_fp")
+    discard_youtube_staging(
+        str(pending_path) if pending_path else None,
+        fingerprint=str(pending_fp) if pending_fp else None,
+    )
     try:
         current = int(session.get("isolate_upload_key") or 0)
     except (TypeError, ValueError):
@@ -804,26 +1100,205 @@ WORKSPACE_TABS = ("New", "Mixer", "Queue")
 WORKSPACE_NEXT_KEY = "_isolate_workspace_next"
 LISTEN_PICKER_KEY = "isolate_listen_picker"
 LISTEN_PICKER_NEXT_KEY = "_isolate_listen_picker_next"
+OPEN_MIX_TABS_KEY = "isolate_open_mix_tabs"
+OPEN_MIX_TABS_MAX = 8
+NEW_DRAFT_TAB_ID = "__new__"
+SHELL_TAB_KEY = "isolate_shell_tab"
+SHELL_VIEW_KEY = "isolate_shell_view"
+SHELL_VIEW_NEXT_KEY = "_isolate_shell_view_next"
+SHELL_VIEWS = ("home", "mix")
 ISOLATE_EXPORT_DIR_KEY = "isolate_export_dir"
 
 
-def apply_workspace_tab(session: MutableMapping[str, Any], *, has_artifacts: bool) -> str:
-    """Resolve New/Mixer/Queue before ``st.tabs`` is instantiated.
+def is_new_draft_tab(tab_id: object) -> bool:
+    return str(tab_id or "") == NEW_DRAFT_TAB_ID
 
-    Launch always lands on New so the static form paints immediately. A finishing
-    job sets ``WORKSPACE_NEXT_KEY`` then reruns so Mixer can open without fighting
-    an already-mounted tab widget.
+
+def normalize_open_mix_tabs(
+    tabs: object,
+    *,
+    existing: set[str] | None = None,
+    cap: int = OPEN_MIX_TABS_MAX,
+    require_dir: bool = True,
+) -> list[str]:
+    """Dedupe run_dir paths / New draft id, optionally drop missing dirs, enforce cap."""
+    if not isinstance(tabs, (list, tuple)):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in tabs:
+        path = str(raw or "").strip()
+        if not path or path in seen:
+            continue
+        if path == NEW_DRAFT_TAB_ID:
+            seen.add(path)
+            out.append(path)
+            continue
+        if existing is not None and path not in existing:
+            continue
+        if require_dir and existing is None and not Path(path).is_dir():
+            continue
+        seen.add(path)
+        out.append(path)
+    if len(out) > cap:
+        out = out[-cap:]
+    return out
+
+
+def add_open_mix_tab(
+    session: MutableMapping[str, Any],
+    run_dir: str | Path | None,
+    *,
+    cap: int = OPEN_MIX_TABS_MAX,
+) -> list[str]:
+    """Ensure a mix/draft tab is open without reordering existing tabs.
+
+    New tabs append at the end (Chrome-style). Focusing an already-open tab
+    leaves strip order alone so only the active indicator moves.
+    """
+    path = str(run_dir or "").strip()
+    if not path:
+        return normalize_open_mix_tabs(
+            session.get(OPEN_MIX_TABS_KEY), cap=cap, require_dir=False
+        )
+    current = normalize_open_mix_tabs(
+        session.get(OPEN_MIX_TABS_KEY), cap=cap * 2, require_dir=False
+    )
+    if path in current:
+        if len(current) > cap:
+            current = current[-cap:]
+        session[OPEN_MIX_TABS_KEY] = current
+        return current
+    current.append(path)
+    if len(current) > cap:
+        current = current[-cap:]
+    session[OPEN_MIX_TABS_KEY] = current
+    return current
+
+
+def close_open_mix_tab(
+    session: MutableMapping[str, Any],
+    run_dir: str | Path | None,
+) -> str | None:
+    """Remove a tab. Returns a neighbor to focus, or None if none remain."""
+    path = str(run_dir or "").strip()
+    tabs = [
+        p
+        for p in normalize_open_mix_tabs(
+            session.get(OPEN_MIX_TABS_KEY), require_dir=False
+        )
+        if p == NEW_DRAFT_TAB_ID or Path(p).is_dir()
+    ]
+    if not path or path not in tabs:
+        session[OPEN_MIX_TABS_KEY] = tabs
+        return tabs[-1] if tabs else None
+    idx = tabs.index(path)
+    tabs = [p for p in tabs if p != path]
+    session[OPEN_MIX_TABS_KEY] = tabs
+    if not tabs:
+        return None
+    if idx >= len(tabs):
+        return tabs[-1]
+    return tabs[idx]
+
+
+def open_mix_tabs_for_session(
+    session: MutableMapping[str, Any],
+    *,
+    library_dirs: Iterable[str] | None = None,
+) -> list[str]:
+    if library_dirs is not None:
+        keep = {str(d) for d in library_dirs} | {NEW_DRAFT_TAB_ID}
+        tabs = normalize_open_mix_tabs(
+            session.get(OPEN_MIX_TABS_KEY), existing=keep, require_dir=False
+        )
+        tabs = [p for p in tabs if p in keep]
+    else:
+        tabs = [
+            p
+            for p in normalize_open_mix_tabs(
+                session.get(OPEN_MIX_TABS_KEY), require_dir=False
+            )
+            if p == NEW_DRAFT_TAB_ID or Path(p).is_dir()
+        ]
+    session[OPEN_MIX_TABS_KEY] = tabs
+    return tabs
+
+def apply_workspace_tab(session: MutableMapping[str, Any], *, has_artifacts: bool) -> str:
+    """Legacy New/Mixer/Queue resolver — maps onto Home/mix shell views.
+
+    Kept so older persisted UI state and tests keep working. Prefer
+    ``apply_shell_view`` for new code.
     """
     _ = has_artifacts
     nxt = session.pop(WORKSPACE_NEXT_KEY, None)
     if nxt in WORKSPACE_TABS:
         session[WORKSPACE_KEY] = nxt
-        return str(nxt)
-    current = session.get(WORKSPACE_KEY)
-    if current not in WORKSPACE_TABS:
+    elif session.get(WORKSPACE_KEY) not in WORKSPACE_TABS:
         session[WORKSPACE_KEY] = "New"
-        return "New"
-    return str(current)
+    tab = str(session.get(WORKSPACE_KEY) or "New")
+    if tab == "Mixer":
+        session[SHELL_VIEW_KEY] = "mix"
+    else:
+        session[SHELL_VIEW_KEY] = "home"
+    return tab
+
+
+def apply_shell_view(session: MutableMapping[str, Any]) -> str:
+    """Resolve Home vs mix before the Moises tab strip is painted."""
+    nxt = session.pop(SHELL_VIEW_NEXT_KEY, None)
+    if nxt in SHELL_VIEWS:
+        session[SHELL_VIEW_KEY] = nxt
+    # Migrate legacy workspace tabs once.
+    if session.get(SHELL_VIEW_KEY) not in SHELL_VIEWS:
+        legacy = session.get(WORKSPACE_KEY)
+        if legacy == "Mixer" or session.get(WORKSPACE_NEXT_KEY) == "Mixer":
+            session[SHELL_VIEW_KEY] = "mix"
+        else:
+            session[SHELL_VIEW_KEY] = "home"
+    view = str(session.get(SHELL_VIEW_KEY) or "home")
+    if view not in SHELL_VIEWS:
+        view = "home"
+        session[SHELL_VIEW_KEY] = view
+    # Mirror into legacy workspace key for persisted snapshots.
+    session[WORKSPACE_KEY] = "Mixer" if view == "mix" else "New"
+    return view
+
+
+def open_mix_shell(session: MutableMapping[str, Any]) -> None:
+    """Request the mix shell on the next full run."""
+    session[SHELL_VIEW_NEXT_KEY] = "mix"
+    session[WORKSPACE_NEXT_KEY] = "Mixer"
+    session.pop(SHELL_TAB_KEY, None)
+
+
+def open_home_shell(session: MutableMapping[str, Any]) -> None:
+    """Request the Home shell on the next full run (Home chrome, not New tab)."""
+    session[SHELL_VIEW_NEXT_KEY] = "home"
+    session[WORKSPACE_NEXT_KEY] = "New"
+    session[SHELL_TAB_KEY] = "home"
+
+
+def open_new_draft_tab(
+    session: MutableMapping[str, Any],
+    *,
+    fresh: bool = True,
+) -> None:
+    """Open a literal New tab (Chrome-style +) and show the separate form."""
+    add_open_mix_tab(session, NEW_DRAFT_TAB_ID)
+    session[SHELL_TAB_KEY] = NEW_DRAFT_TAB_ID
+    session[SHELL_VIEW_NEXT_KEY] = "home"
+    session[WORKSPACE_NEXT_KEY] = "New"
+    if fresh:
+        reset_new_tab_source(session)
+
+
+def focus_new_draft_tab(session: MutableMapping[str, Any]) -> None:
+    """Focus an existing New tab without wiping the form."""
+    add_open_mix_tab(session, NEW_DRAFT_TAB_ID)
+    session[SHELL_TAB_KEY] = NEW_DRAFT_TAB_ID
+    session[SHELL_VIEW_NEXT_KEY] = "home"
+    session[WORKSPACE_NEXT_KEY] = "New"
 
 
 QUEUE_IN_FLIGHT_STATUSES = frozenset(
@@ -980,7 +1455,7 @@ def resolve_ui_mode(value: Any) -> str:
 
 
 def is_pro_mode(session: MutableMapping[str, Any]) -> bool:
-    """Whether Pro controls should render. Lite and Pro run identical pipelines."""
+    """Whether Pro controls should render. Lite auto-profiles; Pro is manual."""
     return resolve_ui_mode(session.get(UI_MODE_KEY)) == "Pro"
 
 
@@ -992,6 +1467,7 @@ PERSISTED_SETTING_KEYS: tuple[str, ...] = (
     "isolate_speed_applied",
     "isolate_quality",
     "isolate_device",
+    "isolate_lite_run_on",
     "isolate_guitar_ft",
     "isolate_two_pass",
     "isolate_guitar_refine",
@@ -1024,17 +1500,24 @@ def apply_persisted_settings(
 
 
 def isolate_ui_state_payload(session: MutableMapping[str, Any]) -> dict[str, Any]:
-    nxt = session.get(WORKSPACE_NEXT_KEY)
-    tab = nxt if nxt in WORKSPACE_TABS else session.get(WORKSPACE_KEY)
-    workspace = tab if tab in WORKSPACE_TABS else "New"
+    view = session.get(SHELL_VIEW_KEY)
+    if view not in SHELL_VIEWS:
+        nxt = session.get(WORKSPACE_NEXT_KEY)
+        tab = nxt if nxt in WORKSPACE_TABS else session.get(WORKSPACE_KEY)
+        view = "mix" if tab == "Mixer" else "home"
     viewing = session.get("isolate_viewing_run_dir")
     run_dir = session.get("isolate_run_dir")
     export_dir = session.get(ISOLATE_EXPORT_DIR_KEY)
+    open_tabs = normalize_open_mix_tabs(session.get(OPEN_MIX_TABS_KEY), require_dir=False)
+    shell_tab = session.get(SHELL_TAB_KEY)
     return {
-        "workspace": workspace,
+        "workspace": "Mixer" if view == "mix" else "New",
+        "shell_view": view,
+        "shell_tab": str(shell_tab) if shell_tab else None,
         "viewing_run_dir": str(viewing) if viewing else None,
         "run_dir": str(run_dir) if run_dir else None,
         "export_dir": str(export_dir) if export_dir else None,
+        "open_mix_tabs": open_tabs,
         "mode": resolve_ui_mode(session.get(UI_MODE_KEY)),
         "settings": persisted_settings_payload(session),
     }
@@ -1047,6 +1530,16 @@ def apply_stored_isolate_ui_state(
     """Fill missing session tab/run pointers from disk. Live session keys win."""
     if not stored:
         return
+    shell = stored.get("shell_view")
+    if session.get(SHELL_VIEW_KEY) not in SHELL_VIEWS:
+        if shell in SHELL_VIEWS:
+            session[SHELL_VIEW_KEY] = shell
+        else:
+            tab = stored.get("workspace")
+            if tab == "Mixer":
+                session[SHELL_VIEW_KEY] = "mix"
+            elif tab in WORKSPACE_TABS:
+                session[SHELL_VIEW_KEY] = "home"
     tab = stored.get("workspace")
     if session.get(WORKSPACE_KEY) not in WORKSPACE_TABS and tab in WORKSPACE_TABS:
         session[WORKSPACE_KEY] = tab
@@ -1056,6 +1549,12 @@ def apply_stored_isolate_ui_state(
         session["isolate_run_dir"] = str(stored["run_dir"])
     if not session.get(ISOLATE_EXPORT_DIR_KEY) and stored.get("export_dir"):
         session[ISOLATE_EXPORT_DIR_KEY] = str(stored["export_dir"])
+    if OPEN_MIX_TABS_KEY not in session and stored.get("open_mix_tabs") is not None:
+        session[OPEN_MIX_TABS_KEY] = normalize_open_mix_tabs(
+            stored.get("open_mix_tabs"), require_dir=False
+        )
+    if SHELL_TAB_KEY not in session and stored.get("shell_tab"):
+        session[SHELL_TAB_KEY] = str(stored["shell_tab"])
     if UI_MODE_KEY not in session and stored.get("mode"):
         session[UI_MODE_KEY] = resolve_ui_mode(stored["mode"])
     apply_persisted_settings(session, stored.get("settings"))
@@ -1151,6 +1650,9 @@ def seed_consumed_job_ids(jobs: list[dict[str, Any]]) -> list[str]:
 
 _OS_NOTIFY_STATUSES = frozenset({"succeeded", "failed"})
 _OS_NOTIFY_APP_TITLE = "Audio Isolation"
+# When notified_ids was seeded against an empty job list, the next poll must not
+# toast the entire history. Only toast terminal jobs that finished this recently.
+_OS_NOTIFY_CATCHUP_SEC = 180.0
 
 
 def seed_notified_job_ids(jobs: list[dict[str, Any]]) -> list[str]:
@@ -1181,13 +1683,31 @@ def os_notify_message(job: dict[str, Any]) -> tuple[str, str] | None:
 def jobs_needing_os_notify(
     jobs: list[dict[str, Any]],
     notified_ids: list[str] | None,
+    *,
+    now: float | None = None,
 ) -> tuple[list[str], list[dict[str, Any]]]:
-    """Return ``(updated_ids, jobs_to_toast)``. First call (``None``) seeds without toasting."""
+    """Return ``(updated_ids, jobs_to_toast)``. First call (``None``) seeds without toasting.
+
+    An empty ``notified_ids`` list is not "toast everyone". That happens when the
+    first poll saw no jobs yet; the next poll would otherwise re-notify every
+    historical failure when a new separation finishes.
+    """
     if notified_ids is None:
         return seed_notified_job_ids(jobs), []
+    clock = time.time() if now is None else now
+    if not notified_ids:
+        seeded = seed_notified_job_ids(jobs)
+        pending: list[dict[str, Any]] = []
+        for job in jobs:
+            if job.get("status") not in _OS_NOTIFY_STATUSES:
+                continue
+            finished = float(job.get("finished_at") or job.get("updated_at") or 0.0)
+            if finished > 0.0 and (clock - finished) <= _OS_NOTIFY_CATCHUP_SEC:
+                pending.append(job)
+        return seeded, pending
     seen = {str(item) for item in notified_ids if item}
     updated = [str(item) for item in notified_ids if item]
-    pending: list[dict[str, Any]] = []
+    pending = []
     for job in jobs:
         if job.get("status") not in _OS_NOTIFY_STATUSES:
             continue
@@ -1369,8 +1889,7 @@ def pending_upload_fp_for_stale(session: MutableMapping[str, Any]) -> str | None
     pending_fp = session.get("isolate_pending_fp") or session.get("isolate_upload_fp")
     pending_path = session.get("isolate_pending_audio_path")
     has_file = bool(pending_path and Path(str(pending_path)).exists())
-    youtube_on = bool(session.get("isolate_youtube_enabled"))
-    youtube_url = (session.get("isolate_youtube_url") or "").strip() if youtube_on else ""
+    youtube_url = (session.get("isolate_youtube_url") or "").strip()
     if (has_file or youtube_url) and pending_fp:
         return str(pending_fp)
     return None

@@ -49,8 +49,14 @@ def test_run_demucs_subprocess_when_not_frozen(monkeypatch):
         seen.append(list(cmd))
         return MagicMock(returncode=0, stderr="", stdout="")
 
-    with patch("audio_to_tab.separate.run_process", side_effect=fake_run):
+    with patch("audio_to_tab.separate.run_process", side_effect=fake_run) as mocked:
         run_demucs(["-n", "htdemucs_6s", "-d", "cpu", "song.wav"])
+        kwargs = mocked.call_args.kwargs
+        env = kwargs.get("env") or {}
+        assert "OMP_NUM_THREADS" in env
+        assert "MKL_NUM_THREADS" in env
+        assert "TORCH_NUM_THREADS" in env
+        assert env["OMP_NUM_THREADS"] == env["TORCH_NUM_THREADS"]
 
     assert len(seen) == 1
     assert "-m" in seen[0] and "demucs" in seen[0]
@@ -970,7 +976,8 @@ def test_inno_and_installer_script_use_versioned_filename():
 
 
 def test_streamlit_about_is_local_demo_without_hosted_urls():
-    text = (Path(__file__).resolve().parents[1] / "ui" / "app.py").read_text(encoding="utf-8")
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "ui" / "app.py").read_text(encoding="utf-8")
     assert "desktop_app_version" in text
     assert "desktop_demo_blurb" in text
     assert "processing stays on this computer" in text.lower()
@@ -987,6 +994,11 @@ def test_streamlit_about_is_local_demo_without_hosted_urls():
     assert 'html, body, [class*="st-"]' not in text
     assert "Material Symbols Rounded" in text
     assert '[data-testid="stIconMaterial"]' in text
+    assert "satoshi_font_face_css" in text
+    assert "ui/fonts/" in text or "Bundled Satoshi" in text
+    fonts = root / "ui" / "fonts" / "satoshi"
+    assert (fonts / "Satoshi-Regular.woff2").is_file()
+    assert (root / "ui" / "satoshi_font.py").is_file()
     assert '[data-testid="stSidebarCollapseButton"]' in text
     assert "visibility: visible !important" in text
     assert 'section.main [data-testid="stTabs"] button' in text
@@ -1002,11 +1014,34 @@ def test_tab_pdf_page_has_explicit_developer_playground_disclaimer():
     app = (root / "ui" / "app.py").read_text(encoding="utf-8")
     page = (root / "ui" / "pages" / "tab_pdf.py").read_text(encoding="utf-8")
     assert 'title="Tab PDF (demo)"' in app
-    assert 'st.title("Tab PDF (demo)")' in page
+    assert "tab_pdf.py" in app
+    # Lite and Pro both list Tab PDF (disclaimer lives on the page).
+    nav_block = app.split("_nav =")[1].split("pg = st.navigation")[0]
+    assert '== "Pro"' not in nav_block
+    assert 'st.title(\n        "Tab PDF (demo)"' in page or 'st.title(\n        "Tab PDF (demo)",' in page
     assert "JJs stuff" in page
     assert "barely works" in page
     assert "st.caption(" not in page.split("def main")[1].split("demucs_ok")[0]
     assert "Demo only — tabs are rough drafts" not in page
+
+
+def test_tab_pdf_lite_hides_engine_widgets():
+    page = (
+        Path(__file__).resolve().parents[1] / "ui" / "pages" / "tab_pdf.py"
+    ).read_text(encoding="utf-8")
+    assert "is_pro_mode(st.session_state)" in page
+    settings = page[
+        page.find('with st.expander("Conversion settings"') : page.find(
+            'convert_clicked = st.button'
+        )
+    ]
+    assert "lite_accelerator_available(probe)" in settings
+    assert settings.find("if pro:") < settings.find('key="tab_guitar_engine"')
+    assert settings.find("if pro:") < settings.find('key="tab_guitar_ft"')
+    assert settings.find("if pro:") < settings.find("Advanced transcription settings")
+    assert settings.find("else:") < settings.find("lite_accelerator_available(probe)")
+    assert "Download from YouTube" not in settings
+    assert "off in this installer build" not in page
 
 
 def test_cuda_edition_uses_separate_windows_data_dir(tmp_path, monkeypatch):

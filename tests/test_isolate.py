@@ -893,6 +893,25 @@ def test_apply_bass_bleed_mitigation_reduces_bleed_without_damaging_clean_signal
     assert bled_share_after > 0.0  # still some low content — not a full fix
 
 
+def test_apply_bass_bleed_mitigation_attenuates_drop_c_fundamental(tmp_path: Path):
+    """I-504: 60 Hz HPF cuts Drop C (~65 Hz) energy; Drop D is above the cutoff."""
+    from audio_to_tab.isolate import _lowpass_rms, _to_mono
+
+    sr = 44100
+    t = np.linspace(0, 2.0, int(sr * 2.0), endpoint=False)
+    drop_c = (0.9 * np.sin(2 * np.pi * 65.4 * t)).astype(np.float32)
+    path = tmp_path / "drop_c.wav"
+    sf.write(str(path), np.column_stack([drop_c, drop_c]), sr, subtype="PCM_16")
+    out = apply_bass_bleed_mitigation(path, tmp_path / "drop_c_hpf.wav")
+
+    before, sr_a = sf.read(str(path))
+    after, sr_b = sf.read(str(out))
+    assert sr_a == sr_b == sr
+    low_before = _lowpass_rms(_to_mono(before), sr, 80.0)
+    low_after = _lowpass_rms(_to_mono(after), sr, 80.0)
+    assert low_after < low_before
+
+
 def _fake_demucs_with_guitar_mono(mono: np.ndarray, sr: int = 44100):
     def fake_run(cmd, capture_output=True, text=True, **_kwargs):
         out_flag = cmd.index("-o")

@@ -107,14 +107,39 @@ def test_balanced_prefers_cuda_then_mps_then_cpu():
     assert resolve_processing_mode("balanced", CPU_MID, settings).device == "cpu"
 
 
-def test_auto_on_mps_uses_cpu_not_mps():
+def test_auto_on_mps_uses_balanced_when_ram_meets_gate():
     settings = _settings()
     resolved = resolve_processing_mode("auto", MPS_MAC, settings)
-    assert resolved.device == "cpu"
+    assert resolved.mode == "balanced"
+    assert resolved.device == "mps"
     caps = build_capabilities(MPS_MAC, settings)
     assert caps.detected_device == "mps"
     assert "mps" in caps.device_options
+    assert caps.recommended_mode == "balanced"
+    assert "unreliable" not in caps.notes.lower()
+    assert "≥12 GB" in caps.notes or "12 GB" in caps.notes
+
+
+def test_auto_on_8gb_mps_stays_cpu_and_hides_mps():
+    settings = _settings()
+    eight = HostProbe(cuda=False, mps=True, ram_gb=8.0, single_flight=False)
+    resolved = resolve_processing_mode("auto", eight, settings)
+    assert resolved.mode == "fast_cpu"
+    assert resolved.device == "cpu"
+    caps = build_capabilities(eight, settings)
+    assert caps.detected_device == "mps"
+    assert "mps" not in caps.device_options
     assert caps.recommended_mode == "fast_cpu"
+    assert resolve_processing_mode("balanced", eight, settings).device == "cpu"
+
+
+def test_single_flight_mps_stays_lite():
+    settings = _settings()
+    probe = HostProbe(cuda=False, mps=True, ram_gb=16.0, single_flight=True)
+    assert recommended_mode(probe, settings) == "lite"
+    resolved = resolve_processing_mode("auto", probe, settings)
+    assert resolved.mode == "lite"
+    assert resolved.device == "cpu"
 
 
 def test_unknown_mode_rejected():
@@ -145,6 +170,7 @@ def test_capabilities_modes_expose_max_duration_sec():
         assert mode.max_duration_sec > 0
     lite = next(m for m in caps.modes if m.id == "lite")
     assert lite.max_duration_sec == 60.0
+    assert lite.label == "Low RAM (60 s)"
     fast = next(m for m in caps.modes if m.id == "fast_cpu")
     assert fast.max_duration_sec == 90.0
 
@@ -157,6 +183,7 @@ def test_capabilities_response_shape_has_no_hostname():
     assert payload["recommended_mode"] == "balanced"
     assert payload["ram_gb"] == 24.0
     assert payload["low_ram"] is False
+    assert payload["allow_youtube"] is False
     assert "cpu" in payload["device_options"]
     assert "cuda" in payload["device_options"]
     assert payload["notes"]

@@ -38,6 +38,8 @@ CUDA_UNAVAILABLE_MESSAGE = (
 
 # Cached after the first torch import — probing is expensive.
 _cached_probe: HostProbe | None = None
+_CPU_BRAND_UNSET = object()
+_cached_cpu_brand: str | None | object = _CPU_BRAND_UNSET
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,7 @@ class HostProbe:
     mps: bool
     ram_gb: float | None
     single_flight: bool = False
+    cpu_brand: str | None = None
 
 
 def probe_torch() -> tuple[bool, bool]:
@@ -114,10 +117,39 @@ def probe_ram_gb() -> float | None:
     return None
 
 
+def probe_cpu_brand() -> str | None:
+    """CPU brand string when the OS exposes one (macOS: ``Apple M2 Pro``)."""
+    global _cached_cpu_brand
+    if _cached_cpu_brand is not _CPU_BRAND_UNSET:
+        return _cached_cpu_brand  # type: ignore[return-value]
+    brand: str | None = None
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.check_output(
+                ["sysctl", "-n", "machdep.cpu.brand_string"], text=True
+            ).strip()
+            brand = out or None
+        except (OSError, ValueError, subprocess.SubprocessError):
+            brand = None
+    _cached_cpu_brand = brand
+    return brand
+
+
+def apple_chip_label(brand: str | None) -> str | None:
+    """Plain Apple Silicon name (``Apple M2 Pro``), or None for Intel/unknown."""
+    if not brand:
+        return None
+    text = " ".join(str(brand).split())
+    if text.lower().startswith("apple "):
+        return text
+    return None
+
+
 def reset_desktop_probe_cache() -> None:
     """Clear the cached probe (tests)."""
-    global _cached_probe
+    global _cached_probe, _cached_cpu_brand
     _cached_probe = None
+    _cached_cpu_brand = _CPU_BRAND_UNSET
 
 
 def _physical_perf_cores() -> int | None:
@@ -156,6 +188,46 @@ def recommended_cpu_threads(*, ram_gb: float | None = None) -> int:
     return max(1, base)
 
 
+def cpu_thread_env(*, ram_gb: float | None = None) -> dict[str, str]:
+    """Subprocess env so Demucs/OpenMP/MKL/PyTorch share the same thread cap."""
+    n = str(recommended_cpu_threads(ram_gb=ram_gb))
+    return {
+        "OMP_NUM_THREADS": n,
+        "MKL_NUM_THREADS": n,
+        "TORCH_NUM_THREADS": n,
+    }
+
+
+def apply_recommended_cpu_threads(*, device: str | None = None) -> int | None:
+    """Set ``torch.set_num_threads`` to ``recommended_cpu_threads()``.
+
+    Skips non-CPU devices. Returns the cap applied, or None if skipped / unavailable.
+    """
+    if device is not None and device != "cpu":
+        return None
+    try:
+        import torch
+    except ImportError:
+        return None
+    n = recommended_cpu_threads()
+    try:
+        torch.set_num_threads(n)
+    except Exception:
+        return None
+    return n
+
+
+def roformer_max_audio_sec(probe: HostProbe | None = None) -> float:
+    """Refuse RoFormer on audio longer than this (seconds).
+
+    Known RAM under 12 GB → 90 s; unknown or ≥12 GB → 180 s.
+    """
+    ram = probe.ram_gb if probe is not None else probe_ram_gb()
+    if ram is not None and ram < MPS_MIN_RAM_GB:
+        return 90.0
+    return 180.0
+
+
 def resolve_safe_device(device: str, probe: HostProbe | None = None) -> str:
     """Never let a job run on an accelerator this host cannot use.
 
@@ -182,14 +254,24 @@ def get_desktop_probe(*, force: bool = False) -> HostProbe:
     global _cached_probe
     if force or _cached_probe is None:
         cuda, mps = probe_torch()
-        _cached_probe = HostProbe(cuda=cuda, mps=mps, ram_gb=probe_ram_gb())
+        _cached_probe = HostProbe(
+            cuda=cuda,
+            mps=mps,
+            ram_gb=probe_ram_gb(),
+            cpu_brand=probe_cpu_brand(),
+        )
     return _cached_probe
 
 
 def get_desktop_probe_without_torch() -> HostProbe:
     """RAM-only probe for first UI paint. Does not import torch."""
     cuda_ui = _cuda_edition_windows(platform=None)
-    return HostProbe(cuda=cuda_ui, mps=False, ram_gb=probe_ram_gb())
+    return HostProbe(
+        cuda=cuda_ui,
+        mps=False,
+        ram_gb=probe_ram_gb(),
+        cpu_brand=probe_cpu_brand(),
+    )
 
 
 def _platform(platform: str | None) -> str:
@@ -322,21 +404,105 @@ def resolve_desktop_speed(
 
 def desktop_system_summary(probe: HostProbe, *, platform: str | None = None) -> str:
     ram = f"~{probe.ram_gb:g} GB RAM" if probe.ram_gb is not None else "RAM unknown"
+    chip = apple_chip_label(probe.cpu_brand)
+    chip_bit = f"{chip} · " if chip else ""
     if _cuda_edition_windows(platform=platform):
-        return f"This PC: {ram} · NVIDIA GPU"
+        return f"This PC: {chip_bit}{ram} · NVIDIA GPU"
     options = desktop_device_options(probe, platform=platform)
     accel = (
         "Apple GPU (MPS)"
         if "mps" in options
         else ("NVIDIA GPU" if "cuda" in options else "CPU")
     )
-    return f"This PC: {ram} · {accel}"
+    return f"This PC: {chip_bit}{ram} · {accel}"
 
 
 def desktop_recommend_caption(probe: HostProbe, *, platform: str | None = None) -> str:
     rec = desktop_recommend(probe, platform=platform)
     extra = MAC_ACCEL_NOTE if _platform(platform).startswith("darwin") else NVIDIA_ONLY_DISCLAIMER
     return f"{rec['notes']} {extra}"
+
+
+def lite_accelerator_available(probe: HostProbe, *, platform: str | None = None) -> bool:
+    """True when Lite may use a GPU path (MPS or CUDA) on this host."""
+    options = desktop_device_options(probe, platform=platform)
+    return "mps" in options or "cuda" in options
+
+
+def lite_auto_speed_id(probe: HostProbe, *, platform: str | None = None) -> str:
+    """Speed preset id Lite should apply for this host (ignores Pro persistence)."""
+    return str(desktop_recommend(probe, platform=platform)["speed"])
+
+
+def lite_device_plain_label(device: str) -> str:
+    """Short device label for Lite UI (no MPS/CUDA jargon)."""
+    if device == "mps":
+        return "Apple GPU"
+    if device == "cuda":
+        return "NVIDIA GPU"
+    return "CPU"
+
+
+def lite_device_choice_ids(
+    probe: HostProbe, *, platform: str | None = None
+) -> list[str]:
+    """CPU + accelerator ids for Lite's Run-on radio, or empty if no choice."""
+    if not lite_accelerator_available(probe, platform=platform):
+        return []
+    options = desktop_device_options(probe, platform=platform)
+    if "mps" in options:
+        return ["cpu", "mps"]
+    # CUDA edition may list only cuda; still offer CPU as a Lite escape hatch.
+    if "cuda" in options or _cuda_edition_windows(platform=platform):
+        return ["cpu", "cuda"]
+    return []
+
+
+def _lite_accel_plain_label(probe: HostProbe, *, platform: str | None = None) -> str:
+    """Short device label for Lite captions (no MPS/CUDA jargon)."""
+    if _cuda_edition_windows(platform=platform):
+        return "NVIDIA GPU"
+    options = desktop_device_options(probe, platform=platform)
+    if "mps" in options:
+        return "Apple GPU"
+    if "cuda" in options:
+        return "NVIDIA GPU"
+    return "CPU"
+
+
+def lite_detected_caption(probe: HostProbe, *, platform: str | None = None) -> str:
+    """One-line hardware readout for Lite (Detected: Apple M2 Pro · ~16 GB · …)."""
+    ram = f"~{probe.ram_gb:g} GB RAM" if probe.ram_gb is not None else "RAM unknown"
+    accel = _lite_accel_plain_label(probe, platform=platform)
+    chip = apple_chip_label(probe.cpu_brand)
+    if chip:
+        return f"Detected: {chip} · {ram} · {accel}"
+    return f"Detected: {ram} · {accel}"
+
+
+def lite_using_caption(
+    probe: HostProbe,
+    *,
+    guitar_engine: str,
+    platform: str | None = None,
+    device: str | None = None,
+    speed: str | None = None,
+) -> str:
+    """One-line Lite choice (Using: Faster on CPU · standard guitar model).
+
+    Optional ``device`` / ``speed`` reflect a user Run-on pick; otherwise the
+    auto recommendation for this host is used.
+    """
+    rec = desktop_recommend(probe, platform=platform)
+    speed_id = speed if speed is not None else str(rec["speed"])
+    speed_label = {"faster": "Faster", "balanced": "Balanced", "best": "Best"}.get(
+        speed_id, speed_id.title()
+    )
+    device_id = device if device is not None else str(rec["device"])
+    where = lite_device_plain_label(device_id)
+    strong = guitar_engine in {"guitar_roformer", "guitar_roformer_refine"}
+    guitar_bit = "strong guitar model" if strong else "standard guitar model"
+    return f"Using: {speed_label} on {where} · {guitar_bit}"
 
 
 def ensure_cuda_available(device: str, probe: HostProbe | None = None) -> None:

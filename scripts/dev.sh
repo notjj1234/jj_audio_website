@@ -155,6 +155,8 @@ Targets:
   ./scripts/dev.sh ui               Start Streamlit UI (http://127.0.0.1:8501)
   ./scripts/dev.sh backend          Start FastAPI server (http://localhost:8000)
   ./scripts/dev.sh mixer-build      Build live stem mixer frontend (Node 18+)
+  ./scripts/dev.sh region-picker-build  Build waveform region picker frontend (Node 18+)
+  ./scripts/dev.sh mix-tabs-build       Build Moises-style mix tab strip (Node 18+)
 EOF
     ;;
   preflight)
@@ -172,6 +174,14 @@ EOF
   mixer-build)
     (cd ui/stem_mixer_component/frontend && npm install && npm run build)
     echo "Stem mixer frontend built."
+    ;;
+  region-picker-build)
+    (cd ui/region_picker_component/frontend && npm install && npm run build)
+    echo "Region picker frontend built."
+    ;;
+  mix-tabs-build)
+    (cd ui/mix_tabs_component/frontend && npm install && npm run build)
+    echo "Mix tabs frontend built."
     ;;
   install)
     PY="$(host_python)"

@@ -41,8 +41,8 @@ STEM_LABELS = {
 }
 
 # Volume model for live mixer + export (documented for UI/JS parity).
-DB_MIN = -60.0
-DB_MAX = 24.0
+DB_MIN = -25.0
+DB_MAX = 25.0
 DB_DEFAULT = 0.0
 # Master-bus ceiling shared with the live Web Audio mixer (~−1 dBTP).
 TRUE_PEAK_CEILING = 10.0 ** (-1.0 / 20.0)  # ≈ 0.89125 linear

@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import * as api from "../api";
 
-const FALLBACK_MODES: api.ProcessingModeInfo[] = [
+export const FALLBACK_MODES: api.ProcessingModeInfo[] = [
+  { id: "auto", label: "Auto", enabled: true, reason: null, device: "cpu", max_duration_sec: 90 },
   { id: "fast_cpu", label: "Fast (CPU)", enabled: true, reason: null, device: "cpu", max_duration_sec: 90 },
   { id: "balanced", label: "Balanced", enabled: true, reason: null, device: "cpu", max_duration_sec: 300 },
   {
@@ -12,7 +13,7 @@ const FALLBACK_MODES: api.ProcessingModeInfo[] = [
     device: "cuda",
     max_duration_sec: 300,
   },
-  { id: "lite", label: "Lite / low RAM", enabled: true, reason: null, device: "cpu", max_duration_sec: 60 },
+  { id: "lite", label: "Low RAM (60 s)", enabled: true, reason: null, device: "cpu", max_duration_sec: 60 },
 ];
 
 type Props = {
@@ -26,7 +27,7 @@ function deviceLabel(device: string): string {
   return "CPU";
 }
 
-function helperText(
+export function helperText(
   caps: api.SystemCapabilities | null,
   mode: string,
   loadError: boolean
@@ -37,8 +38,13 @@ function helperText(
   const ram = caps.ram_gb != null ? ` · ~${caps.ram_gb} GB RAM` : "";
   const detected = deviceLabel(caps.detected_device);
   const selected =
-    caps.modes.find((m) => m.id === mode) ?? caps.modes.find((m) => m.id === "balanced");
+    caps.modes.find((m) => m.id === mode) ?? caps.modes.find((m) => m.id === "auto");
   const using = deviceLabel(selected?.device ?? "cpu");
+  const cap = selected?.max_duration_sec;
+  const capBit = cap != null ? ` · up to ${Math.round(cap)}s` : "";
+  if (mode === "auto") {
+    return `Detected: ${detected}${ram}. Auto will use ${using}${capBit}.`;
+  }
   if (caps.detected_device === "mps" && mode === "balanced") {
     return `Detected: ${detected}${ram}. Balanced may use MPS.`;
   }
@@ -64,18 +70,21 @@ export function ProcessingModeSelect({ value, onChange }: Props) {
     };
   }, []);
 
-  const modes = (caps?.modes ?? FALLBACK_MODES).filter((m) => m.id !== "auto");
-  const selectValue = value === "auto" ? "balanced" : value;
+  const modes = caps?.modes ?? FALLBACK_MODES;
+  const ordered = [
+    ...modes.filter((m) => m.id === "auto"),
+    ...modes.filter((m) => m.id !== "auto"),
+  ];
 
   return (
     <label className="field">
       Processing mode
       <select
-        value={selectValue}
+        value={value}
         onChange={(e) => onChange(e.target.value)}
         aria-label="Processing mode"
       >
-        {modes.map((m) => (
+        {ordered.map((m) => (
           <option
             key={m.id}
             value={m.id}

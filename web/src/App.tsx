@@ -4,12 +4,24 @@ import { IsolatePage } from "./pages/IsolatePage";
 import { TabPage } from "./pages/TabPage";
 
 function Shell() {
-  const { loading } = useAuth();
+  const { loading, sessionError, retrySession } = useAuth();
 
   if (loading) {
     return (
       <main>
         <p>Loading…</p>
+      </main>
+    );
+  }
+
+  if (sessionError) {
+    return (
+      <main>
+        <p className="error">{sessionError}</p>
+        <p className="hint">Could not start a session. Check that the API is running, then retry.</p>
+        <button type="button" onClick={() => void retrySession()}>
+          Retry
+        </button>
       </main>
     );
   }

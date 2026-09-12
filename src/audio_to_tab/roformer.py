@@ -266,16 +266,27 @@ def _cap_cpu_threads(device: str) -> None:
     Each isolate job runs in its own ``multiprocessing.Process``, so setting the
     process-global torch thread pool here cannot disturb the UI or other jobs.
     """
-    if device != "cpu":
-        return
-    import torch
+    from audio_to_tab.hardware import apply_recommended_cpu_threads
+
+    apply_recommended_cpu_threads(device=device)
+
+
+def _refuse_long_roformer_audio(audio_path: Path) -> None:
+    """Raise before allocating full-track RoFormer buffers on long audio."""
+    from audio_to_tab.hardware import get_desktop_probe, roformer_max_audio_sec
+    from audio_to_tab.isolate import probe_duration_sec
 
     try:
-        from audio_to_tab.hardware import recommended_cpu_threads
-
-        torch.set_num_threads(recommended_cpu_threads())
-    except Exception as exc:
-        logger.debug("Could not set recommended CPU threads: %s", exc)
+        probe = get_desktop_probe()
+    except Exception:
+        probe = None
+    cap = roformer_max_audio_sec(probe)
+    dur = probe_duration_sec(audio_path)
+    if dur is not None and dur > cap:
+        raise RuntimeError(
+            f"RoFormer refused this {dur:.0f} s file (limit {cap:.0f} s on this "
+            "machine). Shorten the section or use Demucs."
+        )
 
 
 def _load_bs_roformer_config(yaml_path: Path):
@@ -775,6 +786,7 @@ def run_roformer_model(
     """Dispatch an opt-in RoFormer model into ``output_root/<model>/<track>/``."""
     src = Path(audio_path)
     root = Path(output_root)
+    _refuse_long_roformer_audio(src)
     if model == BS_ROFORMER_SW_ID:
         return run_bs_roformer_sw(src, root, device=device)
     if model == MELBAND_GUITAR_ID:

@@ -11,8 +11,8 @@ If a path is not listed, it was not on disk when this was written.
 
 Both products import `src/audio_to_tab/` (isolate, YouTube ingest, tab PDF pipeline). They do **not** share UI or job runners.
 
-1. **Desktop (local only)** — Streamlit `ui/app.py` behind `packaging/launcher.py`. Serial isolate jobs in-process (`ui/isolate_jobs.py`). No Docker. Testers: `DESKTOP.md`.
-2. **Website (hosted)** — FastAPI `backend/` + React `web/` + Caddy. Jobs via Postgres/Redis/MinIO + arq worker (`docker-compose.yml`). Streamlit is **not** in that stack. Operators: `DEPLOY.md`.
+1. **Desktop (local only)** — Streamlit `ui/app.py` behind `packaging/launcher.py`. Serial isolate jobs in-process (`ui/isolate_jobs.py`). No Docker. **Lite** auto-profiles speed/device/guitar from RAM/GPU/chip (`audio_to_tab/hardware.py`); **Pro** exposes every control. Testers: `DESKTOP.md`.
+2. **Website (hosted)** — FastAPI `backend/` + React `web/` + Caddy. Jobs via Postgres/Redis/MinIO + arq worker (`docker-compose.yml`). Streamlit is **not** in that stack. Hosted Auto/`lite` processing modes: `backend/capabilities.py`. Operators: `DEPLOY.md`.
 
 Shared: isolate engine, mixer math (`src/audio_to_tab/mixer.py`), ingest, tab pipeline.
 Not shared: Streamlit pages vs React pages; desktop disk queue vs API `JobManager`; desktop iframe mixer vs website Web Audio mixer.
@@ -37,18 +37,21 @@ background on the low-E / masking problem this addresses.
 
 | Job | Start here |
 |-----|------------|
-| Isolation UI (desktop) | `ui/pages/isolate.py` (page), `ui/isolate_state.py` (presets/progress), `ui/app.py` (router) |
+| Isolation UI (desktop) | `ui/pages/isolate.py` (page), `ui/isolate_state.py` (Lite outcomes / Pro stems / progress), `ui/app.py` (Lite↔Pro router), `ui/stem_icons.py` (outcome/stem icons) |
+| Desktop Lite hardware auto | `src/audio_to_tab/hardware.py` (`desktop_recommend`, MPS ≥12 GB, Apple chip via `machdep.cpu.brand_string`, Detected/Using captions). Wired in `ui/pages/isolate.py`; guitar preference via `prefer_roformer` in `ui/isolate_state.py`. Hosted Auto is separate: `backend/capabilities.py` |
 | Guitar fix-up post-separation (desktop Mixer tab) | `ui/guitar_fixup.py` (low-end recovery, pre/refined switch), `ui/pages/isolate.py` |
 | Isolation UI (website) | `web/src/pages/IsolatePage.tsx`, `web/src/api.ts`, isolate routes in `backend/main.py` |
 | Guitar stem engine | `src/audio_to_tab/isolate.py` (`IsolateConfig`, `separate_stems`, fold, bass-bleed, low-end recovery, pre/refined), `src/audio_to_tab/separate.py` (Demucs CLI / guitar-ft), `src/audio_to_tab/roformer.py` (BS-RoFormer-SW / MelBand guitar) |
 | Live mixer (desktop iframe) | Edit `ui/stem_mixer_component/frontend/src/main.ts` + `style.css`, then `make mixer-build`. Loader: `ui/stem_mixer_component/__init__.py`. Preview encode: `ui/media.py` |
+| Region picker (desktop iframe) | Edit `ui/region_picker_component/frontend/src/main.ts` + `style.css`, then `make region-picker-build`. Loader: `ui/region_picker_component/__init__.py`. Wired in `ui/pages/isolate.py:_render_region_controls` |
+| Mix tabs (desktop iframe) | Edit `ui/mix_tabs_component/frontend/src/main.ts` + `style.css`, then `make mix-tabs-build`. Loader: `ui/mix_tabs_component/__init__.py`. Moises-style Home\|mix\|+ strip on Isolate |
 | Live mixer (website) | `web/src/mixer/engine.ts`, `web/src/components/StemMixer.tsx` |
 | YouTube ingest | `src/audio_to_tab/ingest.py` (shared). Surfaces: `ui/pages/isolate.py`, `ui/pages/tab_pdf.py`. Tests: `tests/test_ingest.py` |
 | Isolate job queue (desktop) | `ui/isolate_jobs.py` (serial worker, status on disk), queue UI in `ui/pages/isolate.py`. Notifications: `ui/desktop_notify.py`. Export/download: `ui/desktop_export.py` |
 | Isolate jobs (API/worker) | `backend/jobs/manager.py`, `backend/jobs/runner.py` (`separate_stems`), `backend/worker.py`, `POST /v1/isolate/jobs` in `backend/main.py`. Single-flight: `backend/jobs/single_flight.py` |
 | Tab PDF | Engine: `src/audio_to_tab/pipeline.py` (includes model/refine/debleed/restore options), `transcribe.py`, `tab_generate.py`, `pdf_render.py`. Desktop: `ui/pages/tab_pdf.py`. Website: `web/src/pages/TabPage.tsx` + tab job in `backend/jobs/runner.py` |
 | Desktop packaging / launcher | `packaging/launcher.py`, `packaging/audio_tools.spec`, freeze helpers in `src/audio_to_tab/edition.py`. Runbook: `DESKTOP.md`. CI: `.github/workflows/desktop-release.yml` |
-| Tests for isolation / guitar | `tests/test_isolate.py`, `tests/test_isolate_jobs.py`, `tests/test_isolate_state.py`, `tests/test_guitar_ft_weights.py`, `tests/test_guitar_backups.py`, `tests/test_guitar_fixup.py`, `tests/test_pipeline_guitar.py`, `tests/test_ingest.py`, `tests/test_mixer.py`, `tests/test_stem_mixer_component.py` |
+| Tests for isolation / guitar | `tests/test_isolate.py`, `tests/test_isolate_jobs.py`, `tests/test_isolate_state.py`, `tests/test_hardware.py`, `tests/test_guitar_ft_weights.py`, `tests/test_guitar_backups.py`, `tests/test_guitar_fixup.py`, `tests/test_pipeline_guitar.py`, `tests/test_ingest.py`, `tests/test_mixer.py`, `tests/test_stem_mixer_component.py`, `tests/test_region_picker_component.py`, `tests/test_mix_tabs_component.py` |
 
 Lead/rhythm split (`src/audio_to_tab/lead_rhythm.py`) exists; it is **not** the default isolate path.
 
@@ -56,7 +59,7 @@ Lead/rhythm split (`src/audio_to_tab/lead_rhythm.py`) exists; it is **not** the 
 
 ### Root files
 
-- `Makefile` — install, tester, pytest, Streamlit UI, compose-adjacent web/backend targets, mixer-build, desktop pkg.
+- `Makefile` — install, tester, pytest, Streamlit UI, compose-adjacent web/backend targets, mixer-build, region-picker-build, mix-tabs-build, desktop pkg.
 - `pyproject.toml` — package `audio-to-tab-pdf`, Python `>=3.10,<3.13` (3.10–3.12), extras `dev` / `eval` / `demucs` / `roformer` / `separator` / `desktop`.
 - `requirements.txt` — desktop-only dev pins (Streamlit, yt-dlp, onnxruntime, eval/dev extras; hosted backend deps live in `pyproject.toml` `[project.dependencies]`).
 - `requirements-demucs.txt` — Demucs + torch on top of `requirements.txt`.
@@ -75,7 +78,7 @@ Lead/rhythm split (`src/audio_to_tab/lead_rhythm.py`) exists; it is **not** the 
 - `.gitattributes` — LF normalization.
 - `.gitignore` — venvs, `.env`, wavs, internal docs (`CONTEXT_TREE.md`, `docs/oracle-free-memory-spike.md`).
 - `PROJECT_TREE.md` — this file (tracked).
-- `docs/` — `guitar_improvement_prompt.md` (low-end/masking fix background + Cursor prompt).
+- `docs/` — `issues.md` (I-xxx history; I-500 isolation performance/functional audit); `ui-issues.md` (I-600+ UI/UX register; does not replace `issues.md`); `guitar_improvement_prompt.md` (low-end/masking fix background).
 
 ### `src/`
 
@@ -87,7 +90,7 @@ Shared engine. Import as `audio_to_tab`.
 - `audio_to_tab/roformer.py` — BS-RoFormer-SW (6-stem) + MelBand-RoFormer Guitar specialist; urllib + SHA256 downloads; bs-roformer-infer / audio-separator backends; `run_guitar_refine` (residual-aware).
 - `audio_to_tab/ingest.py` — file normalize + YouTube download (`yt-dlp`).
 - `audio_to_tab/mixer.py` — stem mix / waveform helpers used by desktop downloads.
-- `audio_to_tab/hardware.py` — RAM/GPU probe; desktop speed recommendations.
+- `audio_to_tab/hardware.py` — RAM/GPU/chip probe (`HostProbe.cpu_brand`, Apple Silicon label e.g. `Apple M2 Pro`); desktop speed recommendations; MPS gated at ≥12 GB; Lite helpers (`lite_accelerator_available`, `lite_auto_speed_id`, Detected/Using captions).
 - `audio_to_tab/edition.py` — Windows CPU vs NVIDIA freeze flavor.
 - `audio_to_tab/lead_rhythm.py` — opt-in lead/rhythm split on the guitar stem (not product default).
 - `audio_to_tab/pipeline.py` — audio → tab PDF end-to-end (`PipelineConfig` incl. model, guitar_checkpoint, guitar_refine, demucs_segment/jobs, fold_other_mode, low_end_restore_db, sub_bass_debleed).
@@ -109,12 +112,13 @@ Shared engine. Import as `audio_to_tab`.
 
 Desktop Streamlit only.
 
-- `app.py` — multipage router (Isolate, Tab PDF); window title / Demo suffix.
-- `pages/isolate.py` — Audio Isolation page (upload, YouTube, queue, mixer, downloads, fold/refine/low-end options, pre-refined vs refined toggle).
+- `app.py` — multipage router (Isolate, Tab PDF); Lite↔Pro interface mode (Lite auto-profiles; Pro shows engine/speed).
+- `pages/isolate.py` — Audio Isolation page (upload, YouTube, queue, mixer, downloads, fold/refine/low-end options, pre-refined vs refined toggle). Lite: hardware Detected/Using strip + auto speed/device/guitar; Pro: Speed / Device / engine controls.
 - `pages/tab_pdf.py` — Tab PDF page (model selector: htdemucs_6s / BS-RoFormer-SW, guitar refine, guitar-ft checkpoint, low-end restore, sub-bass de-bleed).
 - `guitar_fixup.py` — post-separation guitar stem fix-up for the Mixer tab (low-end recovery, pre/refined switch, diagnostics).
 - `isolate_jobs.py` — serial Demucs worker; job status JSON under app data dir.
-- `isolate_state.py` — presets, custom stems, progress stages, guitar track selection / normalization (pure helpers).
+- `isolate_state.py` — Lite outcome cards, Pro track options, progress stages, guitar selection (`prefer_roformer` for Lite CPU-only hosts).
+- `stem_icons.py` — Lucide-style line-art icons for Lite/Pro stem and outcome tiles.
 - `desktop_export.py` — save isolate downloads to a chosen folder + reveal in OS file manager.
 - `desktop_notify.py` — best-effort OS notifications for isolate job completion (no extra pip deps).
 - `common.py` — run listing, uploads, data dir, edition labels.
@@ -124,6 +128,13 @@ Desktop Streamlit only.
 - `stem_mixer_component/frontend/src/main.ts` — live mixer (Web Audio) source.
 - `stem_mixer_component/frontend/src/style.css` — mixer styles.
 - `stem_mixer_component/frontend/package.json`, `vite.config.ts`, `tsconfig.json`, `index.html` — Vite build for the iframe.
+- `region_picker_component/__init__.py` — waveform region iframe; serves `frontend/build/`.
+- `region_picker_component/frontend/src/main.ts` — wavesurfer + Regions plugin source.
+- `region_picker_component/frontend/src/style.css` — region picker styles.
+- `region_picker_component/frontend/package.json`, `vite.config.ts`, `tsconfig.json`, `index.html` — Vite build.
+- `mix_tabs_component/__init__.py` — Moises-style Home|mix|+ strip; serves `frontend/build/`.
+- `mix_tabs_component/frontend/src/main.ts` — tab strip UI source.
+- `mix_tabs_component/frontend/src/style.css` — tab strip styles.
 
 ### `web/`
 
@@ -140,6 +151,7 @@ Hosted SPA (Vite + React). Dev: `make web` (proxies API).
 - `src/auth.tsx` — session / JWT.
 - `src/styles.css` — global styles.
 - `src/pages/IsolatePage.tsx` — website isolation UI.
+- `src/components/RegionPicker.tsx` — wavesurfer region trim for section mode.
 - `src/pages/TabPage.tsx` — website tab PDF UI.
 - `src/pages/LoginPage.tsx` — login.
 - `src/components/StemMixer.tsx` — website mixer UI.
@@ -160,7 +172,7 @@ Hosted API.
 - `db.py` — engine + sessions.
 - `storage.py` — local disk or S3/MinIO.
 - `events.py` — in-process / Redis job progress.
-- `capabilities.py` — host processing modes for the SPA.
+- `capabilities.py` — hosted SPA processing modes (Auto / fast_cpu / balanced / high_gpu / lite). Distinct from desktop Streamlit Lite UI mode.
 - `limits.py` — upload size/type checks.
 - `worker.py` — arq worker entry.
 - `jobs/manager.py` — persist jobs, artifacts, cancel (incl. guitar option fields).
@@ -191,7 +203,7 @@ Desktop freeze + installers. How-to: `DESKTOP.md`.
 - `backend_test_utils.py` — rebind backend settings without reloading ORM.
 - `test_isolate.py` — isolate engine (Demucs mocked), including `--segment` clamp, fold, bass-bleed.
 - `test_isolate_jobs.py` — desktop serial queue / remove / error formatting.
-- `test_isolate_state.py` — presets and progress helpers; guitar track selection/normalization.
+- `test_isolate_state.py` — Lite outcomes, Pro stems, progress helpers; `prefer_roformer` guitar defaults.
 - `test_guitar_ft_weights.py` — guitar-ft weights SHA256 / download helpers.
 - `test_guitar_backups.py` — guitar pre-refine vs refined variants.
 - `test_guitar_fixup.py` — `ui/guitar_fixup.py` low-end recovery + variant switch.
@@ -199,17 +211,18 @@ Desktop freeze + installers. How-to: `DESKTOP.md`.
 - `test_ingest.py` — YouTube ingest (network opt-in).
 - `test_mixer.py` — mix helpers.
 - `test_stem_mixer_component.py` — desktop mixer build packaging.
+- `test_region_picker_component.py` — desktop region picker build packaging.
 - `test_media.py` — preview / cleanup.
 - `test_ui_common.py` — run list / delete.
 - `test_desktop_paths.py` — launcher paths, freeze helpers.
 - `test_desktop_export.py` — `ui/desktop_export.py`.
 - `test_desktop_notify.py` — `ui/desktop_notify.py`.
-- `test_hardware.py` — RAM/GPU probe.
+- `test_hardware.py` — RAM/GPU/chip probe, desktop recommend, Lite Detected/Using captions, MPS gate.
 - `test_edition.py` — CPU vs CUDA edition.
 - `test_macos_signing.py` — signing helpers (no codesign I/O).
 - `test_api.py` — FastAPI smoke (incl. guitar option fields).
 - `test_web_security.py` — auth, CORS, upload caps.
-- `test_capabilities.py` — processing-mode API.
+- `test_capabilities.py` — hosted processing-mode API (not desktop Lite UI).
 - `test_single_flight.py` — API job gate.
 - `test_lead_rhythm.py` — lead/rhythm post-process.
 - `test_tab.py` — tab / tempo / MIDI cleanup.
@@ -245,6 +258,8 @@ Offline scoring. Clips/results under `eval/lead_rhythm/` are mostly gitignored.
 
 ### `docs/`
 
+- `issues.md` — canonical I-xxx design-decision / issue history (CI and `PLANNING.md` cite it). Includes reserved historical IDs and the 2026-09-08 isolation performance/functional audit (`I-500`–`I-509`).
+- `ui-issues.md` — UI/UX-only issue register (`I-600`+). Does not replace `issues.md`.
 - `guitar_improvement_prompt.md` — explains the low-E / low-end masking problem and contains a Cursor Agent prompt for further guitar-isolation work. (Tracked.)
 - `oracle-free-memory-spike.md` — gitignored (not in public git).
 
@@ -252,10 +267,12 @@ Offline scoring. Clips/results under `eval/lead_rhythm/` are mostly gitignored.
 
 One line each; do not hand-edit:
 
-- `node_modules/`, `ui/stem_mixer_component/frontend/node_modules/`
+- `node_modules/`, `ui/stem_mixer_component/frontend/node_modules/`, `ui/region_picker_component/frontend/node_modules/`, `ui/mix_tabs_component/frontend/node_modules/`
 - `.venv/`, `.venv311/`, `.venv312/`, `.venv-desktop/`, `.venv-desktop-x64/`, `.venv-*/`
 - `web/dist/`
 - `ui/stem_mixer_component/frontend/build/assets/*` (hashed Vite output)
+- `ui/region_picker_component/frontend/build/assets/*` (hashed Vite output)
+- `ui/mix_tabs_component/frontend/build/assets/*` (hashed Vite output)
 - `__pycache__/`, `.pytest_cache/`, `.ruff_cache/`, `audio_to_tab_pdf.egg-info/`
 - `dist/`, `build/`, `.build/`, `packaging/ffmpeg/`
 - `data/`, `output/` (local runs)
@@ -263,6 +280,8 @@ One line each; do not hand-edit:
 ## Do not edit unless
 
 - Mixer iframe **build**: `ui/stem_mixer_component/frontend/build/` is committed so testers need no Node. Change `frontend/src/` then `make mixer-build`. Do not rewrite hashed `assets/*` by hand.
+- Region picker iframe **build**: `ui/region_picker_component/frontend/build/` is committed the same way. Change `frontend/src/` then `make region-picker-build`.
+- Mix tabs iframe **build**: `ui/mix_tabs_component/frontend/build/` is committed the same way. Change `frontend/src/` then `make mix-tabs-build`.
 - Env: copy `.env.example` / `.env.lite.example` / `web/.env.example` → `.env`. Never commit `.env`.
 - Do not commit wavs (except `eval/fixtures/*.wav`), Demucs/torch weights, or `packaging/ffmpeg/` binaries.
 - `CONTEXT_TREE.md` (and `docs/oracle-free-memory-spike.md`) are gitignored; `PROJECT_TREE.md` is tracked and is the canonical in-repo tree.

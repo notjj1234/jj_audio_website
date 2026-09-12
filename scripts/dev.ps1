@@ -9,7 +9,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet(
         "install", "install-demucs", "fixtures", "test", "eval", "eval-lead-rhythm",
-        "ui", "backend", "mixer-build", "preflight", "tester", "help"
+        "ui", "backend", "mixer-build", "region-picker-build", "mix-tabs-build", "preflight", "tester", "help"
     )]
     [string]$Command = "help"
 )
@@ -134,6 +134,8 @@ Targets:
   .\scripts\dev.ps1 ui               Start Streamlit UI (http://127.0.0.1:8501)
   .\scripts\dev.ps1 backend          Start FastAPI server (http://localhost:8000)
   .\scripts\dev.ps1 mixer-build      Build live stem mixer frontend (Node 18+)
+  .\scripts\dev.ps1 region-picker-build  Build waveform region picker frontend (Node 18+)
+  .\scripts\dev.ps1 mix-tabs-build       Build Moises-style mix tab strip (Node 18+)
 "@
     }
     "preflight" {
@@ -161,6 +163,26 @@ Targets:
             Pop-Location
         }
         Write-Host "Stem mixer frontend built."
+    }
+    "region-picker-build" {
+        Push-Location (Join-Path $Root "ui\region_picker_component\frontend")
+        try {
+            npm install
+            npm run build
+        } finally {
+            Pop-Location
+        }
+        Write-Host "Region picker frontend built."
+    }
+    "mix-tabs-build" {
+        Push-Location (Join-Path $Root "ui\mix_tabs_component\frontend")
+        try {
+            npm install
+            npm run build
+        } finally {
+            Pop-Location
+        }
+        Write-Host "Mix tabs frontend built."
     }
     "install" {
         $py = Get-HostPython

@@ -113,6 +113,12 @@ web-build:
 mixer-build:
 	cd ui/stem_mixer_component/frontend && npm install && npm run build
 
+region-picker-build:
+	cd ui/region_picker_component/frontend && npm install && npm run build
+
+mix-tabs-build:
+	cd ui/mix_tabs_component/frontend && npm install && npm run build
+
 # Desktop freeze (macOS maintainer path). Windows: see README.md PowerShell block.
 DESKTOP_PYTHON := $(firstword \
 	$(wildcard .venv-desktop/bin/python) \

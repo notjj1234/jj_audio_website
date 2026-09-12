@@ -9,6 +9,7 @@ export type JobResponse = {
   message: string;
   error: string | null;
   artifacts: Record<string, string>;
+  title?: string | null;
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -128,6 +129,7 @@ export type SystemCapabilities = {
   ram_gb: number | null;
   notes: string;
   low_ram: boolean;
+  allow_youtube: boolean;
   modes: ProcessingModeInfo[];
 };
 

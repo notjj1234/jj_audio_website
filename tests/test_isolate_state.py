@@ -10,13 +10,20 @@ import pytest
 import soundfile as sf
 
 from ui.isolate_state import (
+    CUSTOM_STEM_CHOICES,
+    CUSTOM_STEM_TILE_ORDER,
     DEFAULT_OUTCOME_CARD,
     DEFAULT_UI_MODE,
     FAILED_JOB_STRIP_TTL_SEC,
     MIXER_COMPONENT_KEY_PREFIX,
+    OUTCOME_CARDS,
     OUTCOME_CARD_ORDER,
     dismiss_failed_job,
     outcome_card_for_options,
+    custom_stems_from_options,
+    outcome_icon_markdown,
+    stem_icon_markdown,
+    toggle_custom_stem_options,
     resolve_outcome_card,
     should_show_failed_job,
     UI_MODE_KEY,
@@ -38,6 +45,7 @@ from ui.isolate_state import (
     ISOLATE_NAMED_YOUTUBE_URL_KEY,
     ISOLATE_YOUTUBE_URL_KEY,
     ISOLATE_YOUTUBE_URL_PENDING_KEY,
+    ISOLATE_YOUTUBE_TITLE_PENDING_KEY,
     SPEED_PRESETS,
     apply_listen_picker_pending,
     apply_pending_output_name,
@@ -46,6 +54,8 @@ from ui.isolate_state import (
     apply_workspace_tab,
     apply_youtube_output_name_sync,
     checklist_items,
+    LITE_MAX_DURATION_SEC,
+    clamp_lite_clip,
     clamp_region_bounds,
     custom_selected_stems,
     default_guitar_track_option,
@@ -81,6 +91,9 @@ from ui.isolate_state import (
     read_isolate_ui_state,
     recent_runs_with_owner_fallback,
     reset_new_tab_source,
+    adopt_audio_into_run,
+    discard_youtube_staging,
+    is_youtube_staging_path,
     resolve_custom_separation,
     resolve_isolate_user_id,
     resolve_separation_preset,
@@ -195,6 +208,224 @@ def test_a_pro_only_selection_is_reported_as_custom_not_silently_replaced():
     custom = ["vocals_demucs", "piano_demucs"]
     assert outcome_card_for_options(custom, roformer_available=True) is None
     assert outcome_card_for_options([], roformer_available=True) is None
+
+
+def test_outcome_cards_carry_stem_list_and_track_count():
+    expected = {
+        "band": ("Vocals · Drums · Bass · Guitar", 4),
+        "karaoke": ("Vocals · Instrumental", 2),
+        "guitar": ("Guitar", 1),
+        "vocals": ("Vocals", 1),
+    }
+    assert set(OUTCOME_CARDS) == set(OUTCOME_CARD_ORDER)
+    for card_id, (stems, n_tracks) in expected.items():
+        assert OUTCOME_CARDS[card_id]["stems_line"] == stems
+        assert OUTCOME_CARDS[card_id]["n_tracks"] == n_tracks
+        assert OUTCOME_CARDS[card_id]["label"]
+        assert OUTCOME_CARDS[card_id]["help"]
+
+
+def test_toggle_custom_stem_exits_karaoke_and_uses_best_guitar():
+    karaoke = resolve_outcome_card("karaoke", roformer_available=True)
+    added = toggle_custom_stem_options(karaoke, "drums", roformer_available=True)
+    assert added == ["drums_demucs"]
+    assert custom_stems_from_options(karaoke) == []
+
+    band = resolve_outcome_card("band", roformer_available=True)
+    with_piano = toggle_custom_stem_options(band, "piano", roformer_available=True)
+    assert "piano_demucs" in with_piano
+    assert outcome_card_for_options(with_piano, roformer_available=True) is None
+
+    no_guitar = toggle_custom_stem_options(band, "guitar", roformer_available=True)
+    assert custom_stems_from_options(no_guitar) == ["vocals", "bass", "drums"]
+    again = toggle_custom_stem_options([], "guitar", roformer_available=True)
+    assert again == ["guitar_roformer"]
+    demucs = toggle_custom_stem_options([], "guitar", roformer_available=False)
+    assert demucs == ["guitar_demucs_6s"]
+
+
+def test_custom_stem_tile_order_is_this_apps_stems_not_moises_extras():
+    assert set(CUSTOM_STEM_TILE_ORDER) == set(CUSTOM_STEM_CHOICES)
+    assert CUSTOM_STEM_TILE_ORDER == (
+        "vocals",
+        "guitar",
+        "bass",
+        "drums",
+        "piano",
+        "other",
+    )
+    for banned in ("keys", "wind", "strings", "multimedia", "dialogue"):
+        assert banned not in CUSTOM_STEM_CHOICES
+
+
+def test_lite_outcome_picker_uses_card_keys_not_pro_track_picker():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    tile = source[
+        source.find("def _render_outcome_tile") : source.find("def _render_stem_tile")
+    ]
+    picker = source[
+        source.find("def _render_outcome_picker") : source.find("def _render_engine_panel")
+    ]
+    grid = source[
+        source.find("def _render_custom_stem_grid") : source.find("def _render_outcome_picker")
+    ]
+    track = source[
+        source.find("def _render_track_picker") : source.find("def _outcome_tile_label")
+    ]
+    controls = source[
+        source.find("def _render_separation_controls") : source.find("def _ffmpeg_install_hint")
+    ]
+    assert "OUTCOME_CARD_KEY" in picker
+    assert 'key=f"isolate_outcome_pick_{card_id}"' in tile
+    for card_id in OUTCOME_CARD_ORDER:
+        assert f'"{card_id}"' in picker
+    assert "CUSTOM_STEM_TILE_ORDER" in grid
+    assert 'key=f"isolate_stem_pick_{stem_id}"' in source
+    assert "icon=STEM_TILE_EMOJI" not in source
+    assert "icon=OUTCOME_TILE_EMOJI" not in source
+    assert "icon=" not in tile
+    assert "stem_icon_markdown(stem_id, selected=selected)" in source
+    assert "outcome_icon_markdown(card_id, selected=selected)" in source
+    label_fn = source[
+        source.find("def _outcome_tile_label") : source.find("def _render_outcome_tile")
+    ]
+    assert r"\u00a0track" in label_fn
+    assert "stems_line']} · {tracks}" in label_fn
+    assert "flex-direction: column" in (
+        Path(__file__).resolve().parents[1] / "ui" / "app.py"
+    ).read_text(encoding="utf-8")
+    assert "_render_custom_stem_grid" in picker
+    assert "_render_track_picker(persist=persist)" in picker
+    assert "st.checkbox" not in track
+    assert 'key="isolate_guitar_track"' in track
+    assert "resolve_outcome_card(" in tile
+    branch = controls[controls.find("pro = is_pro_mode") : controls.find("custom_stems =")]
+    assert "_render_outcome_picker(" in branch
+    assert "prefer_roformer=prefer_roformer" in branch
+    assert "get_desktop_probe()" in controls
+    assert "lite_auto_speed_id(probe)" in controls
+    assert "lite_detected_caption(probe)" in picker
+    assert "lite_using_caption(" in picker
+    assert 'key="isolate_lite_run_on"' in picker
+    assert "lite_device_choice_ids(probe)" in picker
+    assert "_render_machine_panel(" in picker
+    assert "_render_machine_panel(" not in controls
+    assert controls.count("_render_machine_panel(") == 0
+    assert source.count("_render_machine_panel(") == 2  # def + one Pro call site
+    assert "get_desktop_probe_without_torch" not in controls
+    assert "_render_track_picker(persist=persist)" not in branch
+    for banned in ("keys", "wind", "strings", "multimedia"):
+        assert f"isolate_stem_pick_{banned}" not in source
+
+
+def test_pro_machine_panel_is_inside_outcome_fragment_only():
+    """Device expander must not sit after the fragment — that duplicated it."""
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    picker = source[
+        source.find("def _render_outcome_picker") : source.find("def _render_engine_panel")
+    ]
+    machine = source[
+        source.find("def _render_machine_panel") : source.find("def _speed_preset_radio_label")
+    ]
+    assert "_render_machine_panel(" in picker
+    assert "_render_engine_panel(" in picker
+    assert picker.find("_render_engine_panel(") < picker.find("_render_machine_panel(")
+    assert "_isolate_machine_panel_drawn" in machine
+    assert 'key="isolate_machine_expanded"' in machine
+
+
+def test_persisted_settings_include_lite_run_on():
+    from ui.isolate_state import PERSISTED_SETTING_KEYS
+
+    assert "isolate_lite_run_on" in PERSISTED_SETTING_KEYS
+    assert "isolate_device" in PERSISTED_SETTING_KEYS
+
+
+def test_isolate_headings_disable_anchors_and_tiles_use_fragment_rerun():
+    """Permalink chain-links scroll the page; help= + fragment-scope replace that."""
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    app_css = (
+        Path(__file__).resolve().parents[1] / "ui" / "app.py"
+    ).read_text(encoding="utf-8")
+    assert 'anchor=False, help=PAGE_TITLE_HELP' in source
+    assert "SEPARATE_TRACKS_HELP" in source
+    assert 'st.subheader("Downloads", anchor=False, help=DOWNLOADS_HELP)' in source
+    assert "SECTION_OPTIONAL_HELP" in source
+    assert "@st.fragment" in source
+    assert 'st.rerun(scope="fragment")' in source
+    assert "def _rerun_after_tile_pick" in source
+    assert "stHeaderActionElements" in app_css
+    assert 'markdown("### Separate tracks")' not in source
+    picker = source[
+        source.find("@st.fragment") : source.find("def _render_engine_panel")
+    ]
+    assert "def _render_outcome_picker" in picker
+    assert "_render_engine_panel(" in picker
+    assert 'key="isolate_speed_preset"' in picker
+    rerun_fn = source[
+        source.find("def _rerun_after_tile_pick") : source.find("def _render_custom_stem_grid")
+    ]
+    assert 'st.rerun(scope="fragment")' in rerun_fn
+    assert "is_pro_mode" not in rerun_fn
+    assert "_rerun_after_tile_pick()" in source[
+        source.find("def _render_outcome_tile") : source.find("def _render_custom_stem_grid")
+    ]
+
+
+def test_lite_new_cta_captions_chosen_outcome_and_source():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    new_ws = source[
+        source.find("def _render_new_workspace") : source.find("def _render_mixer_region_caption")
+    ]
+    assert 'key="isolate_separate"' in new_ws
+    assert "_enqueue_confirmed_job(choice, audio_path)" in new_ws
+    assert "OUTCOME_CARD_KEY" in new_ws
+    assert "_has_source_for_job(choice)" in new_ws
+    assert "Custom ·" in new_ws
+    css = (
+        Path(__file__).resolve().parents[1] / "ui" / "app.py"
+    ).read_text(encoding="utf-8")
+    assert "st-key-isolate_outcome_pick_" in css
+    assert "st-key-isolate_stem_pick_" in css
+    assert "white-space: pre-line" in css
+    assert "flex-direction: column" in css
+    assert "display: block !important" in css
+    assert "margin-left: auto !important" in css
+    assert "overflow-wrap: normal" in css
+    assert "2.35rem" in css
+    assert "Apple Color Emoji" not in css
+    assert "stIconEmoji" not in css
+    assert "mask-image" not in css
+    for banned in ("keys", "wind", "strings", "multimedia"):
+        assert f"st-key-isolate_stem_pick_{banned}" not in css
+
+
+def test_tile_icons_are_markdown_data_uris_not_emoji():
+    import base64
+
+    def svg_body(md: str) -> str:
+        uri = md[md.index("](") + 2 : -1]
+        return base64.standard_b64decode(uri.split(",", 1)[1]).decode("utf-8")
+
+    for stem_id in CUSTOM_STEM_TILE_ORDER:
+        md = stem_icon_markdown(stem_id)
+        assert md.startswith("![")
+        assert "data:image/svg+xml;base64," in md
+        assert not any(ord(ch) > 127 for ch in md)
+        assert "#ff4b4b" in svg_body(md)
+        selected = stem_icon_markdown(stem_id, selected=True)
+        assert "#ffffff" in svg_body(selected)
+        assert "#ff4b4b" not in svg_body(selected)
+    for card_id in OUTCOME_CARD_ORDER:
+        md = outcome_icon_markdown(card_id)
+        assert md.startswith("![")
+        assert "data:image/svg+xml;base64," in md
+        assert not any(ord(ch) > 127 for ch in md)
+        assert "#ffffff" in svg_body(outcome_icon_markdown(card_id, selected=True))
 
 
 def test_roformer_speed_note_names_the_gpu_this_host_actually_has():
@@ -400,6 +631,109 @@ def test_reset_new_tab_source_remounts_uploader_without_touching_widget_keys():
     assert session[ISOLATE_YOUTUBE_URL_KEY] == ""
 
 
+def test_adopt_audio_into_run_copies_into_output_dir(tmp_path):
+    src_dir = tmp_path / "stage"
+    src_dir.mkdir()
+    src = src_dir / "song.wav"
+    src.write_bytes(b"RIFF")
+    out = tmp_path / "run"
+    out.mkdir()
+    adopted = adopt_audio_into_run(src, out)
+    assert adopted == out / "song.wav"
+    assert adopted.read_bytes() == b"RIFF"
+    assert src.exists()
+    assert adopt_audio_into_run(adopted, out) == adopted
+
+
+def test_is_youtube_staging_path_requires_data_dir_child(tmp_path, monkeypatch):
+    import ui.isolate_state as state
+    import ui.common as common
+
+    monkeypatch.setattr(common, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(state, "DATA_DIR", tmp_path)
+    run = tmp_path / "abcd"
+    run.mkdir()
+    wav = run / "clip.wav"
+    wav.write_bytes(b"x")
+    assert is_youtube_staging_path(wav, "youtube:https://youtu.be/a")
+    assert not is_youtube_staging_path(wav, "file.wav:1")
+    outside = tmp_path.parent / "outside.wav"
+    outside.write_bytes(b"y")
+    assert not is_youtube_staging_path(outside, "youtube:https://youtu.be/a")
+
+
+def test_discard_youtube_staging_deletes_run_dir(tmp_path, monkeypatch):
+    import ui.isolate_state as state
+    import ui.common as common
+
+    monkeypatch.setattr(common, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(state, "DATA_DIR", tmp_path)
+    run = tmp_path / "stage1"
+    run.mkdir()
+    wav = run / "clip.wav"
+    wav.write_bytes(b"x")
+    fp = "youtube:https://youtu.be/a"
+    assert discard_youtube_staging(wav, fingerprint=fp) is True
+    assert not run.exists()
+
+
+def test_discard_youtube_staging_skips_retain_and_in_flight(tmp_path, monkeypatch):
+    import ui.isolate_state as state
+    import ui.common as common
+
+    monkeypatch.setattr(common, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(state, "DATA_DIR", tmp_path)
+    run = tmp_path / "stage2"
+    run.mkdir()
+    wav = run / "clip.wav"
+    wav.write_bytes(b"x")
+    fp = "youtube:https://youtu.be/b"
+    assert (
+        discard_youtube_staging(wav, fingerprint=fp, retain_paths=(wav,)) is False
+    )
+    assert run.exists()
+
+    monkeypatch.setattr(state, "staging_paths_still_needed", lambda _p: True)
+    assert discard_youtube_staging(wav, fingerprint=fp) is False
+    assert run.exists()
+
+
+def test_reset_new_tab_source_discards_youtube_staging(tmp_path, monkeypatch):
+    import ui.isolate_state as state
+    import ui.common as common
+
+    monkeypatch.setattr(common, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(state, "DATA_DIR", tmp_path)
+    run = tmp_path / "ytstage"
+    run.mkdir()
+    wav = run / "clip.wav"
+    wav.write_bytes(b"x")
+    session: dict[str, object] = {
+        "isolate_upload_key": 1,
+        "isolate_pending_audio_path": str(wav),
+        "isolate_pending_fp": "youtube:https://youtu.be/z",
+        "isolate_upload_fp": "youtube:https://youtu.be/z",
+    }
+    reset_new_tab_source(session)
+    assert "isolate_pending_audio_path" not in session
+    assert not run.exists()
+
+
+def test_enqueue_confirmed_job_adopts_youtube_staging_before_enqueue():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    enqueue = source[
+        source.find("def _enqueue_confirmed_job") : source.find("def _library_status_row")
+    ]
+    assert "adopt_audio_into_run(" in enqueue
+    assert "discard_youtube_staging(" in enqueue
+    assert 'startswith("youtube:")' in enqueue
+    stage = source[
+        source.find("def _stage_youtube_audio") : source.find("def _youtube_search_dialog")
+    ]
+    assert "discard_youtube_staging(" in stage
+
+
 def test_youtube_video_id_from_common_urls():
     assert youtube_video_id("https://www.youtube.com/watch?v=BaW_jenozKc") == "BaW_jenozKc"
     assert youtube_video_id("https://youtu.be/abc123XYZ_-") == "abc123XYZ_-"
@@ -478,9 +812,84 @@ def test_sync_output_name_on_youtube_keeps_user_edit_on_same_url():
     assert auto == "newvid"
 
 
-def test_apply_youtube_output_name_sync_queues_before_widget():
+def test_sync_output_name_on_youtube_preferred_label_beats_video_id():
+    name, named, auto, changed = sync_output_name_on_youtube(
+        youtube_url="https://youtu.be/YFMF4ZFmtnU",
+        last_named_url="https://youtu.be/oldvid",
+        output_name="old title",
+        auto_output_name="old title",
+        preferred_label="AC/DC - Girls Got Rhythm (Official Audio)",
+    )
+    assert changed is True
+    assert name == "AC/DC - Girls Got Rhythm (Official Audio)"
+    assert named == "https://youtu.be/YFMF4ZFmtnU"
+    assert auto == name
+
+
+def test_queue_youtube_url_with_title_syncs_output_name():
     session: dict[str, object] = {
         "isolate_youtube_enabled": True,
+        ISOLATE_OUTPUT_NAME_KEY: "Megadeth - Holy Wars",
+        ISOLATE_NAMED_YOUTUBE_URL_KEY: "https://youtu.be/oldvid",
+        ISOLATE_AUTO_OUTPUT_NAME_KEY: "Megadeth - Holy Wars",
+    }
+    queue_youtube_url(
+        session,
+        "https://youtu.be/YFMF4ZFmtnU",
+        title="AC/DC - Girls Got Rhythm (Official Audio)",
+    )
+    assert session[ISOLATE_YOUTUBE_TITLE_PENDING_KEY] == (
+        "AC/DC - Girls Got Rhythm (Official Audio)"
+    )
+    apply_pending_youtube_url(session)
+    applied = apply_youtube_output_name_sync(session)
+    assert applied == "AC/DC - Girls Got Rhythm (Official Audio)"
+    assert session[ISOLATE_OUTPUT_NAME_KEY] == applied
+    assert ISOLATE_YOUTUBE_TITLE_PENDING_KEY not in session
+
+
+def test_youtube_search_use_queues_hit_title():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    dialog = source[
+        source.find("def _youtube_search_dialog") : source.find("def _stateful_expander")
+    ]
+    assert "queue_youtube_url(st.session_state, url, title=title)" in dialog
+    assert "ISOLATE_YOUTUBE_AUTO_DOWNLOAD_KEY" in dialog
+    controls = source[
+        source.find("def _render_separation_controls") : source.find("def _ffmpeg_install_hint")
+    ]
+    assert "_stage_youtube_audio(" in controls
+    assert "ISOLATE_YOUTUBE_AUTO_DOWNLOAD_KEY" in controls
+    assert "auto_download" in controls
+
+
+def test_enqueue_confirmed_job_opens_queue_with_loading_overlay():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    enqueue = source[
+        source.find("def _enqueue_confirmed_job") : source.find("def _library_status_row")
+    ]
+    # Overlay on Home first; queue stays on Home below the form.
+    assert '["_isolate_pending_queue"] = True' in enqueue
+    assert "_request_loading_overlay()" in enqueue
+    assert 'WORKSPACE_NEXT_KEY] = "Queue"' not in enqueue
+    main_tail = source[source.find('st.session_state["_isolate_form_drawn"]') :]
+    assert 'pop("_isolate_pending_queue"' in main_tail
+    assert "open_home_shell" in main_tail
+    assert '["_isolate_scroll_top"] = True' in main_tail
+    assert "def _scroll_main_to_top" in source
+    assert 'pop("_isolate_scroll_top"' in source
+    assert "_scroll_main_to_top()" in source
+    css = (
+        Path(__file__).resolve().parents[1] / "ui" / "app.py"
+    ).read_text(encoding="utf-8")
+    assert "pointer-events: auto !important" in css
+    assert "audiotools-global-loading-root" in css
+
+
+def test_apply_youtube_output_name_sync_queues_before_widget():
+    session: dict[str, object] = {
         ISOLATE_YOUTUBE_URL_KEY: "https://youtu.be/newvid",
         ISOLATE_OUTPUT_NAME_KEY: "Megadeth - Holy Wars",
         ISOLATE_NAMED_YOUTUBE_URL_KEY: "https://youtu.be/oldvid",
@@ -553,6 +962,19 @@ def test_resolve_isolate_user_id_uses_stored_when_session_empty():
     session: dict = {}
     assert resolve_isolate_user_id(session, "  abc123  ") == "abc123"
     assert session["isolate_user_id"] == "abc123"
+
+
+def test_youtube_search_preview_does_not_use_st_video_embed():
+    """Official uploads often refuse youtube.com/embed; st.video shows 'unavailable'."""
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    dialog = source[
+        source.find("def _youtube_search_dialog") : source.find("def _stateful_expander")
+    ]
+    assert "st.video(" not in dialog
+    assert "Open on YouTube" in dialog
+    assert "isolate_youtube_preview_" in dialog
+    assert "In-app YouTube playback is often blocked" in dialog
 
 
 def test_staged_audio_for_new_tab_hides_preview_until_youtube_download(tmp_path):
@@ -636,12 +1058,10 @@ def test_pending_upload_fp_for_stale_uses_disk_not_uploader(tmp_path):
     session = {
         "isolate_pending_fp": "song.wav:1",
         "isolate_pending_audio_path": str(staged),
-        "isolate_youtube_enabled": False,
     }
     assert pending_upload_fp_for_stale(session) == "song.wav:1"
     session["isolate_pending_audio_path"] = str(tmp_path / "missing.wav")
     assert pending_upload_fp_for_stale(session) is None
-    session["isolate_youtube_enabled"] = True
     session["isolate_youtube_url"] = "https://youtu.be/abc"
     assert pending_upload_fp_for_stale(session) == "song.wav:1"
 
@@ -700,6 +1120,25 @@ def test_apply_workspace_tab_defaults_and_mixer_pin():
     assert apply_workspace_tab(session, has_artifacts=True) == "Queue"
 
 
+def test_apply_shell_view_home_and_mix():
+    from ui.isolate_state import (
+        SHELL_VIEW_KEY,
+        SHELL_VIEW_NEXT_KEY,
+        apply_shell_view,
+        open_home_shell,
+        open_mix_shell,
+    )
+
+    session: dict = {}
+    assert apply_shell_view(session) == "home"
+    open_mix_shell(session)
+    assert apply_shell_view(session) == "mix"
+    assert session[SHELL_VIEW_KEY] == "mix"
+    assert SHELL_VIEW_NEXT_KEY not in session
+    open_home_shell(session)
+    assert apply_shell_view(session) == "home"
+
+
 def test_partition_queue_jobs_includes_succeeded():
     jobs = [
         {"id": "s1", "status": "succeeded"},
@@ -745,6 +1184,99 @@ def test_apply_listen_picker_pending_sets_widget_key():
     assert LISTEN_PICKER_NEXT_KEY not in session
     apply_listen_picker_pending(session)
     assert session[LISTEN_PICKER_KEY] == "/runs/keep"
+
+
+def test_open_mix_tabs_add_close_and_cap(tmp_path: Path):
+    from ui.isolate_state import (
+        OPEN_MIX_TABS_KEY,
+        add_open_mix_tab,
+        close_open_mix_tab,
+        normalize_open_mix_tabs,
+    )
+
+    dirs = []
+    for i in range(10):
+        d = tmp_path / f"run{i}"
+        d.mkdir()
+        dirs.append(str(d))
+    session: dict = {}
+    for d in dirs:
+        add_open_mix_tab(session, d, cap=8)
+    assert len(session[OPEN_MIX_TABS_KEY]) == 8
+    assert session[OPEN_MIX_TABS_KEY][0] == dirs[2]
+    assert session[OPEN_MIX_TABS_KEY][-1] == dirs[9]
+
+    # Focusing an already-open tab must not move it to the end.
+    before = list(session[OPEN_MIX_TABS_KEY])
+    add_open_mix_tab(session, dirs[2], cap=8)
+    assert session[OPEN_MIX_TABS_KEY] == before
+    assert session[OPEN_MIX_TABS_KEY].count(dirs[2]) == 1
+    assert session[OPEN_MIX_TABS_KEY][0] == dirs[2]
+
+    neighbor = close_open_mix_tab(session, dirs[2])
+    assert dirs[2] not in session[OPEN_MIX_TABS_KEY]
+    assert neighbor in session[OPEN_MIX_TABS_KEY]
+
+    capped = normalize_open_mix_tabs(dirs, existing={dirs[0], dirs[1]}, cap=8)
+    assert capped == [dirs[0], dirs[1]]
+
+
+def test_plus_opens_literal_new_draft_tab(tmp_path: Path):
+    from ui.isolate_state import (
+        NEW_DRAFT_TAB_ID,
+        OPEN_MIX_TABS_KEY,
+        SHELL_TAB_KEY,
+        SHELL_VIEW_KEY,
+        add_open_mix_tab,
+        apply_shell_view,
+        close_open_mix_tab,
+        focus_new_draft_tab,
+        is_new_draft_tab,
+        open_home_shell,
+        open_mix_tabs_for_session,
+        open_new_draft_tab,
+    )
+
+    run = tmp_path / "mix"
+    run.mkdir()
+    session: dict = {OPEN_MIX_TABS_KEY: [str(run)]}
+    open_new_draft_tab(session, fresh=False)
+    assert session[OPEN_MIX_TABS_KEY][-1] == NEW_DRAFT_TAB_ID
+    assert session[SHELL_TAB_KEY] == NEW_DRAFT_TAB_ID
+    assert apply_shell_view(session) == "home"
+    assert is_new_draft_tab(NEW_DRAFT_TAB_ID)
+
+    tabs = open_mix_tabs_for_session(session, library_dirs=[str(run)])
+    assert NEW_DRAFT_TAB_ID in tabs
+    assert str(run) in tabs
+
+    open_home_shell(session)
+    assert session[SHELL_TAB_KEY] == "home"
+    assert apply_shell_view(session) == "home"
+    assert NEW_DRAFT_TAB_ID in session[OPEN_MIX_TABS_KEY]
+
+    focus_new_draft_tab(session)
+    assert session[SHELL_TAB_KEY] == NEW_DRAFT_TAB_ID
+
+    neighbor = close_open_mix_tab(session, NEW_DRAFT_TAB_ID)
+    assert NEW_DRAFT_TAB_ID not in session[OPEN_MIX_TABS_KEY]
+    assert neighbor == str(run)
+
+    # Draft survives normalize without a real directory.
+    add_open_mix_tab(session, NEW_DRAFT_TAB_ID)
+    assert NEW_DRAFT_TAB_ID in session[OPEN_MIX_TABS_KEY]
+    assert session[SHELL_VIEW_KEY] == "home"
+
+
+def test_isolate_ui_state_roundtrips_open_mix_tabs():
+    from ui.isolate_state import OPEN_MIX_TABS_KEY, apply_stored_isolate_ui_state, isolate_ui_state_payload
+
+    session = {OPEN_MIX_TABS_KEY: ["/a", "/b"], "isolate_workspace": "Mixer"}
+    payload = isolate_ui_state_payload(session)
+    assert payload["open_mix_tabs"] == ["/a", "/b"]
+    restored: dict = {}
+    apply_stored_isolate_ui_state(restored, payload)
+    assert restored[OPEN_MIX_TABS_KEY] == ["/a", "/b"]
 
 
 def test_select_rehydrate_row_loads_latest_when_session_empty():
@@ -898,6 +1430,30 @@ def test_os_notify_seeds_historical_jobs_and_fires_for_new_terminal():
     assert [row["id"] for row in pending] == ["new-fail"]
     later = later + [{"id": "gone", "status": "cancelled", "title": "Z"}]
     ids, pending = jobs_needing_os_notify(later, ids)
+    assert pending == []
+
+
+def test_os_notify_empty_seed_does_not_toast_stale_failures():
+    """First poll with no jobs stored []; later history must not all re-toast."""
+    now = 1_700_000_000.0
+    stale = {
+        "id": "old-fail",
+        "status": "failed",
+        "title": "Yesterday",
+        "finished_at": now - 3600,
+        "updated_at": now - 3600,
+    }
+    fresh_ok = {
+        "id": "new-ok",
+        "status": "succeeded",
+        "title": "Hangar 18",
+        "finished_at": now - 5,
+        "updated_at": now - 5,
+    }
+    ids, pending = jobs_needing_os_notify([stale, fresh_ok], [], now=now)
+    assert set(ids) == {"old-fail", "new-ok"}
+    assert [row["id"] for row in pending] == ["new-ok"]
+    ids, pending = jobs_needing_os_notify([stale, fresh_ok], ids, now=now)
     assert pending == []
 
 
@@ -1157,23 +1713,32 @@ def test_should_auto_apply_job_respects_pin():
     assert should_auto_apply_job("job-old", "job-a") is False
 
 
-def test_listening_picker_uses_on_change_callback_to_pin():
+def test_listening_picker_uses_moises_top_strip_not_inline_buttons():
     page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
     source = page.read_text(encoding="utf-8")
     picker = source[source.find("def _render_listening_switcher") : source.find("def _has_source_for_job")]
-    assert "on_change=_apply_listen_pick" in picker
-    assert 'viewing_mode=str(row.get("id") or str(chosen))' in source
-    assert "def _apply_listen_pick" in source
+    assert "Open mixes" not in picker
+    assert "mix_tab_focus_" not in picker
+    assert '"Change mix"' not in picker
+    assert 'label="Listening to"' in picker
+    assert "_render_moises_tab_strip" in source
+    assert "st.tabs(" not in source[source.find("def main") :]
+    assert "mix_tabs(" in source
+    assert 'action == "plus"' in source
+    assert "open_new_draft_tab" in source
+    assert 'action == "home"' in source
 
 
 def test_listening_switcher_renames_current_mix_from_editable_name():
     page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
     source = page.read_text(encoding="utf-8")
     switcher = source[source.find("def _render_listening_switcher") : source.find("def _has_source_for_job")]
+    assert 'label="Listening to"' in switcher
     assert 'key="isolate_listen_name"' in switcher
     assert "on_change=_rename_listen_run" in switcher
     assert "def _rename_listen_run" in source
     assert "rename_run_title(Path(run_dir), new_name)" in source
+    assert 'label="Mix name"' not in switcher
     assert "isolate_rename_mix" not in switcher
     assert "isolate_mix_name_input" not in switcher
 
@@ -1196,11 +1761,84 @@ def test_new_tab_section_and_output_name_prominent_before_advanced():
     controls = source[
         source.find("def _render_separation_controls") : source.find("def _ffmpeg_install_hint")
     ]
-    advanced_at = controls.find("_render_engine_panel(")
+    picker_at = controls.find("_render_outcome_picker(")
     section_at = controls.find("_render_region_controls(")
     output_at = controls.find('key="isolate_output_name"')
-    assert section_at != -1 and advanced_at != -1 and output_at != -1
-    assert output_at < section_at < advanced_at
+    assert section_at != -1 and picker_at != -1 and output_at != -1
+    assert output_at < section_at < picker_at
+    picker = source[
+        source.find("def _render_outcome_picker") : source.find("def _render_engine_panel")
+    ]
+    assert "_render_engine_panel(" in picker
+
+
+def test_isolate_youtube_paste_and_search_are_always_visible():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    controls = source[
+        source.find("def _render_separation_controls") : source.find("def _ffmpeg_install_hint")
+    ]
+    assert 'key="isolate_youtube_enabled"' not in controls
+    assert 'key="isolate_youtube_url"' in controls
+    assert 'key="isolate_youtube_search_open_btn"' in controls
+    assert "YOUTUBE_DISCLAIMER" in controls
+    assert "Off until you paste a URL or search" in controls
+    assert "off in this installer build" not in source
+
+
+def test_mixer_builds_current_mix_on_save_click():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    fragment = source[
+        source.find("def _mixer_and_downloads_fragment") : source.find("def _save_all_tracks")
+    ]
+    assert "_build_current_mix(" not in fragment
+    panel = source[
+        source.find("def _render_downloads_panel") : source.find("def _resolve_audio_for_job")
+    ]
+    assert "_build_current_mix(" in panel
+    assert 'key="isolate_save_mix"' in panel
+
+
+def test_mixer_workspace_lite_shares_fixup_and_tab_pdf_carry_over():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    mixer_ws = source[
+        source.find("def _render_mixer_workspace") : source.find("def _render_file_ready_banner")
+    ]
+    assert "Fix the guitar track" not in mixer_ws
+    assert "_render_guitar_fixup_panel(" in mixer_ws
+    assert "Make a tab PDF from this" in mixer_ws
+    assert "if pro and source_audio_path" not in mixer_ws
+
+
+def test_desktop_mixer_renders_stem_hint_captions():
+    frontend = (
+        Path(__file__).resolve().parents[1]
+        / "ui"
+        / "stem_mixer_component"
+        / "frontend"
+        / "src"
+        / "main.ts"
+    )
+    source = frontend.read_text(encoding="utf-8")
+    assert 'class="stem-hint"' in source
+    assert "stem.hint" in source
+
+
+def test_lite_region_defaults_full_file_with_safer_warn():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    region = source[
+        source.find("def _render_region_controls") : source.find("def _render_section_preview")
+    ]
+    enqueue = source[source.find("def _enqueue_confirmed_job") :]
+    assert "Safer: first" in region
+    assert "LITE_MAX_DURATION_SEC" in region
+    assert "float(duration)" in region
+    assert "clamp_lite_clip" not in enqueue
+    assert "is_pro_mode" in region
+    assert "no silent clamp" in region or "never a silent clamp" in region
 
 
 def test_resolve_separation_preset_full_band():
@@ -1306,6 +1944,38 @@ def test_tracks_picker_help_mentions_install_when_roformer_missing():
 def test_default_guitar_track_option_promotes_roformer_when_available():
     assert default_guitar_track_option(roformer_available=True) == "guitar_roformer"
     assert default_guitar_track_option(roformer_available=False) == "guitar_demucs_6s"
+    assert (
+        default_guitar_track_option(
+            roformer_available=True, prefer_roformer=False
+        )
+        == "guitar_demucs_6s"
+    )
+
+
+def test_promote_default_guitar_option_respects_prefer_roformer():
+    base = ["vocals_demucs", "guitar_demucs_6s"]
+    assert promote_default_guitar_option(
+        base, roformer_available=True, prefer_roformer=False
+    ) == ["vocals_demucs", "guitar_demucs_6s"]
+    assert promote_default_guitar_option(
+        base, roformer_available=True, prefer_roformer=True
+    ) == ["vocals_demucs", "guitar_roformer"]
+
+
+def test_resolve_outcome_card_lite_cpu_keeps_demucs_when_roformer_installed():
+    band = resolve_outcome_card(
+        "band", roformer_available=True, prefer_roformer=False
+    )
+    assert "guitar_demucs_6s" in band
+    assert "guitar_roformer" not in band
+    guitar = resolve_outcome_card(
+        "guitar", roformer_available=True, prefer_roformer=False
+    )
+    assert guitar == ["guitar_demucs_6s"]
+    strong = resolve_outcome_card(
+        "guitar", roformer_available=True, prefer_roformer=True
+    )
+    assert strong == ["guitar_roformer"]
 
 
 def test_promote_default_guitar_option_swaps_only_fresh_defaults():
@@ -1353,7 +2023,7 @@ def test_resolve_custom_separation_piano_and_vocals_needs_six_stem_model():
     assert resolved["two_stems"] is None
     assert resolved["stems"] == ["vocals", "piano"]
     assert "Vocals (Demucs)" in resolved["tracks"]
-    assert "Piano (Demucs 6-stem)" in resolved["tracks"]
+    assert "Piano (Demucs 6-stem" in resolved["tracks"]
 
 
 def test_resolve_custom_separation_guitar_needs_six_stem_model():
@@ -1594,6 +2264,33 @@ def test_resolve_speed_preset_best_uses_cuda_probe_on_windows():
 def test_default_region_end():
     assert default_region_end(120.0) == 30.0
     assert default_region_end(10.0) == 10.0
+    assert default_region_end(120.0, min_length=90) == 90.0
+    assert default_region_end(60.0, min_length=90) == 60.0
+    assert default_region_end(90.0, min_length=LITE_MAX_DURATION_SEC) == 90.0
+
+
+def test_clamp_lite_clip():
+    start, length, clamped = clamp_lite_clip(0.0, None, 200.0)
+    assert start == 0.0
+    assert length == LITE_MAX_DURATION_SEC
+    assert clamped is True
+
+    start, length, clamped = clamp_lite_clip(0.0, None, 60.0)
+    assert length == 60.0
+    assert clamped is False
+
+    start, length, clamped = clamp_lite_clip(10.0, 45.0, 200.0)
+    assert start == 10.0
+    assert length == 45.0
+    assert clamped is False
+
+    start, length, clamped = clamp_lite_clip(0.0, 200.0, 200.0)
+    assert length == LITE_MAX_DURATION_SEC
+    assert clamped is True
+
+    start, length, clamped = clamp_lite_clip(0.0, None, None)
+    assert length == LITE_MAX_DURATION_SEC
+    assert clamped is False
 
 
 def test_clamp_region_bounds():

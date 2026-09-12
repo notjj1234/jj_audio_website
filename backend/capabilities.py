@@ -8,7 +8,9 @@ from pydantic import BaseModel
 
 from audio_to_tab.hardware import (
     LOW_RAM_GB,
+    MPS_MIN_RAM_GB,
     HostProbe,
+    probe_cpu_brand,
     probe_ram_gb,
     probe_torch,
 )
@@ -28,7 +30,7 @@ MODE_LABELS = {
     MODE_FAST_CPU: "Fast (CPU)",
     MODE_BALANCED: "Balanced",
     MODE_HIGH_GPU: "High (GPU)",
-    MODE_LITE: "Lite / low RAM",
+    MODE_LITE: "Low RAM (60 s)",
 }
 
 FAST_CPU_DURATION_SEC = 90.0
@@ -64,6 +66,7 @@ class CapabilitiesResponse(BaseModel):
     ram_gb: float | None
     notes: str
     low_ram: bool
+    allow_youtube: bool = False
     modes: list[ModeInfo]
 
 
@@ -74,6 +77,7 @@ def probe_host(settings: Settings) -> HostProbe:
         mps=mps,
         ram_gb=probe_ram_gb(),
         single_flight=bool(settings.single_flight_jobs),
+        cpu_brand=probe_cpu_brand(),
     )
 
 
@@ -85,11 +89,16 @@ def detected_device(probe: HostProbe) -> str:
     return "cpu"
 
 
+def mps_eligible(probe: HostProbe) -> bool:
+    """Apple GPU listed only when torch-MPS is up and RAM meets the desktop gate."""
+    return bool(probe.mps) and (probe.ram_gb is None or probe.ram_gb >= MPS_MIN_RAM_GB)
+
+
 def device_options(probe: HostProbe) -> list[str]:
     options = ["cpu"]
     if probe.cuda:
         options.append("cuda")
-    if probe.mps:
+    if mps_eligible(probe):
         options.append("mps")
     return options
 
@@ -105,7 +114,7 @@ def is_lite_host(probe: HostProbe) -> bool:
 def balanced_device(probe: HostProbe) -> str:
     if probe.cuda:
         return "cuda"
-    if probe.mps:
+    if mps_eligible(probe):
         return "mps"
     return "cpu"
 
@@ -123,9 +132,9 @@ def recommended_mode(probe: HostProbe, settings: Settings) -> str:
 
     if is_lite_host(probe):
         return MODE_LITE
-    if probe.cuda and (probe.ram_gb is None or probe.ram_gb >= HIGH_RAM_GB):
-        return MODE_BALANCED
     if probe.cuda:
+        return MODE_BALANCED
+    if mps_eligible(probe):
         return MODE_BALANCED
     return MODE_FAST_CPU
 
@@ -196,20 +205,22 @@ def _notes(probe: HostProbe, rec: str) -> str:
     parts: list[str] = []
     if probe.cuda:
         parts.append("CUDA available.")
+    elif mps_eligible(probe):
+        parts.append("Apple GPU (MPS) available (≥12 GB RAM).")
     elif probe.mps:
-        parts.append("Apple GPU (MPS) detected; Demucs on MPS is unreliable — Auto uses CPU.")
+        parts.append("Apple GPU (MPS) detected; Auto stays on CPU below 12 GB RAM.")
     else:
         parts.append("CUDA not available; jobs run on CPU.")
     if is_low_ram(probe):
-        parts.append("Low RAM host; Auto uses Lite.")
+        parts.append("Low RAM host; Auto uses Low RAM (60 s).")
     elif probe.single_flight:
-        parts.append("Single-flight jobs enabled; Auto uses Lite.")
+        parts.append("Single-flight jobs enabled; Auto uses Low RAM (60 s).")
     if rec == MODE_FAST_CPU:
         parts.append("Auto picks Fast (CPU).")
     elif rec == MODE_BALANCED:
         parts.append("Auto picks Balanced.")
     elif rec == MODE_LITE:
-        parts.append("Auto picks Lite / low RAM.")
+        parts.append("Auto picks Low RAM (60 s).")
     elif rec == MODE_HIGH_GPU:
         parts.append("Auto override: High (GPU).")
     return " ".join(parts)
@@ -256,6 +267,7 @@ def build_capabilities(probe: HostProbe, settings: Settings) -> CapabilitiesResp
         ram_gb=probe.ram_gb,
         notes=_notes(probe, rec),
         low_ram=is_low_ram(probe),
+        allow_youtube=bool(settings.allow_youtube),
         modes=modes,
     )
 

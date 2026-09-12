@@ -6,7 +6,7 @@
   --sand: #d4c4a8;
   --haze: rgba(26, 31, 28, 0.08);
   --danger: #9b2c2c;
-  --font-display: "Instrument Serif", Georgia, serif;
+  --font-display: "Satoshi", system-ui, sans-serif;
   --font-body: "Satoshi", system-ui, sans-serif;
   --radius: 4px;
   --max: 720px;
@@ -102,6 +102,20 @@ h1 {
   max-width: 36rem;
 }
 
+.callout-warning {
+  margin: 0 0 1rem;
+  padding: 0.85rem 1rem;
+  background: rgba(155, 44, 44, 0.1);
+  border: 1px solid rgba(155, 44, 44, 0.35);
+  border-radius: var(--radius);
+  color: var(--danger);
+  max-width: 40rem;
+}
+
+.callout-warning strong {
+  color: var(--danger);
+}
+
 .hint {
   font-weight: 400;
   font-size: 0.8rem;
@@ -138,6 +152,27 @@ h1 {
   gap: 0.35rem;
   font-size: 0.9rem;
   font-weight: 600;
+}
+
+.region-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  width: 100%;
+}
+
+.region-picker-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+}
+
+.region-picker-wave {
+  width: 100%;
+  min-height: 96px;
+  border-radius: var(--radius);
+  overflow: hidden;
 }
 
 .segmented {
@@ -310,93 +345,191 @@ button.danger,
 .mixer {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
-  padding: 1rem 0;
+  gap: 0.85rem;
+  margin-top: 1.25rem;
+  padding-top: 1.15rem;
+  border-top: 1px solid var(--haze);
 }
 
-.transport-sticky {
+.mixer .visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.mixer-header .section-heading {
+  margin-bottom: 0.2rem;
+}
+
+.mixer-status {
+  margin: 0;
+  font-size: 0.8rem;
+  color: rgba(26, 31, 28, 0.62);
+}
+
+.mixer-transport.transport-sticky {
   position: sticky;
   top: 0;
   z-index: 5;
-  padding: 0.5rem 0;
-  background: var(--paper);
+  padding: 0.4rem 0 0.55rem;
+  background: rgba(255, 255, 255, 0.88);
   border-bottom: 1px solid var(--haze);
 }
 
-.mixer .transport {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  align-items: center;
-}
-
-.mixer .master {
+.mixer-transport-controls {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem 0;
+  gap: 0.4rem 0.55rem;
 }
 
-.mixer .master-hint {
-  font-size: 0.8rem;
+.mixer button {
+  min-height: 40px;
+  padding: 0.45rem 0.9rem;
+}
+
+.mixer button.ghost {
+  min-height: 36px;
+  padding: 0.25rem 0.45rem;
+  background: transparent;
   color: var(--moss-deep);
+  border: none;
+  font-size: 0.85rem;
   font-weight: 600;
 }
 
+.mixer button.ghost:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.mixer-time {
+  margin-left: auto;
+  display: flex;
+  gap: 0.3rem;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85rem;
+  color: rgba(26, 31, 28, 0.72);
+}
+
+.mixer-time-sep {
+  opacity: 0.55;
+}
+
+.mixer-seek {
+  display: block;
+  margin-top: 0.15rem;
+}
+
+.mixer .master-vol {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 2.75rem;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-top: 0.35rem;
+}
+
+.mixer .master-vol-label {
+  opacity: 0.78;
+}
+
+.mixer input[type="range"] {
+  padding: 12px 0;
+}
+
+.mixer input[type="range"]::-webkit-slider-runnable-track {
+  height: 3px;
+}
+
+.mixer input[type="range"]::-webkit-slider-thumb {
+  width: 16px;
+  height: 16px;
+  margin-top: -6.5px;
+}
+
+.mixer input[type="range"]::-moz-range-track {
+  height: 3px;
+}
+
+.mixer input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+}
+
+.mixer-master {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.15rem 0.85rem;
+}
+
+.mixer-stems {
+  display: flex;
+  flex-direction: column;
+}
+
 .mixer .stem-row {
-  padding: 0.75rem 0;
+  display: grid;
+  grid-template-columns: 40px 40px minmax(4.5rem, 7.5rem) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.35rem 0.5rem;
+  padding: 0.45rem 0;
   border-top: 1px solid var(--haze);
   transition: opacity 0.15s ease;
 }
 
 .mixer .stem-row.silent {
-  opacity: 0.55;
+  opacity: 0.5;
 }
 
-.mixer .stem-head {
-  display: flex;
-  justify-content: space-between;
+.mixer .stem-name {
+  font-size: 0.92rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mixer .stem-vol {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 2.75rem;
   align-items: center;
-  margin-bottom: 0.35rem;
+  gap: 0.4rem;
+  min-width: 0;
 }
 
-.mixer .badges {
-  display: flex;
-  gap: 0.35rem;
+.mixer .stem-db {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: rgba(26, 31, 28, 0.62);
+  text-align: right;
 }
 
-.mixer .badge {
-  font-size: 0.7rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  padding: 0.1rem 0.4rem;
-  border-radius: 999px;
-}
-
-.mixer .badge.solo {
-  background: var(--moss);
-  color: #f7faf7;
-}
-
-.mixer .badge.muted {
-  background: rgba(26, 31, 28, 0.12);
-  color: rgba(26, 31, 28, 0.7);
-}
-
-.mixer .toggles {
-  display: flex;
-  gap: 0.5rem;
-  margin-top: 0.35rem;
+.mixer .stem-download {
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .mixer button.toggle {
-  flex: 1;
-  min-height: 44px;
-  padding: 0.5rem 0.75rem;
+  width: 40px;
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0;
   background: transparent;
   color: var(--moss-deep);
   border: 1px solid rgba(47, 107, 79, 0.35);
+  font-size: 0.78rem;
+  letter-spacing: 0.02em;
   transition:
     background 0.12s ease,
     color 0.12s ease,
@@ -418,6 +551,20 @@ button.danger,
   background: var(--moss);
   border-color: var(--moss);
   color: #f7faf7;
+}
+
+@media (max-width: 560px) {
+  .mixer .stem-row {
+    grid-template-columns: 40px 40px minmax(0, 1fr);
+  }
+
+  .mixer .stem-vol {
+    grid-column: 1 / -1;
+  }
+
+  .mixer-time {
+    margin-left: 0;
+  }
 }
 
 .artifacts {

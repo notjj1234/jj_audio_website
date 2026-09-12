@@ -292,6 +292,38 @@ def _delete_job_folder(job_id: str) -> bool:
     return not path.exists()
 
 
+def _artifacts_from_completed_run(output_dir: Path) -> dict[str, str] | None:
+    """Stem paths from meta.json or wavs on disk when the child exited mid-success."""
+    meta_path = output_dir / "meta.json"
+    if meta_path.is_file():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            meta = None
+        if isinstance(meta, dict):
+            raw = meta.get("artifacts") or {}
+            if isinstance(raw, dict) and raw:
+                out = {
+                    str(k): str(v)
+                    for k, v in raw.items()
+                    if str(v).lower().endswith(".wav") and Path(str(v)).is_file()
+                }
+                if out:
+                    return out
+    if not output_dir.is_dir():
+        return None
+    wavs = {
+        p.stem: str(p)
+        for p in output_dir.iterdir()
+        if p.is_file()
+        and p.suffix.lower() == ".wav"
+        and not p.name.startswith(".")
+        and not p.stem.endswith("_diagnostics")
+        and p.stem != "current_mix"
+    }
+    return wavs or None
+
+
 def _finalize_job_after_process(job_id: str) -> None:
     """Apply pause/cancel cleanup after the child process exits."""
     status = read_status(job_id)
@@ -309,6 +341,30 @@ def _finalize_job_after_process(job_id: str) -> None:
     elif st == "cancelled":
         _delete_job_folder(job_id)
     elif st == "running":
+        # Child may have written stems/meta then exited before status=succeeded
+        # (crash, SIGTERM race). Prefer success when the run is clearly complete
+        # so the OS toast is not a false "failed".
+        spec = read_spec(job_id)
+        artifacts = None
+        if spec is not None and spec.output_dir:
+            artifacts = _artifacts_from_completed_run(Path(spec.output_dir))
+        if artifacts:
+            write_status(
+                job_id,
+                status="succeeded",
+                stage="done",
+                message="Complete",
+                progress=1.0,
+                artifacts=artifacts,
+                finished_at=time.time(),
+                title=spec.title if spec else status.get("title"),
+                run_dir=spec.output_dir if spec else status.get("run_dir"),
+                source_fingerprint=spec.source_fingerprint if spec else None,
+                source_kind=spec.source_kind if spec else None,
+                source_audio_path=spec.audio_path if spec else None,
+                error=None,
+            )
+            return
         write_status(
             job_id,
             status="failed",

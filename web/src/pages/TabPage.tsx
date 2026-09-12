@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import * as api from "../api";
 import { JobProgress } from "../components/JobProgress";
 import { ProcessingModeSelect } from "../components/ProcessingModeSelect";
+import { HOSTED_FILE_ONLY_NOTE, TRACK_OPTIONS } from "../trackOptions";
 
 export function TabPage() {
   const [file, setFile] = useState<File | null>(null);
@@ -46,14 +47,20 @@ export function TabPage() {
     }
   }
 
+  const formBusy =
+    busy || job?.status === "pending" || job?.status === "running";
+
   return (
     <div>
-      <h1>Tab PDF</h1>
-      <p className="lede">
-        Upload a track, wait for the job to finish, then download the PDF.
+      <h1>Tab PDF (demo)</h1>
+      <p className="callout-warning">
+        <strong>Not a finished product.</strong> Tab PDF barely works — tabs are
+        often wrong or unusable. Best on short solo-guitar clips. For full songs,
+        isolate guitar first on Isolate.
       </p>
+      <p className="lede">{HOSTED_FILE_ONLY_NOTE}</p>
       <form
-        className={`stack${job ? " stack-secondary" : ""}`}
+        className={`stack${formBusy ? " stack-secondary" : ""}`}
         onSubmit={onSubmit}
       >
         <label className="field">
@@ -79,9 +86,11 @@ export function TabPage() {
             value={guitarEngine}
             onChange={(e) => setGuitarEngine(e.target.value)}
           >
-            <option value="demucs">Guitar (Demucs 6-stem)</option>
-            <option value="roformer">Guitar (BS-RoFormer)</option>
-            <option value="roformer_refine">Guitar (BS-RoFormer + MelBand refine)</option>
+            <option value="demucs">{TRACK_OPTIONS.guitar_demucs_6s.label}</option>
+            <option value="roformer">{TRACK_OPTIONS.guitar_roformer.label}</option>
+            <option value="roformer_refine">
+              {TRACK_OPTIONS.guitar_roformer_refine.label}
+            </option>
           </select>
         </label>
         <label className="field">

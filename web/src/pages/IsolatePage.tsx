@@ -2,8 +2,18 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import * as api from "../api";
 import { JobProgress } from "../components/JobProgress";
 import { ProcessingModeSelect } from "../components/ProcessingModeSelect";
+import { RegionPicker } from "../components/RegionPicker";
 import { StemMixer } from "../components/StemMixer";
 import type { StemInfo } from "../mixer/engine";
+import {
+  DEFAULT_TRACK_OPTIONS,
+  DEMUCS_STEM_CHECKBOX_IDS,
+  GUITAR_TRACK_OPTION_IDS,
+  HOSTED_FILE_ONLY_NOTE,
+  TRACK_OPTIONS,
+  VOCALS_INSTRUMENTAL_OPTION_ID,
+  type TrackOptionId,
+} from "../trackOptions";
 
 const MIN_REGION_SEC = 5;
 
@@ -20,49 +30,12 @@ const STEM_LABELS: Record<string, string> = {
   guitar2: "Guitar 2",
 };
 
-const TRACK_OPTIONS = {
-  vocals_demucs: { label: "Vocals (Demucs)", stem: "vocals" },
-  drums_demucs: { label: "Drums (Demucs)", stem: "drums" },
-  bass_demucs: { label: "Bass (Demucs)", stem: "bass" },
-  other_demucs: { label: "Other (Demucs)", stem: "other" },
-  piano_demucs: { label: "Piano (Demucs 6-stem)", stem: "piano" },
-  guitar_demucs_6s: { label: "Guitar (Demucs 6-stem, weaker)", stem: "guitar" },
-  guitar_roformer: { label: "Guitar (BS-RoFormer, better, slower)", stem: "guitar" },
-  guitar_roformer_refine: {
-    label: "Guitar (BS-RoFormer + MelBand refine, best, slowest)",
-    stem: "guitar",
-  },
-  vocals_instrumental_demucs: {
-    label: "Vocals & instrumental (Demucs 2-stem)",
-    stem: "vocals",
-  },
-} as const;
-
-type TrackOptionId = keyof typeof TRACK_OPTIONS;
-
-const GUITAR_TRACK_OPTION_IDS = new Set<TrackOptionId>([
-  "guitar_demucs_6s",
-  "guitar_roformer",
-  "guitar_roformer_refine",
-]);
-
-const DEMUCS_STEM_CHECKBOX_IDS: TrackOptionId[] = [
-  "vocals_demucs",
-  "drums_demucs",
-  "bass_demucs",
-  "piano_demucs",
-  "other_demucs",
-];
-
-const VOCALS_INSTRUMENTAL_OPTION_ID: TrackOptionId = "vocals_instrumental_demucs";
-const DEFAULT_TRACK_OPTIONS: TrackOptionId[] = ["vocals_demucs", "guitar_demucs_6s"];
-
 const ROFORMER_DOWNLOAD_CAVEAT =
-  "Downloads ~700 MB BS-RoFormer-SW weights on first use, then a guitar specialist (~45 MB). Much slower on CPU. Community weights have no stated license — use accordingly.";
+  "Downloads ~700 MB BS-RoFormer-SW weights on first use, then a guitar specialist (~45 MB). Much slower on CPU. Residual bleed remains. Community weights have no stated license — use accordingly.";
 const ROFORMER_MIXED_STEMS_NOTE =
   "All stems are separated in one BS-RoFormer pass; unselected stems are discarded.";
 const TRACKS_PICKER_HELP =
-  "Pick the stems you want. Guitar can use Demucs (faster) or BS-RoFormer (better quality, much slower on CPU).";
+  "Pick the stems you want. Guitar can use Demucs (faster) or BS-RoFormer (cleaner on a GPU, much slower on CPU). Neither is bleed-free, and piano from Demucs is unreliable.";
 
 type ResolvedTrackSelection = {
   model: string;
@@ -158,15 +131,6 @@ function isDiagnosticKind(kind: string): boolean {
   return kind.endsWith("_diagnostics");
 }
 
-function readAdvancedOpen(): boolean {
-  try {
-    const v = sessionStorage.getItem("isolate_advanced_open");
-    return v === null ? true : v === "1";
-  } catch {
-    return true;
-  }
-}
-
 type GuitarTrackChoice = "none" | TrackOptionId;
 
 export function IsolatePage() {
@@ -184,13 +148,12 @@ export function IsolatePage() {
   });
   const [guitarTrack, setGuitarTrack] = useState<GuitarTrackChoice>("guitar_demucs_6s");
   const [vocalsInstrumentalOnly, setVocalsInstrumentalOnly] = useState(false);
-  const [processingMode, setProcessingMode] = useState("balanced");
+  const [processingMode, setProcessingMode] = useState("auto");
   const [capabilities, setCapabilities] = useState<api.SystemCapabilities | null>(null);
   const [duration, setDuration] = useState<number | null>(null);
   const [useRegion, setUseRegion] = useState(false);
   const [regionStart, setRegionStart] = useState(0);
   const [regionEnd, setRegionEnd] = useState(30);
-  const [advancedOpen, setAdvancedOpen] = useState(readAdvancedOpen);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [job, setJob] = useState<api.JobResponse | null>(null);
@@ -200,7 +163,7 @@ export function IsolatePage() {
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const previewStopRef = useRef<(() => void) | null>(null);
-  const objectUrlRef = useRef<string | null>(null);
+  const [objectUrl, setObjectUrl] = useState<string | null>(null);
 
   const trackOptions = useMemo((): TrackOptionId[] => {
     if (vocalsInstrumentalOnly) {
@@ -268,40 +231,18 @@ export function IsolatePage() {
   useEffect(() => {
     previewStopRef.current?.();
     previewStopRef.current = null;
-    if (objectUrlRef.current) {
-      URL.revokeObjectURL(objectUrlRef.current);
-      objectUrlRef.current = null;
-    }
     if (!file) {
+      setObjectUrl(null);
       setDuration(null);
       setRegionStart(0);
       setRegionEnd(30);
       return;
     }
     const url = URL.createObjectURL(file);
-    objectUrlRef.current = url;
-    const audio = new Audio(url);
-    audioRef.current = audio;
-    const onMeta = () => {
-      const d = audio.duration;
-      if (!isFinite(d) || d <= 0) {
-        setDuration(null);
-        return;
-      }
-      setDuration(d);
-      const end = Math.min(d, Math.max(MIN_REGION_SEC, 30));
-      setRegionStart(0);
-      setRegionEnd(end);
-    };
-    audio.addEventListener("loadedmetadata", onMeta);
-    audio.load();
+    setObjectUrl(url);
     return () => {
-      audio.removeEventListener("loadedmetadata", onMeta);
       previewStopRef.current?.();
-      if (objectUrlRef.current) {
-        URL.revokeObjectURL(objectUrlRef.current);
-        objectUrlRef.current = null;
-      }
+      URL.revokeObjectURL(url);
     };
   }, [file]);
 
@@ -309,10 +250,7 @@ export function IsolatePage() {
     const modes = capabilities?.modes ?? [];
     const picked = modes.find((m) => m.id === processingMode);
     if (picked) return picked;
-    if (processingMode === "auto") {
-      return modes.find((m) => m.id === "balanced") ?? modes.find((m) => m.id === "fast_cpu");
-    }
-    return modes.find((m) => m.id === processingMode);
+    return modes.find((m) => m.id === "auto") ?? modes.find((m) => m.id === "fast_cpu");
   }, [capabilities, processingMode]);
 
   const regionLength = useRegion ? Math.max(0, regionEnd - regionStart) : null;
@@ -323,13 +261,18 @@ export function IsolatePage() {
   const regionLabel =
     useRegion && duration !== null ? formatRegionLabel(regionStart, regionEnd) : null;
 
-  function onAdvancedToggle(open: boolean) {
-    setAdvancedOpen(open);
-    try {
-      sessionStorage.setItem("isolate_advanced_open", open ? "1" : "0");
-    } catch {
-      /* ignore */
+  function onAudioMeta() {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const d = audio.duration;
+    if (!isFinite(d) || d <= 0) {
+      setDuration(null);
+      return;
     }
+    setDuration(d);
+    const end = Math.min(d, Math.max(MIN_REGION_SEC, 30));
+    setRegionStart(0);
+    setRegionEnd(end);
   }
 
   function shortenEndToCap() {
@@ -337,24 +280,16 @@ export function IsolatePage() {
     setRegionEnd(Math.min(duration ?? regionEnd, regionStart + modeCap));
   }
 
-  function previewRegion() {
-    const audio = audioRef.current;
-    if (!audio || !useRegion) return;
-    previewStopRef.current?.();
-    audio.currentTime = regionStart;
-    void audio.play();
-    const stopAtEnd = () => {
-      if (audio.currentTime >= regionEnd - 0.05) {
-        audio.pause();
-        audio.removeEventListener("timeupdate", stopAtEnd);
-        previewStopRef.current = null;
-      }
-    };
-    audio.addEventListener("timeupdate", stopAtEnd);
-    previewStopRef.current = () => {
-      audio.pause();
-      audio.removeEventListener("timeupdate", stopAtEnd);
-    };
+  function onRegionChange(start: number, end: number) {
+    if (duration === null) return;
+    let nextStart = Math.max(0, Math.min(start, duration));
+    let nextEnd = Math.max(nextStart + MIN_REGION_SEC, Math.min(end, duration));
+    if (nextEnd > duration) {
+      nextEnd = duration;
+      nextStart = Math.max(0, nextEnd - MIN_REGION_SEC);
+    }
+    setRegionStart(nextStart);
+    setRegionEnd(nextEnd);
   }
 
   function toggleDemucsStem(id: TrackOptionId, checked: boolean) {
@@ -453,15 +388,18 @@ export function IsolatePage() {
     })),
   ];
 
+  const formBusy =
+    busy || job?.status === "pending" || job?.status === "running";
+
   return (
     <div>
       <h1>Isolate</h1>
       <p className="lede">
-        Separate stems. Pick labeled tracks (Demucs or BS-RoFormer for guitar), an optional
-        section, and a processing mode.
+        {HOSTED_FILE_ONLY_NOTE} Pick labeled tracks (Demucs or BS-RoFormer for guitar), an
+        optional section, and a processing mode.
       </p>
       <form
-        className={`stack${job ? " stack-secondary" : ""}`}
+        className={`stack${formBusy ? " stack-secondary" : ""}`}
         onSubmit={onSubmit}
       >
         <label className="field">
@@ -539,10 +477,41 @@ export function IsolatePage() {
                 />{" "}
                 Isolate only a section
               </label>
-              {objectUrlRef.current && (
-                <audio controls src={objectUrlRef.current} style={{ width: "100%" }} />
+              {objectUrl && (
+                <audio
+                  ref={audioRef}
+                  src={objectUrl}
+                  controls={!useRegion}
+                  style={{ width: "100%", display: useRegion ? "none" : "block" }}
+                  onLoadedMetadata={onAudioMeta}
+                />
               )}
-              {useRegion && duration !== null && (
+              {useRegion && duration !== null && objectUrl && (
+                <>
+                  <RegionPicker
+                    audioUrl={objectUrl}
+                    startSec={regionStart}
+                    endSec={regionEnd}
+                    minLengthSec={MIN_REGION_SEC}
+                    onChange={onRegionChange}
+                  />
+                  {regionOverCap && selectedMode && (
+                    <p className="error">
+                      {selectedMode.label} allows up to {modeCap} s per job. Shorten the section
+                      or choose a different mode.
+                      <button
+                        type="button"
+                        className="secondary"
+                        style={{ marginLeft: "0.5rem" }}
+                        onClick={shortenEndToCap}
+                      >
+                        Shorten end to {modeCap} s
+                      </button>
+                    </p>
+                  )}
+                </>
+              )}
+              {useRegion && duration !== null && !objectUrl && (
                 <>
                   <label className="field">
                     Start ({formatTime(regionStart)})
@@ -581,9 +550,6 @@ export function IsolatePage() {
                   <span className="hint">
                     {regionLabel} ({(regionEnd - regionStart).toFixed(0)} s)
                   </span>
-                  <button type="button" className="secondary" onClick={previewRegion}>
-                    Preview section
-                  </button>
                   {regionOverCap && selectedMode && (
                     <p className="error">
                       {selectedMode.label} allows up to {modeCap} s per job. Shorten the section
@@ -605,17 +571,6 @@ export function IsolatePage() {
         </fieldset>
 
         <ProcessingModeSelect value={processingMode} onChange={setProcessingMode} />
-
-        <details
-          open={advancedOpen}
-          onToggle={(e) => onAdvancedToggle((e.target as HTMLDetailsElement).open)}
-        >
-          <summary>Advanced options</summary>
-          <p className="hint">
-            Processing mode above sets quality and device on the server. Use this panel to review
-            host limits before starting a long section.
-          </p>
-        </details>
 
         {error && <p className="error">{error}</p>}
         <button type="submit" disabled={busy || Boolean(pickerError)}>
@@ -646,7 +601,8 @@ export function IsolatePage() {
                       }
                     }}
                   >
-                    {j.status} — {j.message || j.stage || j.id.slice(0, 8)}
+                    {j.title ? `${j.title} — ${j.status}` : j.status}
+                    {j.message ? ` · ${j.message}` : ""}
                   </button>
                 </li>
               ))}

@@ -40,6 +40,7 @@ def test_system_capabilities_smoke(client):
     assert "notes" in body
     assert isinstance(body["modes"], list)
     assert any(m["id"] == "auto" for m in body["modes"])
+    assert body["allow_youtube"] is False
 
 
 def test_tab_job_request_quality_backend_defaults():
@@ -122,6 +123,7 @@ def test_isolate_job_region_passes_config(client, headers, monkeypatch):
         },
     )
     assert job.status_code == 200
+    assert job.json()["title"] == "mix"
     job_id = job.json()["id"]
 
     import time

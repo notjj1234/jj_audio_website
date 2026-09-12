@@ -10,6 +10,7 @@ import soundfile as sf
 
 from audio_to_tab.isolate import analyze_dual_guitar_candidate, split_dual_guitar_stem
 from audio_to_tab.mixer import (
+    DB_MAX,
     DB_MIN,
     audible_stems,
     db_to_linear,
@@ -51,6 +52,11 @@ def test_audible_stems_mute_when_no_solo():
     muted = {"vocals": True, "drums": False, "bass": False}
     soloed = {"vocals": False, "drums": False, "bass": False}
     assert audible_stems(names, muted=muted, soloed=soloed) == ["drums", "bass"]
+
+
+def test_db_slider_range():
+    assert DB_MIN == -25.0
+    assert DB_MAX == 25.0
 
 
 def test_db_to_linear_edges():

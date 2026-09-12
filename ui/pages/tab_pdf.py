@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime
 import logging
 from pathlib import Path
-import sys
 
 import streamlit as st
 
@@ -29,6 +28,7 @@ from audio_to_tab.pipeline import (  # noqa: E402
     PipelineConfig,
     run_pipeline,
 )
+from audio_to_tab.hardware import get_desktop_probe, lite_accelerator_available  # noqa: E402
 from audio_to_tab.ingest import YouTubeDownloadError, is_youtube_url  # noqa: E402
 from audio_to_tab.roformer import is_roformer_backend_available  # noqa: E402
 from audio_to_tab.separate import guitar_ft_weights_path, is_demucs_available  # noqa: E402
@@ -36,13 +36,29 @@ from ui.isolate_state import (  # noqa: E402
     TRACK_OPTIONS,
     default_guitar_track_option,
     guitar_track_radio_ids,
+    is_pro_mode,
     normalize_guitar_track_selection,
 )
 
 
+def _tab_model_from_guitar_engine(engine: str) -> tuple[str, bool]:
+    if engine == "guitar_roformer":
+        return "bs_roformer_sw", False
+    if engine == "guitar_roformer_refine":
+        return "bs_roformer_sw", True
+    return "htdemucs_6s", False
+
+
 def main() -> None:
     # Cross-page overlay is consumed in app.py from one-shot _nav_loading.
-    st.title("Tab PDF (demo)")
+    st.title(
+        "Tab PDF (demo)",
+        anchor=False,
+        help=(
+            "Experimental tab-from-audio page. Best on short solo-guitar clips — "
+            "for full songs, isolate guitar first on Audio Isolation."
+        ),
+    )
     # One banner, not two, and warning rather than error: this is a permanent
     # property of the page, not a failure the user just caused. A red error box
     # that is always present teaches people to ignore red boxes that matter.
@@ -65,6 +81,7 @@ def main() -> None:
         )
 
     has_results = bool(st.session_state.get("tab_pdf_artifacts"))
+    pro = is_pro_mode(st.session_state)
 
     recent_runs = list_recent_runs("tab_pdf")
     if recent_runs:
@@ -115,130 +132,147 @@ def main() -> None:
         tab_bleed_gate = False
         tab_adaptive_fold_gain = False
         tab_guitar_ensemble = False
+        mix_aware = True
+        tempo_override = 0.0
+        onset_threshold = 0.5
+        frame_threshold = 0.3
+        max_duration: float | None = None
         if separate_stems and can_separate:
-            if "tab_low_end_restore_db" not in st.session_state:
-                st.session_state["tab_low_end_restore_db"] = 0.0
-            if "tab_sub_bass_debleed" not in st.session_state:
-                st.session_state["tab_sub_bass_debleed"] = False
-            radio_ids = guitar_track_radio_ids(roformer_available=roformer_ok)
-            guitar_labels = {
-                oid: TRACK_OPTIONS[oid]["label"] if oid in TRACK_OPTIONS else oid
-                for oid in radio_ids
-                if oid != "none"
-            }
-            promoted_default = default_guitar_track_option(
-                roformer_available=roformer_ok
-            )
-            current_engine = str(
-                st.session_state.get("tab_guitar_engine") or promoted_default
-            )
-            if current_engine not in guitar_labels:
-                st.session_state["tab_guitar_engine"] = normalize_guitar_track_selection(
-                    current_engine,
-                    roformer_available=roformer_ok,
+            if pro:
+                if "tab_low_end_restore_db" not in st.session_state:
+                    st.session_state["tab_low_end_restore_db"] = 0.0
+                if "tab_sub_bass_debleed" not in st.session_state:
+                    st.session_state["tab_sub_bass_debleed"] = False
+                radio_ids = guitar_track_radio_ids(roformer_available=roformer_ok)
+                guitar_labels = {
+                    oid: TRACK_OPTIONS[oid]["label"] if oid in TRACK_OPTIONS else oid
+                    for oid in radio_ids
+                    if oid != "none"
+                }
+                promoted_default = default_guitar_track_option(
+                    roformer_available=roformer_ok
                 )
-                if st.session_state["tab_guitar_engine"] not in guitar_labels:
-                    st.session_state["tab_guitar_engine"] = next(iter(guitar_labels))
-            engine = st.radio(
-                "Guitar separation",
-                options=list(guitar_labels.keys()),
-                format_func=lambda oid: guitar_labels[oid],
-                key="tab_guitar_engine",
-            )
-            if engine == "guitar_roformer":
-                tab_model = "bs_roformer_sw"
-            elif engine == "guitar_roformer_refine":
-                tab_model = "bs_roformer_sw"
-                tab_guitar_refine = True
-            else:
-                tab_model = "htdemucs_6s"
-            if tab_model == "htdemucs_6s":
-                if guitar_ft_ok:
-                    if st.checkbox(
-                        "Use cached guitar-ft Demucs weights",
-                        value=False,
-                        key="tab_guitar_ft",
-                        help="Uses guitar-ft already in TORCH_HOME. Does not download.",
-                    ):
-                        tab_guitar_checkpoint = "htdemucs_6s_guitar_ft"
-                else:
-                    st.caption(
-                        "guitar-ft is available after a one-time ~330 MB download from "
-                        "Audio Isolation → Advanced."
+                current_engine = str(
+                    st.session_state.get("tab_guitar_engine") or promoted_default
+                )
+                if current_engine not in guitar_labels:
+                    st.session_state["tab_guitar_engine"] = (
+                        normalize_guitar_track_selection(
+                            current_engine,
+                            roformer_available=roformer_ok,
+                        )
                     )
-            tab_low_end_restore_db = float(
-                st.slider(
-                    "Low-end restore (dB)",
-                    min_value=0.0,
-                    max_value=6.0,
-                    step=1.0,
-                    key="tab_low_end_restore_db",
+                    if st.session_state["tab_guitar_engine"] not in guitar_labels:
+                        st.session_state["tab_guitar_engine"] = next(iter(guitar_labels))
+                engine = st.radio(
+                    "Guitar separation",
+                    options=list(guitar_labels.keys()),
+                    format_func=lambda oid: guitar_labels[oid],
+                    key="tab_guitar_engine",
+                )
+                tab_model, tab_guitar_refine = _tab_model_from_guitar_engine(str(engine))
+                if tab_model == "htdemucs_6s":
+                    if guitar_ft_ok:
+                        if st.checkbox(
+                            "Use cached guitar-ft Demucs weights",
+                            value=False,
+                            key="tab_guitar_ft",
+                            help="Uses guitar-ft already in TORCH_HOME. Does not download.",
+                        ):
+                            tab_guitar_checkpoint = "htdemucs_6s_guitar_ft"
+                    else:
+                        st.caption(
+                            "guitar-ft is available after a one-time ~330 MB download from "
+                            "Audio Isolation → Advanced."
+                        )
+                tab_low_end_restore_db = float(
+                    st.slider(
+                        "Low-end restore (dB)",
+                        min_value=0.0,
+                        max_value=6.0,
+                        step=1.0,
+                        key="tab_low_end_restore_db",
+                        help=(
+                            "Boosts 60–200 Hz on the guitar stem before transcription. "
+                            "0 = off. Opt-in; changes A/B scores."
+                        ),
+                    )
+                )
+                tab_sub_bass_debleed = st.checkbox(
+                    "Subtractive bass de-bleed",
+                    key="tab_sub_bass_debleed",
                     help=(
-                        "Boosts 60–200 Hz on the guitar stem before transcription. "
-                        "0 = off. Opt-in; changes A/B scores."
+                        "Subtracts scaled bass/drum energy below ~150 Hz from the guitar stem "
+                        "before transcription. Opt-in; default off."
                     ),
                 )
-            )
-            tab_sub_bass_debleed = st.checkbox(
-                "Subtractive bass de-bleed",
-                key="tab_sub_bass_debleed",
-                help=(
-                    "Subtracts scaled bass/drum energy below ~150 Hz from the guitar stem "
-                    "before transcription. Opt-in; default off."
-                ),
-            )
-            tab_bleed_gate = st.checkbox(
-                "Spectral bleed gate",
-                key="tab_bleed_gate",
-                help=(
-                    "Scrubs leftover bass/cymbal flutter from the guitar stem when the "
-                    "separator's competitor stems dominate it. Opt-in; default off."
-                ),
-            )
-            tab_adaptive_fold_gain = st.checkbox(
-                "Adaptive fold gain",
-                key="tab_adaptive_fold_gain",
-                help=(
-                    "Searches the Other→Guitar mix gain instead of the fixed 0.5. "
-                    "Opt-in; default off."
-                ),
-            )
-            tab_guitar_ensemble = st.checkbox(
-                "Cross-model guitar ensemble",
-                key="tab_guitar_ensemble",
-                help=(
-                    "Also runs BS-RoFormer-SW and per-band blends the two guitar "
-                    "stems. Much slower; requires the [roformer] extra; opt-in "
-                    "(default off)."
-                ),
-            )
-        with st.expander("Advanced transcription settings"):
-            mix_aware = st.checkbox("Mix-aware filtering (stricter note filters)", value=True)
-            tempo_override = st.number_input(
-                "Tempo override (BPM, 0 = auto)",
-                min_value=0.0,
-                max_value=240.0,
-                value=0.0,
-                step=1.0,
-            )
-            onset_threshold = st.slider("Onset threshold", 0.3, 0.9, 0.5, 0.05)
-            frame_threshold = st.slider("Frame threshold", 0.2, 0.8, 0.3, 0.05)
-            limit_duration = st.checkbox(
-                "Limit duration",
-                value=False,
-                help="Off = process the full track. On = trim to a max length for a faster draft.",
-            )
-            max_duration: float | None = None
-            if limit_duration:
-                max_duration = float(
-                    st.slider(
-                        "Max duration (seconds)", min_value=15, max_value=300, value=90, step=15
-                    )
+                tab_bleed_gate = st.checkbox(
+                    "Spectral bleed gate",
+                    key="tab_bleed_gate",
+                    help=(
+                        "Scrubs leftover bass/cymbal flutter from the guitar stem when the "
+                        "separator's competitor stems dominate it. Opt-in; default off."
+                    ),
+                )
+                tab_adaptive_fold_gain = st.checkbox(
+                    "Adaptive fold gain",
+                    key="tab_adaptive_fold_gain",
+                    help=(
+                        "Searches the Other→Guitar mix gain instead of the fixed 0.5. "
+                        "Opt-in; default off."
+                    ),
+                )
+                tab_guitar_ensemble = st.checkbox(
+                    "Cross-model guitar ensemble",
+                    key="tab_guitar_ensemble",
+                    help=(
+                        "Also runs BS-RoFormer-SW and per-band blends the two guitar "
+                        "stems. Much slower; requires the [roformer] extra; opt-in "
+                        "(default off)."
+                    ),
                 )
             else:
-                st.caption(
-                    "Full track will be processed. This can take a long time on CPU for long songs."
+                probe = get_desktop_probe()
+                engine = default_guitar_track_option(
+                    roformer_available=roformer_ok,
+                    prefer_roformer=lite_accelerator_available(probe),
                 )
+                tab_model, tab_guitar_refine = _tab_model_from_guitar_engine(engine)
+                engine_label = TRACK_OPTIONS.get(engine, {}).get("label") or engine
+                st.caption(f"Guitar engine: {engine_label}")
+        if pro:
+            with st.expander("Advanced transcription settings"):
+                mix_aware = st.checkbox(
+                    "Mix-aware filtering (stricter note filters)", value=True
+                )
+                tempo_override = st.number_input(
+                    "Tempo override (BPM, 0 = auto)",
+                    min_value=0.0,
+                    max_value=240.0,
+                    value=0.0,
+                    step=1.0,
+                )
+                onset_threshold = st.slider("Onset threshold", 0.3, 0.9, 0.5, 0.05)
+                frame_threshold = st.slider("Frame threshold", 0.2, 0.8, 0.3, 0.05)
+                limit_duration = st.checkbox(
+                    "Limit duration",
+                    value=False,
+                    help="Off = process the full track. On = trim to a max length for a faster draft.",
+                )
+                if limit_duration:
+                    max_duration = float(
+                        st.slider(
+                            "Max duration (seconds)",
+                            min_value=15,
+                            max_value=300,
+                            value=90,
+                            step=15,
+                        )
+                    )
+                else:
+                    st.caption(
+                        "Full track will be processed. This can take a long time on CPU for long songs."
+                    )
 
         uploaded = st.file_uploader(
             "Upload MP3 / WAV / FLAC / M4A",
@@ -255,23 +289,11 @@ def main() -> None:
                 f"Using audio carried over from Audio Isolation: **{carry_over_name}**. "
                 "Upload a file above to use something else instead."
             )
-        youtube_enabled = st.checkbox(
-            "Download from YouTube",
-            value=False,
-            help=(
-                "Off by default. Enable only if you have rights to the audio. "
-                "Arbitrary URLs are rejected."
-            ),
+        youtube_url = st.text_input("Or paste a YouTube URL")
+        st.caption(YOUTUBE_DISCLAIMER)
+        st.caption(
+            "Off until you paste a URL or search. Enable only if you have rights."
         )
-        youtube_url = ""
-        if youtube_enabled:
-            youtube_url = st.text_input("Or paste a YouTube URL")
-            st.caption(YOUTUBE_DISCLAIMER)
-        elif getattr(sys, "frozen", False):
-            st.caption(
-                "YouTube download is off in this installer build. Enable it above if you "
-                "have rights to the audio."
-            )
 
         convert_clicked = st.button("Convert to tab PDF", type="secondary")
 

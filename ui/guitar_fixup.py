@@ -21,6 +21,9 @@ from audio_to_tab.isolate import (
 )
 
 GUITAR_BACKUP_NAME = "guitar_original.wav"
+GUITAR_HPF_TUNING_CAPTION = (
+    "Drop D (~73 Hz) is kept; Drop C / 7-string / Drop A can lose fundamentals."
+)
 
 
 def guitar_backup_path(guitar_path: Path) -> Path:
