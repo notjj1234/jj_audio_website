@@ -56,7 +56,15 @@ def stem_media_urls(stem_paths: dict[str, Path], *, coord_prefix: str = "isolate
     """Register each stem and return ``{stem_id: media_url}``."""
     urls: dict[str, str] = {}
     for i, (name, path) in enumerate(sorted(stem_paths.items())):
-        urls[name] = media_url_for_file(path, coordinates=f"{coord_prefix}.{i}.{name}")
+        stamp = ""
+        if name == "metronome":
+            try:
+                stamp = f".{Path(path).stat().st_mtime_ns}"
+            except OSError:
+                stamp = ""
+        urls[name] = media_url_for_file(
+            path, coordinates=f"{coord_prefix}.{i}.{name}{stamp}"
+        )
     return urls
 
 

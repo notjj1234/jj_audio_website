@@ -15,6 +15,7 @@ from ui.media import (
     ensure_region_preview_wav,
     region_preview_cache_key,
     register_mixer_media,
+    stem_media_urls,
 )
 
 
@@ -56,6 +57,26 @@ def test_register_mixer_media_registers_both_url_sets(monkeypatch):
     assert playback == {"vocals": "/media/isolate.mixer/vocals"}
     assert downloads == {"vocals": "/media/isolate.download/vocals"}
     assert calls == ["isolate.mixer", "isolate.download"]
+
+
+def test_stem_media_urls_cache_busts_metronome(tmp_path: Path, monkeypatch):
+    coords: list[str] = []
+
+    def fake_url(path, *, coordinates):
+        coords.append(coordinates)
+        return f"/media/{coordinates}"
+
+    monkeypatch.setattr("ui.media.media_url_for_file", fake_url)
+    metro = tmp_path / "metronome.wav"
+    vocals = tmp_path / "vocals.wav"
+    metro.write_bytes(b"metro")
+    vocals.write_bytes(b"voc")
+    urls = stem_media_urls({"metronome": metro, "vocals": vocals})
+    assert "metronome" in urls
+    metro_coord = next(c for c in coords if ".metronome" in c)
+    voc_coord = next(c for c in coords if c.endswith(".vocals"))
+    assert str(metro.stat().st_mtime_ns) in metro_coord
+    assert str(vocals.stat().st_mtime_ns) not in voc_coord
 
 
 def test_ensure_mixer_audio_paths_long_uses_original(tmp_path: Path):

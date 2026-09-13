@@ -22,6 +22,10 @@ from audio_to_tab.isolate import (
     QUALITY_SHIFTS,
     effective_isolation_quality,
 )
+from audio_to_tab.metronome import (
+    MetronomeRenderOptions,
+    coerce_metronome_render_options,
+)
 from audio_to_tab.mixer import stem_display_name, stem_energy_db
 from ui.common import DATA_DIR, delete_run
 from ui.stem_icons import outcome_icon_markdown, stem_icon_markdown
@@ -93,19 +97,19 @@ TRACK_OPTIONS: dict[str, dict[str, Any]] = {
         "stem": "other",
     },
     "piano_demucs": {
-        "label": "Piano (Demucs 6-stem — heavy bleed)",
+        "label": "Piano (Demucs 6-stem). Heavy bleed.",
         "stem": "piano",
     },
     "guitar_demucs_6s": {
-        "label": "Guitar (Demucs 6-stem, weaker — other instruments still bleed in)",
+        "label": "Guitar (Demucs 6-stem, weaker). Other instruments still bleed in.",
         "stem": "guitar",
     },
     "guitar_roformer": {
-        "label": "Guitar (BS-RoFormer, better, slower — residual bleed remains)",
+        "label": "Guitar (BS-RoFormer, better, slower). Some bleed remains.",
         "stem": "guitar",
     },
     "guitar_roformer_refine": {
-        "label": "Guitar (BS-RoFormer + MelBand refine, best, slowest — residual bleed remains)",
+        "label": "Guitar (BS-RoFormer + MelBand refine, best, slowest). Some bleed remains.",
         "stem": "guitar",
     },
     "vocals_instrumental_demucs": {
@@ -135,7 +139,7 @@ DEFAULT_TRACK_OPTIONS = ("vocals_demucs", "guitar_demucs_6s")
 ROFORMER_DOWNLOAD_CAVEAT = (
     "Downloads ~700 MB BS-RoFormer-SW weights on first use, then a guitar "
     "specialist (~45 MB). Much slower on CPU. Residual bleed remains. "
-    "Community weights have no stated license — use accordingly."
+    "Community weights have no stated license. Use accordingly."
 )
 ROFORMER_MIXED_STEMS_NOTE = (
     "All stems are separated in one BS-RoFormer pass; unselected stems are discarded."
@@ -167,7 +171,7 @@ def roformer_speed_note(*, platform: str | None = None) -> str:
     else:
         gpu_hint = "pick a CUDA GPU in Advanced if this machine has one"
     return (
-        "Speed only tunes Demucs (--shifts) — BS-RoFormer always runs its full "
+        "Speed only tunes Demucs (--shifts). BS-RoFormer always runs its full "
         "transformer pass, so Faster/Balanced/Best do not change its time. Expect "
         "roughly 2× the song length on CPU. To go faster: shorten the Section, "
         f"use the Demucs guitar option, or {gpu_hint}."
@@ -238,7 +242,7 @@ LITE_GUITAR_ENGINE_ORDER: tuple[str, ...] = (
 )
 DEFAULT_LITE_GUITAR_ENGINE = "guitar_demucs_6s"
 LITE_GUITAR_ENGINE_LABELS: dict[str, str] = {
-    "guitar_demucs_6s": "Faster (Demucs)",
+    "guitar_demucs_6s": "Default (Demucs)",
     "guitar_roformer": "Better guitar (BS-RoFormer)",
     "guitar_roformer_refine": "Best / slower (BS-RoFormer + MelBand)",
 }
@@ -1829,12 +1833,12 @@ def queued_wait_caption(
 ) -> str:
     """Waiting line with queue position; never a fake percent."""
     if stopping_previous and queued_ids and job_id in queued_ids:
-        return "Up next — waiting for previous job to stop"
+        return "Up next. Waiting for the previous job to stop."
     try:
         n = queued_ids.index(job_id) + 1
     except ValueError:
         return "Waiting…"
-    return f"Waiting — position {n} of {len(queued_ids)}"
+    return f"Waiting. Position {n} of {len(queued_ids)}"
 
 
 def status_strip_waiting_caption(
@@ -1852,8 +1856,8 @@ def status_strip_waiting_caption(
 def paused_job_caption(completed_stages: Any = None) -> str:
     stages = list(completed_stages or [])
     if stages:
-        return f"Paused — resume continues after {stages[-1]}"
-    return "Paused — resume restarts from the beginning"
+        return f"Paused. Resume continues after {stages[-1]}"
+    return "Paused. Resume restarts from the beginning"
 
 
 def partition_queue_jobs(jobs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1993,6 +1997,9 @@ PERSISTED_SETTING_KEYS: tuple[str, ...] = (
     "isolate_guitar_track",
     "isolate_track_options",
     "isolate_track_picker_initialized",
+    "isolate_metro_accent",
+    "isolate_metro_rate",
+    "isolate_metro_sound",
     *(f"isolate_track_{oid}" for oid in DEMUCS_STEM_CHECKBOX_IDS),
 )
 
@@ -2956,17 +2963,17 @@ def user_progress_hint(stage: str, message: str = "") -> str | None:
     if stage != "separate":
         return None
     if "NVIDIA GPU" in (message or ""):
-        return "Separating tracks — this can take a while on NVIDIA GPU"
-    return "Separating tracks — this can take a while on CPU"
+        return "Separating tracks on NVIDIA GPU"
+    return "Separating tracks. CPU may be slow"
 
 
 def format_progress_label(
     percent: float, message: str, *, estimated: bool = False
 ) -> str:
-    """Human-readable progress line, e.g. ``42% — Running Demucs…``."""
+    """Human-readable progress line, e.g. ``42% · Running Demucs…``."""
     pct = int(round(percent * 100))
     prefix = f"~{pct}%" if estimated else f"{pct}%"
-    return f"{prefix} — {message}"
+    return f"{prefix} · {message}"
 
 
 def format_elapsed(seconds: float) -> str:
@@ -3094,6 +3101,11 @@ def stem_label_for_id(stem_id: str) -> str:
 
 
 MIXER_COMPONENT_KEY_PREFIX = "stem_mixer_run_"
+ISOLATE_METRO_ACCENT_KEY = "isolate_metro_accent"
+ISOLATE_METRO_RATE_KEY = "isolate_metro_rate"
+ISOLATE_METRO_SOUND_KEY = "isolate_metro_sound"
+ISOLATE_METRO_APPLIED_KEY = "isolate_metro_applied"
+_METRO_WIDGET_RUN_KEY = "_metro_widget_run"
 
 
 def mixer_component_key(key_source: str) -> str:
@@ -3104,3 +3116,53 @@ def mixer_component_key(key_source: str) -> str:
     """
     digest = hashlib.sha256(str(key_source).encode()).hexdigest()[:16]
     return f"{MIXER_COMPONENT_KEY_PREFIX}{digest}"
+
+
+def metronome_render_from_session(session: Mapping[str, Any]) -> MetronomeRenderOptions:
+    """Coerce persisted/widget metronome options to engine defaults."""
+    return coerce_metronome_render_options(
+        accent=session.get(ISOLATE_METRO_ACCENT_KEY, True),
+        rate=session.get(ISOLATE_METRO_RATE_KEY, 1.0),
+        sound=session.get(ISOLATE_METRO_SOUND_KEY, "classic"),
+    )
+
+
+def metronome_applied_stamp(run_dir: Path | str, options: MetronomeRenderOptions) -> dict[str, Any]:
+    return {
+        "run": str(Path(run_dir).resolve()),
+        "accent": bool(options.accent),
+        "rate": float(options.rate),
+        "sound": str(options.sound),
+    }
+
+
+def seed_metronome_widgets_for_run(
+    session: MutableMapping[str, Any],
+    run_dir: Path | str,
+    diagnostics: Mapping[str, Any] | None,
+) -> None:
+    """Seed click-track widgets from this run's diagnostics, else leave prefs.
+
+    Runs once per ``run_dir`` so later widget edits are not overwritten.
+    """
+    token = str(Path(run_dir).resolve())
+    if session.get(_METRO_WIDGET_RUN_KEY) == token:
+        return
+    session[_METRO_WIDGET_RUN_KEY] = token
+    render = diagnostics.get("render") if isinstance(diagnostics, Mapping) else None
+    if isinstance(render, Mapping):
+        options = coerce_metronome_render_options(
+            accent=render.get("accent", True),
+            rate=render.get("rate", 1.0),
+            sound=render.get("sound", "classic"),
+        )
+        session[ISOLATE_METRO_ACCENT_KEY] = options.accent
+        session[ISOLATE_METRO_RATE_KEY] = options.rate
+        session[ISOLATE_METRO_SOUND_KEY] = options.sound
+        session[ISOLATE_METRO_APPLIED_KEY] = metronome_applied_stamp(token, options)
+        return
+    session.setdefault(ISOLATE_METRO_ACCENT_KEY, True)
+    session.setdefault(ISOLATE_METRO_RATE_KEY, 1.0)
+    session.setdefault(ISOLATE_METRO_SOUND_KEY, "classic")
+    # Unknown baked options: let the Mixer rebake to the current prefs.
+    session.pop(ISOLATE_METRO_APPLIED_KEY, None)

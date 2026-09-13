@@ -179,6 +179,7 @@ hiddenimports += [
     "ui.media",
     "ui.isolate_state",
     "ui.pages.isolate",
+    "ui.pages.youtube_audio",
     "ui.pages.tab_pdf",
     "ui.stem_mixer_component",
     "ui.region_picker_component",

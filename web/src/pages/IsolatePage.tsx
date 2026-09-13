@@ -32,7 +32,7 @@ const STEM_LABELS: Record<string, string> = {
 };
 
 const ROFORMER_DOWNLOAD_CAVEAT =
-  "Downloads ~700 MB BS-RoFormer-SW weights on first use, then a guitar specialist (~45 MB). Much slower on CPU. Residual bleed remains. Community weights have no stated license — use accordingly.";
+  "Downloads ~700 MB BS-RoFormer-SW weights on first use, then a guitar specialist (~45 MB). Much slower on CPU. Residual bleed remains. Community weights have no stated license. Use accordingly.";
 const ROFORMER_MIXED_STEMS_NOTE =
   "All stems are separated in one BS-RoFormer pass; unselected stems are discarded.";
 const TRACKS_PICKER_HELP =
@@ -309,7 +309,7 @@ export function IsolatePage() {
     }
     if (useRegion) {
       if (duration === null) {
-        setError("Could not read audio length — turn off section mode or try another file");
+        setError("Could not read audio length. Turn off section mode or try another file");
         return;
       }
       if (regionStart >= regionEnd) {
@@ -468,7 +468,7 @@ export function IsolatePage() {
                   Length: {formatTime(duration)} ({duration.toFixed(1)} s)
                 </span>
               ) : (
-                <span className="hint">Length: unknown — full file will be processed.</span>
+                <span className="hint">Length unknown. The full file will be processed.</span>
               )}
               <label className="field">
                 <input
@@ -585,7 +585,7 @@ export function IsolatePage() {
             <h2 className="section-heading">Job queue</h2>
             <p className="hint">
               Jobs run one at a time. Queuing several songs means a long wait and high
-              CPU/RAM use — this is not parallel Demucs.
+              CPU/RAM use. This is not parallel Demucs.
             </p>
             <ul className="stack" style={{ listStyle: "none", padding: 0 }}>
               {jobList.map((j) => (
@@ -602,7 +602,7 @@ export function IsolatePage() {
                       }
                     }}
                   >
-                    {j.title ? `${j.title} — ${j.status}` : j.status}
+                    {j.title ? `${j.title} · ${j.status}` : j.status}
                     {j.message ? ` · ${j.message}` : ""}
                   </button>
                 </li>

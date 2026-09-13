@@ -33,7 +33,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Separate an audio file into instrument stems (Demucs). "
-            "CPU separation is slow — expect roughly track length or longer; "
+            "CPU separation is slow. Expect roughly track length or longer; "
             "higher quality presets multiply runtime."
         ),
         epilog=(
@@ -294,7 +294,7 @@ def main() -> None:
             parts.append(f"separability={data['separability_score']:.3f}")
         if data.get("role_confidence") is not None:
             parts.append(f"role_confidence={data['role_confidence']:.3f}")
-        print(f"\nLead/Rhythm: {', '.join(parts)} — {data.get('reason')}")
+        print(f"\nLead/Rhythm: {', '.join(parts)}. {data.get('reason')}")
 
 
 if __name__ == "__main__":

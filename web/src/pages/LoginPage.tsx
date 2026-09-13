@@ -30,7 +30,7 @@ export function LoginPage() {
     <div className="login-hero">
       <p className="brand-hero">Audio Tools</p>
       <p className="lede">
-        Sign in to turn tracks into guitar tabs or isolate stems — built for real
+        Sign in to turn tracks into guitar tabs or isolate stems. Built for real
         async jobs, not a laptop demo.
       </p>
       <form className="stack" onSubmit={onSubmit}>

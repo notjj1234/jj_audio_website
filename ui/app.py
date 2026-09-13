@@ -549,6 +549,7 @@ st.sidebar.caption(_DEMO_BLURB)
 _pages = Path(__file__).parent / "pages"
 _nav = [
     st.Page(str(_pages / "isolate.py"), title="Audio Isolation", default=True),
+    st.Page(str(_pages / "youtube_audio.py"), title="YouTube Audio"),
     # Always listed. The page itself carries the unfinished-product warning —
     # hiding it in Lite made the sidebar look broken when users switched modes.
     st.Page(str(_pages / "tab_pdf.py"), title="Tab PDF (demo)"),

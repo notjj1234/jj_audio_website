@@ -73,7 +73,7 @@ def desktop_demo_blurb(version: str | None = None, edition: str | None = None) -
     """Sidebar / About copy: local demo, nothing hosted to scrape."""
     ver = version or desktop_app_version()
     label = edition_display_label(edition if edition is not None else desktop_edition())
-    return f"Demo {ver} ({label}) — processing stays on this PC. No account."
+    return f"Demo {ver} ({label}). Processing stays on this PC. No account."
 
 
 def _safe_upload_name(name: str | None) -> str:

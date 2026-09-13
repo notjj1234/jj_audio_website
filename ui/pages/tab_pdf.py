@@ -55,17 +55,17 @@ def main() -> None:
         "Tab PDF (demo)",
         anchor=False,
         help=(
-            "Experimental tab-from-audio page. Best on short solo-guitar clips — "
-            "for full songs, isolate guitar first on Audio Isolation."
+            "Experimental tab-from-audio page. Best on short solo-guitar clips. "
+            "For full songs, isolate guitar first on Audio Isolation."
         ),
     )
     # One banner, not two, and warning rather than error: this is a permanent
     # property of the page, not a failure the user just caused. A red error box
     # that is always present teaches people to ignore red boxes that matter.
     st.warning(
-        "**JJs stuff — NOT A FINISHED PRODUCT**. Tab PDF barely works. "
-        "Tabs are 100% wrong and unusable. This page is here so I can experiment with it. "
-        "Best on short solo-guitar clips — for full songs, isolate guitar first on "
+        "**JJs stuff. NOT A FINISHED PRODUCT.** Tab PDF barely works. "
+        "Tabs are often wrong and unusable. This page is for experimenting. "
+        "Best on short solo-guitar clips. For full songs, isolate guitar first on "
         "**Audio Isolation**."
     )
 
@@ -76,7 +76,7 @@ def main() -> None:
     if not can_separate:
         st.info(
             "Stem separation is unavailable (Demucs not installed). "
-            "Conversions will run on the full mix — quality may be lower for songs with drums/bass. "
+            "Conversions run on the full mix. Quality may be lower with drums/bass. "
             f"{DEMUCS_INSTALL_HINT}"
         )
 
@@ -98,7 +98,7 @@ def main() -> None:
                         else ""
                     )
                     st.write(run.get("title") or "Guitar Tab")
-                    st.caption(when if available else f"{when} — files no longer available")
+                    st.caption(when if available else f"{when}. Files no longer available")
                 with cols[1]:
                     if available and st.button("Reopen", key=f"reopen_tab_{run['run_dir']}"):
                         st.session_state["tab_pdf_artifacts"] = run_artifacts
@@ -114,7 +114,7 @@ def main() -> None:
             help="This text appears as the title on the generated tab PDF.",
         )
         separate_stems = st.toggle(
-            "Separate guitar stem — required for full mixes",
+            "Separate guitar stem (needed for full mixes)",
             value=can_separate,
             disabled=not can_separate,
             help=(
@@ -291,9 +291,9 @@ def main() -> None:
             )
         youtube_url = st.text_input("Or paste a YouTube URL")
         st.caption(YOUTUBE_DISCLAIMER)
-        st.caption(
-            "Off until you paste a URL or search. Enable only if you have rights."
-        )
+        # st.caption(
+        #     "Off until you paste a URL or search. Enable only if you have rights."
+        # )
 
         convert_clicked = st.button("Convert to tab PDF", type="secondary")
 
@@ -404,10 +404,10 @@ def main() -> None:
 
     result_title = st.session_state.get("tab_pdf_title", "Guitar Tab")
     st.subheader(result_title)
-    st.caption("Demo output — check every note before you trust or share it.")
+    st.caption("Demo output. Check every note before you trust or share it.")
     if st.session_state.get("tab_pdf_skipped_separation"):
         st.info(
-            "Ran without stem separation — install Demucs for better full-mix results. "
+            "Ran without stem separation. Install Demucs for better full-mix results. "
             f"{DEMUCS_INSTALL_HINT}"
         )
 

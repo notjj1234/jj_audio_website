@@ -14,6 +14,7 @@ import soundfile as sf
 
 from ui.isolate_jobs import (
     IsolateJobSpec,
+    apply_finished_job_poll_outcome,
     apply_succeeded_job_to_session,
     delete_all_finished_jobs,
     delete_finished_job,
@@ -435,7 +436,7 @@ def test_stopping_vs_waiting_captions():
         "b",
         ["a", "b"],
         stopping_previous=True,
-    ) == "Up next — waiting for previous job to stop"
+    ) == "Up next. Waiting for the previous job to stop."
     assert status_strip_waiting_caption(["a"], stopping_previous=True) == stopping_previous_caption()
     assert is_stopping_previous_job("job1", "cancelled") is True
     assert is_stopping_previous_job("job1", "running") is False
@@ -566,7 +567,7 @@ def test_list_in_flight_jobs_excludes_succeeded(jobs_dir: Path):
 
 def test_queued_wait_caption_is_position_not_percent():
     queued = ["a", "b", "c"]
-    assert queued_wait_caption("b", queued) == "Waiting — position 2 of 3"
+    assert queued_wait_caption("b", queued) == "Waiting. Position 2 of 3"
     assert "%" not in queued_wait_caption("a", queued)
 
 
@@ -741,6 +742,104 @@ def test_apply_succeeded_job_to_session_missing_wavs_returns_false(tmp_path: Pat
     )
     assert ok is False
     assert session["isolate_artifacts"] == {"keep": "x"}
+
+
+def test_apply_finished_job_poll_notify_only_keeps_picker_and_artifacts(tmp_path: Path):
+    from ui.isolate_state import LISTEN_PICKER_KEY, OPEN_MIX_TABS_KEY, open_new_draft_tab
+
+    run_a = tmp_path / "song-a"
+    run_b = tmp_path / "song-b"
+    run_a.mkdir()
+    run_b.mkdir()
+    wav_a = run_a / "vocals.wav"
+    wav_b = run_b / "vocals.wav"
+    wav_a.write_bytes(b"RIFF-a")
+    wav_b.write_bytes(b"RIFF-b")
+
+    session: dict = {
+        "isolate_viewing_job_id": "job-a",
+        "isolate_artifacts": {"vocals": str(wav_a)},
+        "isolate_run_dir": str(run_a),
+        LISTEN_PICKER_KEY: str(run_a),
+        "isolate_listen_applied_dir": str(run_a),
+        OPEN_MIX_TABS_KEY: [str(run_a)],
+    }
+    draft = open_new_draft_tab(session, fresh=True)
+    status_b = {
+        "id": "job-b",
+        "status": "succeeded",
+        "title": "Song B",
+        "run_dir": str(run_b),
+        "origin_tab": draft,
+        "artifacts": {"vocals": str(wav_b)},
+    }
+
+    open_mixer = apply_finished_job_poll_outcome(session, status_b, notify_only=True)
+    assert open_mixer is False
+    assert session[LISTEN_PICKER_KEY] == str(run_a)
+    assert session["isolate_listen_applied_dir"] == str(run_a)
+    assert session["isolate_artifacts"]["vocals"] == str(wav_a)
+    assert session["isolate_run_dir"] == str(run_a)
+    assert str(run_b) in session[OPEN_MIX_TABS_KEY]
+    assert draft not in session[OPEN_MIX_TABS_KEY]
+    assert "Song B" in str(session.get("isolate_flash") or "")
+
+
+def test_apply_finished_job_poll_auto_apply_pins_and_retargets_picker(tmp_path: Path):
+    from ui.isolate_state import LISTEN_PICKER_KEY, OPEN_MIX_TABS_KEY
+
+    run = tmp_path / "song-new"
+    run.mkdir()
+    wav = run / "vocals.wav"
+    wav.write_bytes(b"RIFF")
+    session: dict = {
+        "isolate_viewing_job_id": "latest",
+        LISTEN_PICKER_KEY: str(tmp_path / "old"),
+        "isolate_listen_applied_dir": str(tmp_path / "old"),
+        OPEN_MIX_TABS_KEY: [],
+    }
+    status = {
+        "id": "job-new",
+        "status": "succeeded",
+        "title": "Fresh",
+        "run_dir": str(run),
+        "artifacts": {"vocals": str(wav)},
+    }
+    open_mixer = apply_finished_job_poll_outcome(session, status, notify_only=False)
+    assert open_mixer is True
+    assert session[LISTEN_PICKER_KEY] == str(run)
+    assert session["isolate_listen_applied_dir"] == str(run)
+    assert session["isolate_artifacts"]["vocals"] == str(wav)
+    assert session["isolate_viewing_job_id"] == "job-new"
+    assert str(run) in session[OPEN_MIX_TABS_KEY]
+    assert "Separated 1 tracks" in str(session.get("isolate_flash") or "")
+
+
+def test_apply_finished_job_poll_apply_failure_leaves_picker(tmp_path: Path):
+    from ui.isolate_state import LISTEN_PICKER_KEY, OPEN_MIX_TABS_KEY
+
+    run = tmp_path / "song-missing"
+    run.mkdir()
+    old = str(tmp_path / "kept")
+    session: dict = {
+        LISTEN_PICKER_KEY: old,
+        "isolate_listen_applied_dir": old,
+        "isolate_artifacts": {"vocals": str(tmp_path / "old.wav")},
+        OPEN_MIX_TABS_KEY: [],
+    }
+    status = {
+        "id": "job-miss",
+        "status": "succeeded",
+        "title": "Missing",
+        "run_dir": str(run),
+        "artifacts": {"vocals": str(run / "gone.wav")},
+    }
+    open_mixer = apply_finished_job_poll_outcome(session, status, notify_only=False)
+    assert open_mixer is False
+    assert session[LISTEN_PICKER_KEY] == old
+    assert session["isolate_listen_applied_dir"] == old
+    assert session["isolate_artifacts"]["vocals"] == str(tmp_path / "old.wav")
+    assert str(run) in session[OPEN_MIX_TABS_KEY]
 
 
 def test_worker_persists_eta_fields(jobs_dir: Path, monkeypatch):

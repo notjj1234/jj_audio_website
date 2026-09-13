@@ -5,18 +5,18 @@ export const TRACK_OPTIONS = {
   drums_demucs: { label: "Drums (Demucs)", stem: "drums" },
   bass_demucs: { label: "Bass (Demucs)", stem: "bass" },
   other_demucs: { label: "Other (Demucs)", stem: "other" },
-  piano_demucs: { label: "Piano (Demucs 6-stem — heavy bleed)", stem: "piano" },
+  piano_demucs: { label: "Piano (Demucs 6-stem). Heavy bleed.", stem: "piano" },
   guitar_demucs_6s: {
-    label: "Guitar (Demucs 6-stem, weaker — other instruments still bleed in)",
+    label: "Guitar (Demucs 6-stem, weaker). Other instruments still bleed in.",
     stem: "guitar",
   },
   guitar_roformer: {
-    label: "Guitar (BS-RoFormer, better, slower — residual bleed remains)",
+    label: "Guitar (BS-RoFormer, better, slower). Some bleed remains.",
     stem: "guitar",
   },
   guitar_roformer_refine: {
     label:
-      "Guitar (BS-RoFormer + MelBand refine, best, slowest — residual bleed remains)",
+      "Guitar (BS-RoFormer + MelBand refine, best, slowest). Some bleed remains.",
     stem: "guitar",
   },
   vocals_instrumental_demucs: {

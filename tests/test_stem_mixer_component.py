@@ -55,6 +55,14 @@ def test_stem_mixer_accepts_master_volume():
     assert params["initial_master_volume_db"].default == 0.0
 
 
+def test_stem_mixer_accepts_metronome():
+    from ui.stem_mixer_component import stem_mixer
+
+    params = inspect.signature(stem_mixer).parameters
+    assert "metronome" in params
+    assert params["metronome"].default is None
+
+
 def _mixer_main_ts() -> str:
     return (
         Path(__file__).resolve().parents[1]
@@ -114,4 +122,23 @@ def test_waveform_bars_fit_viewbox_for_512_peaks():
     assert first_x >= 0
     # Peak index i starts at i/n of the row — same mapping as playhead %.
     assert abs((256 * slot) / width - 0.5) < 1e-9
+
+
+def test_mixer_live_metronome_hot_swap_without_full_reload():
+    text = _mixer_main_ts()
+    assert "replaceStemBuffer" in text
+    assert "metronomeOptions" in text
+    assert "buildMetronomeAudioBuffer" in text
+    assert 's.id === "metronome" && metro && metro.times1x.length > 0' in text
+    clicks = (
+        Path(__file__).resolve().parents[1]
+        / "ui"
+        / "stem_mixer_component"
+        / "frontend"
+        / "src"
+        / "metronomeClicks.ts"
+    ).read_text(encoding="utf-8")
+    assert "export function applyClickRate" in clicks
+    assert "export function buildMetronomeAudioBuffer" in clicks
+    assert 'hi_tick' in clicks
 

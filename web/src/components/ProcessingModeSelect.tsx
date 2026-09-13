@@ -91,7 +91,7 @@ export function ProcessingModeSelect({ value, onChange }: Props) {
             disabled={!m.enabled}
             title={m.reason ?? undefined}
           >
-            {m.enabled ? m.label : `${m.label} — ${m.reason ?? "unavailable"}`}
+            {m.enabled ? m.label : `${m.label} (${m.reason ?? "unavailable"})`}
           </option>
         ))}
       </select>

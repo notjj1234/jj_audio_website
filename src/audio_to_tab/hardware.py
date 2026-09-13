@@ -21,8 +21,8 @@ LOW_RAM_GB = 8.0
 MPS_MIN_RAM_GB = 12.0
 
 NVIDIA_ONLY_DISCLAIMER = (
-    "GPU acceleration is NVIDIA CUDA only — not AMD, Intel, or Apple GPUs. "
-    "Requires an NVIDIA graphics card and current drivers."
+    "GPU acceleration is NVIDIA CUDA only (not AMD, Intel, or Apple GPUs). "
+    "Needs an NVIDIA card and current drivers."
 )
 
 MAC_ACCEL_NOTE = (
@@ -521,7 +521,7 @@ def ensure_cuda_available(device: str, probe: HostProbe | None = None) -> None:
 
 def separate_progress_message(device: str) -> str:
     if device == "cuda":
-        return "Separating tracks — this can take a while on NVIDIA GPU"
+        return "Separating tracks on NVIDIA GPU"
     if device == "mps":
-        return "Separating tracks — running on Apple GPU (Metal)"
-    return "Separating tracks — this can take a while on CPU"
+        return "Separating tracks on Apple GPU (Metal)"
+    return "Separating tracks. CPU may be slow"

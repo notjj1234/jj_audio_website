@@ -31,6 +31,13 @@ def tab_pdf_page():
 
 
 @pytest.fixture(scope="module")
+def youtube_audio_page():
+    from ui.pages import youtube_audio
+
+    return youtube_audio
+
+
+@pytest.fixture(scope="module")
 def app_module():
     import ui.app as app
 
@@ -43,6 +50,125 @@ def test_isolate_page_imports_without_running_main(isolate_page) -> None:
 
 def test_tab_pdf_page_imports_without_running_main(tab_pdf_page) -> None:
     assert callable(tab_pdf_page.main)
+
+
+def test_youtube_audio_page_imports_without_running_main(youtube_audio_page) -> None:
+    assert callable(youtube_audio_page.main)
+    assert callable(youtube_audio_page.save_youtube_audio_to_folder)
+
+
+def test_save_youtube_audio_to_folder_happy_path(youtube_audio_page, tmp_path) -> None:
+    wav = tmp_path / "work" / "Song Title.wav"
+    wav.parent.mkdir()
+    wav.write_bytes(b"wav")
+    dest_dir = tmp_path / "out"
+    downloaded: list[str] = []
+
+    def fake_download(url, work_dir):
+        downloaded.append(url)
+        return wav
+
+    def fake_export(src, dest, filename, fmt):
+        out = Path(dest) / f"{Path(filename).stem}.{fmt}"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(Path(src).read_bytes())
+        return out
+
+    saved = youtube_audio_page.save_youtube_audio_to_folder(
+        "https://www.youtube.com/watch?v=abc",
+        dest_dir,
+        "mp3",
+        work_dir=wav.parent,
+        download_fn=fake_download,
+        export_fn=fake_export,
+    )
+    assert downloaded == ["https://www.youtube.com/watch?v=abc"]
+    assert saved == dest_dir / "Song Title.mp3"
+    assert saved.read_bytes() == b"wav"
+
+
+def test_save_youtube_audio_to_folder_rejects_non_youtube(youtube_audio_page, tmp_path) -> None:
+    called = []
+
+    def fake_download(url, work_dir):
+        called.append(url)
+        raise AssertionError("download should not run")
+
+    with pytest.raises(ValueError, match="Only YouTube"):
+        youtube_audio_page.save_youtube_audio_to_folder(
+            "https://example.com/a.wav",
+            tmp_path,
+            "mp3",
+            work_dir=tmp_path,
+            download_fn=fake_download,
+        )
+    assert called == []
+
+
+def test_save_youtube_audio_to_folder_propagates_download_error(
+    youtube_audio_page, tmp_path
+) -> None:
+    from audio_to_tab.ingest import YouTubeDownloadError
+
+    def fake_download(url, work_dir):
+        raise YouTubeDownloadError("Could not download this YouTube video.")
+
+    with pytest.raises(YouTubeDownloadError, match="Could not download"):
+        youtube_audio_page.save_youtube_audio_to_folder(
+            "https://youtu.be/abc",
+            tmp_path,
+            "mp3",
+            work_dir=tmp_path,
+            download_fn=fake_download,
+        )
+
+
+def test_save_youtube_audio_skips_download_when_wav_exists(youtube_audio_page, tmp_path) -> None:
+    wav = tmp_path / "ready.wav"
+    wav.write_bytes(b"staged")
+    dest_dir = tmp_path / "out"
+
+    def fake_download(url, work_dir):
+        raise AssertionError("should reuse staged wav")
+
+    def fake_export(src, dest, filename, fmt):
+        assert Path(src) == wav
+        out = Path(dest) / f"ready.{fmt}"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"ok")
+        return out
+
+    saved = youtube_audio_page.save_youtube_audio_to_folder(
+        "https://www.youtube.com/watch?v=abc",
+        dest_dir,
+        "flac",
+        work_dir=tmp_path,
+        wav_path=wav,
+        download_fn=fake_download,
+        export_fn=fake_export,
+    )
+    assert saved.read_bytes() == b"ok"
+
+
+def test_save_youtube_audio_convert_failure_keeps_wav(youtube_audio_page, tmp_path) -> None:
+    wav = tmp_path / "ready.wav"
+    wav.write_bytes(b"staged")
+
+    def fake_export(src, dest, filename, fmt):
+        raise RuntimeError("ffmpeg conversion to mp3 failed")
+
+    with pytest.raises(RuntimeError, match="ffmpeg conversion"):
+        youtube_audio_page.save_youtube_audio_to_folder(
+            "https://www.youtube.com/watch?v=abc",
+            tmp_path / "out",
+            "mp3",
+            work_dir=tmp_path,
+            wav_path=wav,
+            download_fn=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no download")),
+            export_fn=fake_export,
+        )
+    assert wav.is_file()
+    assert wav.read_bytes() == b"staged"
 
 
 def test_app_page_icon_points_at_existing_file(app_module) -> None:

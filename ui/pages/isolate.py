@@ -51,6 +51,7 @@ from ui.guitar_fixup import (
 from ui.isolate_jobs import (
     IsolateJobSpec,
     active_job_id,
+    apply_finished_job_poll_outcome,
     apply_succeeded_job_to_session,
     delete_all_finished_jobs,
     delete_finished_job,
@@ -154,6 +155,13 @@ from ui.isolate_state import (
     load_persist_isolate_user_id,
     migrate_track_options,
     mixer_component_key,
+    ISOLATE_METRO_ACCENT_KEY,
+    ISOLATE_METRO_APPLIED_KEY,
+    ISOLATE_METRO_RATE_KEY,
+    ISOLATE_METRO_SOUND_KEY,
+    metronome_applied_stamp,
+    metronome_render_from_session,
+    seed_metronome_widgets_for_run,
     normalize_guitar_track_selection,
     os_notify_message,
     outcome_card_for_options,
@@ -238,6 +246,12 @@ from audio_to_tab.isolate import (  # noqa: E402
     probe_duration_sec,
     resolve_region,
 )
+from audio_to_tab.metronome import (  # noqa: E402
+    METRONOME_DIAGNOSTICS_NAME,
+    coerce_metronome_render_options,
+    load_metronome_diagnostics,
+    rebake_metronome_artifact,
+)
 from audio_to_tab.mixer import (  # noqa: E402
     DB_DEFAULT,
     default_muted_for,
@@ -257,16 +271,17 @@ from audio_to_tab.separate import is_demucs_available  # noqa: E402
 logger = logging.getLogger(__name__)
 
 STEM_HINTS = {
-    "piano": "May sound less accurate than other tracks — Demucs piano bleeds heavily",
+    "piano": "Less accurate than other tracks. Demucs piano bleeds heavily.",
     "guitar": "Isolation is harder than vocals/drums/bass; other instruments still bleed in",
     "guitar1": "Legacy spatial label",
     "guitar2": "Legacy spatial label",
-    "metronome": "Click track from detected beats — muted until you unmute it",
+    "metronome": "Click track",
 }
 
 PAGE_TITLE_HELP = (
     "Split a song into separate tracks on this computer. "
-    "Use New to separate, then Mixer to listen and Queue to track jobs."
+    "Use Home to separate, open a mix tab to listen, and scroll to Queue for jobs. "
+    "For download-only YouTube saves, use the YouTube Audio page."
 )
 SEPARATE_TRACKS_HELP = (
     "Pick what you want out. Lite auto-picks speed and device for this machine; "
@@ -274,7 +289,7 @@ SEPARATE_TRACKS_HELP = (
 )
 SECTION_OPTIONAL_HELP = (
     "Choose how much of the file to separate. Default is the whole track. "
-    "On Lite, long songs can use a lot of RAM and time — use Safer: first 90 s if needed."
+    "On Lite, long songs use a lot of RAM and time. Try Safer: first 90 s if needed."
 )
 DOWNLOADS_HELP = "Export stems or a mix from the current Mixer run."
 
@@ -351,14 +366,14 @@ def _download_youtube_with_status(url: str, *, title: str) -> str | None:
 def _youtube_search_dialog() -> None:
     """Centered modal: search public videos, pick one to fill the URL and auto-download."""
     st.caption(
-        "Find a public video and click **Use** — audio downloads automatically so you "
-        "can preview a section or separate the whole track."
+        "Find a public video and click **Use**. Audio downloads so you can "
+        "preview a section or separate the whole track."
     )
     with st.form("isolate_youtube_search_form", clear_on_submit=False, border=False):
         search_q = st.text_input(
             "Song or artist",
             key="isolate_youtube_search_query",
-            placeholder="e.g. artist — song title",
+            placeholder="e.g. artist, song title",
         )
         do_search = st.form_submit_button(
             "Search",
@@ -461,7 +476,7 @@ def _youtube_search_dialog() -> None:
                     _close_youtube_search_dialog()
                     st.session_state.pop(ISOLATE_YOUTUBE_AUTO_DOWNLOAD_KEY, None)
                     st.session_state["isolate_flash"] = (
-                        f"Downloaded **{title}** — choose a Section or Separate tracks."
+                        f"Downloaded **{title}**. Pick a section or separate tracks."
                     )
                     st.rerun()
             with st.expander(
@@ -690,7 +705,7 @@ def _render_guitar_fixup_panel(
         st.session_state[restore_key] = 0.0
 
     with st.expander(
-        "Guitar fix-up — adjust after separation (no re-run needed)",
+        "Guitar fix-up (after separation, no re-run)",
         expanded=flagged or bool(recovery.get("attempted")) or prerefine_exists,
     ):
         st.caption(
@@ -755,7 +770,7 @@ def _render_guitar_fixup_panel(
                 f"Bass-heavy guitar detected (low-band share {share:.2f}). "
                 "Try **Quick de-bleed** below."
                 if isinstance(share, (int, float))
-                else "Bass-heavy guitar detected — try **Quick de-bleed** below."
+                else "Bass-heavy guitar detected. Try **Quick de-bleed** below."
             )
             st.info(hint)
 
@@ -772,7 +787,7 @@ def _render_guitar_fixup_panel(
                 key=debleed_key,
             )
             if not has_bass:
-                st.caption("No bass stem in this run — de-bleed unavailable.")
+                st.caption("No bass stem in this run. De-bleed unavailable.")
             st.caption(GUITAR_HPF_TUNING_CAPTION)
         with col_restore:
             st.slider(
@@ -904,6 +919,69 @@ def _build_current_mix(
     return mix_path
 
 
+def _metronome_payload_for_mixer(run_dir: Path | None) -> dict | None:
+    """Grid + options for live mixer clicks; None falls back to baked WAV."""
+    if run_dir is None:
+        return None
+    diag = load_metronome_diagnostics(run_dir / METRONOME_DIAGNOSTICS_NAME)
+    seed_metronome_widgets_for_run(st.session_state, run_dir, diag)
+    if not isinstance(diag, dict):
+        return None
+    times = diag.get("click_times_1x")
+    if not isinstance(times, list) or not times:
+        return None
+    options = metronome_render_from_session(st.session_state)
+    try:
+        times_f = [float(t) for t in times]
+    except (TypeError, ValueError):
+        return None
+    ref = diag.get("first_detected_sec", times_f[0] if times_f else 0.0)
+    duration = diag.get("duration_sec", 0.0)
+    measure = diag.get("beats_per_measure", 4)
+    return {
+        "times1x": times_f,
+        "refSec": float(ref or 0.0),
+        "beatsPerMeasure": max(1, int(measure or 4)),
+        "durationSec": float(duration or 0.0),
+        "options": {
+            "accent": bool(options.accent),
+            "rate": float(options.rate),
+            "sound": str(options.sound),
+        },
+    }
+
+
+def _sync_metronome_options_from_mixer(
+    mixer_state: dict,
+    *,
+    run_dir: Path,
+    stem_paths: dict[str, Path],
+) -> None:
+    """Persist mixer click options and rebake export WAV without remounting stems."""
+    raw = mixer_state.get("metronomeOptions")
+    if not isinstance(raw, dict):
+        return
+    if stem_paths.get("metronome") is None:
+        return
+    options = coerce_metronome_render_options(
+        accent=raw.get("accent", True),
+        rate=raw.get("rate", 1.0),
+        sound=raw.get("sound", "classic"),
+    )
+    st.session_state[ISOLATE_METRO_ACCENT_KEY] = options.accent
+    st.session_state[ISOLATE_METRO_RATE_KEY] = options.rate
+    st.session_state[ISOLATE_METRO_SOUND_KEY] = options.sound
+    stamp = metronome_applied_stamp(run_dir, options)
+    if st.session_state.get(ISOLATE_METRO_APPLIED_KEY) == stamp:
+        return
+    result = rebake_metronome_artifact(run_dir, options)
+    st.session_state[ISOLATE_METRO_APPLIED_KEY] = stamp
+    if result is None:
+        return
+    # Keep playback mounted; only refresh download URLs on the next fragment paint.
+    _persist_isolate_ui_state()
+
+
 def _render_live_mixer(
     stem_paths: dict[str, Path],
     *,
@@ -958,6 +1036,7 @@ def _render_live_mixer(
     ]
     key_src = str(run_dir.resolve()) if run_dir is not None else _artifact_fingerprint(stem_paths)
     mixer_key = mixer_component_key(key_src)
+    metro = _metronome_payload_for_mixer(run_dir)
     return stem_mixer(
         stems_arg,
         initial_volumes_db={n: float(volumes.get(n, DB_DEFAULT)) for n in stem_names},
@@ -967,6 +1046,7 @@ def _render_live_mixer(
         initial_soloed={n: bool(saved_soloed.get(n, False)) for n in stem_names},
         initial_master_volume_db=master_db,
         track_title=track_title,
+        metronome=metro,
         key=mixer_key,
     )
 
@@ -1198,7 +1278,7 @@ def _render_lite_guitar_engine_chooser(
     for note in reasons:
         st.caption(note)
     if st.session_state.get(LITE_GUITAR_FELL_BACK_KEY):
-        st.caption("Reset to Faster (Demucs) because this clip cannot use BS-RoFormer.")
+        st.caption("Reset to Default (Demucs) because this clip cannot use BS-RoFormer.")
 
 
 def _render_outcome_picker(
@@ -1446,7 +1526,7 @@ def _render_engine_panel(
         # hint that it had happened.
         st.caption(
             f"Speed **{SPEED_PRESETS[speed_id]['label']}** sets Quality to "
-            f"**{speed['quality']}**. Change Quality below to override it — picking "
+            f"**{speed['quality']}**. Change Quality below to override. Picking "
             "a different Speed resets it again."
         )
         _closed_selectbox(
@@ -1697,9 +1777,9 @@ def _render_engine_panel(
         )
 
         st.caption(
-            "Guitar low-end fix-up (bass de-bleed, restore) also lives on the **Mixer** tab after "
-            "separation — no need to re-run Demucs. MelBand refine improves isolation but can "
-            "soften highs — use **Guitar (BS-RoFormer)** without refine if guitar sounds dull."
+            "Guitar low-end fix-up (bass de-bleed, restore) is also on the **Mixer** tab after "
+            "separation. No need to re-run Demucs. MelBand refine improves isolation but can "
+            "soften highs. Use **Guitar (BS-RoFormer)** without refine if guitar sounds dull."
         )
 
 
@@ -1820,7 +1900,7 @@ def _render_region_controls(audio_path: Path | None) -> tuple[float, float | Non
 
     duration = _cached_probe_duration_sec(audio_path)
     if duration is None:
-        st.caption("Length: unknown — full file will be processed.")
+        st.caption("Length unknown. The full file will be processed.")
         return 0.0, None, None
 
     st.caption(f"Length: **{format_time_sec(duration)}** ({duration:.1f} s)")
@@ -1879,8 +1959,8 @@ def _render_region_controls(audio_path: Path | None) -> tuple[float, float | Non
     if not pro and duration > LITE_MAX_DURATION_SEC and length > LITE_MAX_DURATION_SEC + 0.5:
         st.warning(
             f"This section is longer than {LITE_MAX_DURATION_SEC:.0f} s. "
-            "Lite on a low-RAM machine can run slowly or run out of memory — "
-            f"use **Safer: first {LITE_MAX_DURATION_SEC:.0f} s** if needed."
+            "Lite on a low-RAM machine can run slowly or run out of memory. "
+            f"Use **Safer: first {LITE_MAX_DURATION_SEC:.0f} s** if needed."
         )
 
     # Leave start/end at the file bounds → process the whole file (no trim).
@@ -1971,14 +2051,14 @@ def _render_section_preview(
         or audio_path.name
     )
     if max_duration_sec is None:
-        st.caption("Preview — full file (what will be processed)")
+        st.caption("Preview: full file (what will be processed)")
         try:
             st.audio(str(audio_path))
         except Exception:
             pass
         return
     label = region_label or format_region_label(start_sec, float(max_duration_sec))
-    st.caption(f"Preview — **{label}** ({float(max_duration_sec):.0f} s)")
+    st.caption(f"Preview: **{label}** ({float(max_duration_sec):.0f} s)")
     try:
         with st.spinner("Preparing section preview…"):
             preview = ensure_region_preview_wav(
@@ -2084,9 +2164,9 @@ def _render_separation_controls() -> dict:
     if st.session_state.get(ISOLATE_YOUTUBE_SEARCH_OPEN_KEY):
         _youtube_search_dialog()
     st.caption(YOUTUBE_DISCLAIMER)
-    st.caption(
-        "Off until you paste a URL or search. Enable only if you have rights."
-    )
+    # st.caption(
+    #     "Off until you paste a URL or search. Enable only if you have rights."
+    # )
     url_ready = youtube_url.strip()
     if url_ready and not is_youtube_url(url_ready):
         youtube_error = "Only YouTube URLs are allowed."
@@ -2130,7 +2210,7 @@ def _render_separation_controls() -> dict:
                 st.error(youtube_error)
             else:
                 st.session_state["isolate_flash"] = (
-                    f"Downloaded **{download_title}** — choose a Section or Separate tracks."
+                    f"Downloaded **{download_title}**. Pick a section or separate tracks."
                 )
                 st.rerun()
         if st.session_state.get(ISOLATE_YOUTUBE_DOWNLOADING_KEY):
@@ -2143,7 +2223,7 @@ def _render_separation_controls() -> dict:
                 st.caption(f"Ready: **{Path(pending).stem}**")
                 st.caption(
                     "Choose a **Section** below, or leave it at the full file. "
-                    "On Lite, long songs can use a lot of RAM — Safer: first 90 s is optional."
+                    "On Lite, long songs use a lot of RAM. Safer: first 90 s is optional."
                 )
 
     carry_over_path = st.session_state.get("carry_over_audio_path")
@@ -2464,7 +2544,7 @@ def _render_queue_job_row(
         n_actions = 1
     cols = st.columns([4, *([1] * n_actions)])
     with cols[0]:
-        st.write(f"**{title}** — {label}")
+        st.write(f"**{title}** · {label}")
         if status == "failed":
             _render_job_failure(
                 title,
@@ -2595,7 +2675,7 @@ def _render_failed_strip(failed: dict) -> None:
                 _rerun_preserve_scroll()
             else:
                 st.session_state["isolate_flash"] = (
-                    "Cannot retry — the original audio file is no longer on disk. "
+                    "Cannot retry. The original audio file is no longer on disk. "
                     "Add the file again on New."
                 )
                 _rerun_preserve_scroll()
@@ -2690,30 +2770,15 @@ def _poll_running_jobs() -> None:
         jid = str(job.get("id") or "")
         fresh = read_status(jid) or job
         st.session_state["isolate_consumed_job_id"] = jid
-        # Always promote the origin draft → run_dir so the strip keeps one tab.
-        run_dir = promote_job_origin_tab(st.session_state, fresh)
-        if run_dir:
-            st.session_state["isolate_listen_applied_dir"] = run_dir
-            st.session_state[LISTEN_PICKER_KEY] = str(run_dir)
-        if plan["notify_only"]:
-            title = fresh.get("title") or "track"
-            st.session_state["isolate_flash"] = (
-                f"**{title}** finished — open it from the mix tabs on Mixer…"
-            )
+        # Promote draft → run tab always; load stems/picker only when auto-applying.
+        open_mixer = apply_finished_job_poll_outcome(
+            st.session_state,
+            fresh,
+            notify_only=bool(plan["notify_only"]),
+        )
+        applied = True
+        if open_mixer:
             _open_mixer_workspace()
-            applied = True
-        elif apply_succeeded_job_to_session(st.session_state, fresh, viewing_mode="latest"):
-            produced = [
-                n
-                for n, path in (fresh.get("artifacts") or {}).items()
-                if Path(path).suffix.lower() == ".wav"
-                and not str(n).endswith("_diagnostics")
-            ]
-            st.session_state["isolate_flash"] = (
-                f"Separated {len(produced)} tracks. Live mixer and downloads are on Mixer."
-            )
-            _open_mixer_workspace()
-            applied = True
 
     if "isolate_notified_job_ids" not in st.session_state:
         notified_ids = None
@@ -2731,7 +2796,7 @@ def _poll_running_jobs() -> None:
         desktop_notify(message[0], message[1])
         if row.get("status") == "failed" and not applied:
             fail_title = row.get("title") or "track"
-            st.session_state["isolate_flash"] = f"**{fail_title}** failed — see Queue."
+            st.session_state["isolate_flash"] = f"**{fail_title}** failed. See Queue."
 
     if isolate_poll_requires_full_rerun(applied=applied, plan_rerun=bool(plan["rerun"])):
         _persist_isolate_ui_state()
@@ -2757,9 +2822,15 @@ def _mixer_and_downloads_fragment(
     """Mixer and downloads — fragment-scoped so the mixer does not remount the page.
 
     Mute/solo/volume reports only update session here. Export WAV is built on
-    **Save current mix**, not on every mixer callback.
+    **Save current mix**, not on every mixer callback. Click-track options live on
+    the metronome row and rebake the export WAV without remounting playback.
     """
     selected_stem_paths = stem_paths
+    # Re-register download URLs each fragment pass so rebaked metronome.wav is fresh.
+    try:
+        download_urls = stem_media_urls(selected_stem_paths, coord_prefix="isolate.download")
+    except Exception:
+        pass
     mixer_state = _render_live_mixer(
         selected_stem_paths,
         track_title=base_name,
@@ -2778,6 +2849,9 @@ def _mixer_and_downloads_fragment(
             st.session_state["isolate_master_volume_db"] = float(
                 mixer_state["masterVolumeDb"]
             )
+        _sync_metronome_options_from_mixer(
+            mixer_state, run_dir=run_dir, stem_paths=selected_stem_paths
+        )
 
     st.subheader("Downloads", anchor=False, help=DOWNLOADS_HELP)
     if not selected_stem_paths:
@@ -2812,7 +2886,7 @@ def _save_all_tracks(selected_stem_paths: dict[str, Path], export_root: Path, ba
     dest = export_song_dir(export_root, str(base_name))
     export_tracks_to_folder(selected_stem_paths, dest, str(base_name), fmt)
     st.session_state["isolate_last_export_path"] = str(dest)
-    st.success(f"Download finished — saved to {dest}")
+    st.success(f"Download finished. Saved to {dest}")
 
 
 def _save_current_mix(ready: str, export_root: Path, base_name: str, fmt: str) -> None:
@@ -2823,7 +2897,7 @@ def _save_current_mix(ready: str, export_root: Path, base_name: str, fmt: str) -
         fmt,
     )
     st.session_state["isolate_last_export_path"] = str(dest_file.parent)
-    st.success(f"Download finished — saved to {dest_file}")
+    st.success(f"Download finished. Saved to {dest_file}")
 
 
 def _download_format_widget() -> str:
@@ -3098,6 +3172,7 @@ def _enqueue_confirmed_job(choice: dict, audio_path: Path) -> None:
     origin_tab = str(st.session_state.get(SHELL_TAB_KEY) or "")
     if not is_new_draft_tab(origin_tab):
         origin_tab = ""
+    metro = metronome_render_from_session(st.session_state)
     spec = IsolateJobSpec(
         id=uuid.uuid4().hex,
         audio_path=str(audio_path),
@@ -3135,6 +3210,9 @@ def _enqueue_confirmed_job(choice: dict, audio_path: Path) -> None:
         audio_duration_sec=job_audio_sec,
         prior_timing=st.session_state.get("isolate_last_job_timing"),
         origin_tab=origin_tab or None,
+        metronome_accent=metro.accent,
+        metronome_rate=metro.rate,
+        metronome_sound=metro.sound,
     )
     st.session_state["isolate_last_custom_stems"] = list(choice.get("custom_stems") or [])
     st.session_state["isolate_results_source_fp"] = source_fp
@@ -3484,7 +3562,7 @@ def _render_moises_tab_strip(browser_id: str | None) -> None:
                     key="isolate_moises_tabs",
                 )
             else:
-                st.caption("Mix tabs UI missing — run `make mix-tabs-build`.")
+                st.caption("Mix tabs UI missing. Run `make mix-tabs-build`.")
         except Exception as exc:
             logger.warning("Mix tabs component failed: %s", exc)
             st.caption("Mix tabs unavailable.")
@@ -3569,7 +3647,7 @@ def _render_new_workspace(demucs_ok: bool) -> None:
     # running promises something immediate and then silently queues instead.
     busy = separation_in_progress()
     if busy:
-        st.caption("A separation is already running — this one starts when that finishes.")
+        st.caption("A separation is already running. This one starts when that finishes.")
     if st.button(
         "Add to queue" if busy else "Separate tracks",
         type="primary",
@@ -3706,7 +3784,7 @@ def _render_reseparate_panel(stem_paths: dict[str, Path], run_dir: Path) -> None
             "source stem is replaced in the mixer by its new sub-stems."
         )
         if not parent_config:
-            st.caption("Parent run has no saved separator config — using defaults.")
+            st.caption("Parent run has no saved separator config. Using defaults.")
         for stem_id in sort_stem_names(stem_paths.keys()):
             if stem_id == "metronome":
                 continue
@@ -3749,7 +3827,7 @@ def _render_mixer_workspace(browser_id: str | None) -> None:
     )
     if not show_file_ready_banner:
         st.caption(
-            "New file selected — mixer is still the chosen run until you separate again."
+            "New file selected. Mixer still shows the chosen run until you separate again."
         )
 
     base_name = st.session_state.get("isolate_base_name", "stems")
@@ -3808,7 +3886,7 @@ def _render_file_ready_banner() -> None:
     ):
         return
     st.info(
-        f"**{_staged_source_name()}** is ready — click **Separate tracks** on New to "
+        f"**{_staged_source_name()}** is ready. Click **Separate tracks** on New to "
         "replace the current results. Existing stems stay on disk until the new job finishes."
     )
 

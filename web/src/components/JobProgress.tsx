@@ -29,7 +29,7 @@ export function JobProgress({
     <div className="progress">
       <div className="stage">
         {STATUS_LABELS[job.status] ?? job.status}
-        {job.stage ? ` — ${humanizeStage(job.stage)}` : ""}
+        {job.stage ? ` · ${humanizeStage(job.stage)}` : ""}
       </div>
       <p>{job.message}</p>
       {job.error && <p className="error">{job.error}</p>}

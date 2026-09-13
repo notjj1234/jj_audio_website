@@ -44,11 +44,18 @@ def test_write_run_metadata_includes_metronome(tmp_path):
         page="isolate",
         title="Party",
         artifacts={"vocals": str(run_dir / "vocals.wav"), "metronome": str(run_dir / "metronome.wav")},
-        metronome={"bpm": 120.0, "beat_count": 32, "confidence": "high", "source": "drums"},
+        metronome={
+            "bpm": 120.0,
+            "beat_count": 32,
+            "confidence": "high",
+            "source": "drums",
+            "render": {"accent": True, "rate": 1.0, "sound": "classic"},
+        },
     )
     meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
     assert meta["metronome"]["bpm"] == 120.0
     assert meta["metronome"]["source"] == "drums"
+    assert meta["metronome"]["render"]["sound"] == "classic"
 
 
 def test_write_run_metadata_config_none_omits_key(tmp_path):

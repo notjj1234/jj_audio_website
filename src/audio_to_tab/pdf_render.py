@@ -19,7 +19,7 @@ def render_tab_pdf(
     output_path: str,
     *,
     title: str = "Guitar Tab",
-    subtitle: str = "Draft transcription — verify before performing",
+    subtitle: str = "Draft transcription. Verify before performing",
 ) -> str:
     """Render ASCII tab text to a readable PDF."""
     path = Path(output_path)
@@ -99,7 +99,7 @@ def render_structured_tab_pdf(
         c.drawString(margin, page_y, title)
         c.setFont("Helvetica", 9)
         c.setFillColorRGB(0.45, 0.45, 0.45)
-        c.drawString(margin, page_y - 16, "Draft transcription — verify before performing")
+        c.drawString(margin, page_y - 16, "Draft transcription. Verify before performing")
         c.setFillColorRGB(0, 0, 0)
         return page_y - 40
 

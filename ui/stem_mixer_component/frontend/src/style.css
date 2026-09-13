@@ -282,6 +282,128 @@ body {
   min-width: 0;
 }
 
+.metro-preview {
+  align-items: stretch;
+}
+
+.metro-wave {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  border-radius: 0.55rem;
+  background: rgba(128, 128, 128, 0.16);
+  padding: 1.85rem 0.45rem 0.35rem;
+  box-sizing: border-box;
+}
+
+.metro-toolbar {
+  position: absolute;
+  top: 0.35rem;
+  left: 0.4rem;
+  right: 0.4rem;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  pointer-events: none;
+}
+
+.metro-toolbar > * {
+  pointer-events: auto;
+}
+
+.metro-rate-seg {
+  display: inline-flex;
+  align-items: stretch;
+  border-radius: 0.4rem;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.mixer .metro-rate-seg .metro-rate-btn {
+  min-width: 0;
+  min-height: 1.55rem;
+  height: 1.55rem;
+  padding: 0 0.48rem;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  opacity: 0.78;
+}
+
+.mixer .metro-rate-seg .metro-rate-btn.active {
+  background: #f4f4f4;
+  color: #161616;
+  opacity: 1;
+}
+
+.mixer .metro-chip {
+  min-width: 0;
+  min-height: 1.55rem;
+  height: 1.55rem;
+  padding: 0 0.55rem;
+  border-radius: 0.4rem;
+  border: none;
+  background: rgba(0, 0, 0, 0.28);
+  color: var(--text);
+  font-size: 0.68rem;
+  font-weight: 600;
+  opacity: 0.85;
+}
+
+.mixer .metro-chip.active {
+  background: rgba(244, 244, 244, 0.92);
+  color: #161616;
+  opacity: 1;
+}
+
+.metro-sound-wrap {
+  margin: 0;
+  display: inline-flex;
+}
+
+.metro-sound-wrap select {
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text);
+  background-color: rgba(0, 0, 0, 0.28);
+  border: none;
+  border-radius: 0.4rem;
+  height: 1.55rem;
+  padding: 0 1.35rem 0 0.55rem;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 0.7rem) 55%, calc(100% - 0.45rem) 55%;
+  background-size: 0.28rem 0.28rem, 0.28rem 0.28rem;
+  background-repeat: no-repeat;
+  opacity: 0.9;
+  cursor: pointer;
+}
+
+.stem-row.is-metro .wave-seek {
+  margin-top: 0.1rem;
+}
+
+.stem-row.is-metro .waveform-svg {
+  height: 40px;
+  fill: rgba(200, 200, 200, 0.72);
+  opacity: 1;
+}
+
+.stem-row.is-metro .waveform-svg .wave-baseline {
+  stroke: rgba(200, 200, 200, 0.35);
+  stroke-opacity: 1;
+}
+
 .wave-seek {
   position: relative;
   flex: 1 1 auto;
@@ -324,6 +446,7 @@ body {
   font-size: 0.8rem;
   font-weight: 600;
   opacity: 0.78;
+  align-self: center;
 }
 
 .download-link:hover {
@@ -338,6 +461,10 @@ body {
       "mute solo name"
       "vol vol vol"
       "preview preview preview";
+  }
+
+  .metro-wave {
+    padding-top: 2.15rem;
   }
 
   .mixer-time {

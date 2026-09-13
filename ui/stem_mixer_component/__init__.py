@@ -57,6 +57,7 @@ def stem_mixer(
     initial_soloed: dict[str, bool] | None = None,
     initial_master_volume_db: float = 0.0,
     track_title: str = "",
+    metronome: dict[str, Any] | None = None,
     key: str | None = None,
 ) -> dict[str, Any] | None:
     """
@@ -65,8 +66,15 @@ def stem_mixer(
     ``stems`` items: ``{id, label, url}`` plus optional ``downloadUrl``,
     ``downloadFilename``, ``peaks`` (waveform envelope), and ``hint``.
     Waveforms render inline on each stem row.
+
+    ``metronome`` (optional): live click-track grid for the metronome row —
+    ``times1x``, ``refSec``, ``beatsPerMeasure``, ``durationSec``, and
+    ``options`` ``{accent, rate, sound}``. When present, the mixer synthesizes
+    clicks in-browser so Accent/Rate/Sound can change without reloading stems.
+
     Returns the latest control state from the browser, e.g.
-    ``{volumesDb, muted, soloed, masterVolumeDb}``, or None before the first report.
+    ``{volumesDb, muted, soloed, masterVolumeDb, metronomeOptions?}``,
+    or None before the first report.
     """
     if _stem_mixer is None:
         raise RuntimeError(
@@ -80,6 +88,7 @@ def stem_mixer(
         initialSoloed=initial_soloed or {},
         initialMasterVolumeDb=float(initial_master_volume_db),
         trackTitle=track_title,
+        metronome=metronome,
         key=key,
         default=None,
     )

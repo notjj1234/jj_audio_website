@@ -890,6 +890,9 @@ class IsolateConfig:
     # After stems are finalized, beat-track drums/source and emit metronome.wav.
     # Re-separate jobs turn this off so a click track is not treated as a child.
     emit_metronome: bool = True
+    metronome_accent: bool = True
+    metronome_rate: float = 1.0
+    metronome_sound: str = "classic"
 
     def __post_init__(self) -> None:
         # dual_guitar=True enables lead_rhythm (deprecated alias) with best_effort emit.
@@ -2231,7 +2234,7 @@ def _maybe_refine_guitar(
         progress("guitar_refine", "Guitar refinement complete")
     except Exception as exc:
         logger.warning("guitar refine failed; keeping first-pass guitar stem: %s", exc)
-        progress("guitar_refine", "Guitar refinement failed — using first-pass stem")
+        progress("guitar_refine", "Guitar refinement failed. Using first-pass stem")
 
 
 def separate_stems(
@@ -2686,13 +2689,25 @@ def separate_stems(
     artifacts["stem_presence_diagnostics"] = presence_path
 
     if cfg.emit_metronome:
-        from audio_to_tab.metronome import attach_metronome_artifact
+        from audio_to_tab.metronome import (
+            attach_metronome_artifact,
+            coerce_metronome_render_options,
+        )
 
         fallback = Path(trimmed) if Path(trimmed).is_file() else None
         if fallback is None and src.is_file():
             fallback = src
         try:
-            attach_metronome_artifact(artifacts, out_dir, fallback=fallback)
+            attach_metronome_artifact(
+                artifacts,
+                out_dir,
+                fallback=fallback,
+                render=coerce_metronome_render_options(
+                    accent=cfg.metronome_accent,
+                    rate=cfg.metronome_rate,
+                    sound=cfg.metronome_sound,
+                ),
+            )
         except Exception:
             logger.debug("metronome stem skipped", exc_info=True)
 

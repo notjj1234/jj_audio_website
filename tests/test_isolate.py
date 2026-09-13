@@ -314,6 +314,9 @@ def test_isolate_config_defaults_to_full_song():
 def test_isolate_config_default_quality_is_fast():
     assert IsolateConfig().quality == "fast"
     assert IsolateConfig().emit_metronome is True
+    assert IsolateConfig().metronome_accent is True
+    assert IsolateConfig().metronome_rate == 1.0
+    assert IsolateConfig().metronome_sound == "classic"
 
 
 def test_effective_demucs_segment_clamps_htdemucs_6s_below_transformer_max():

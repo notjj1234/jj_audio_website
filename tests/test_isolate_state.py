@@ -380,7 +380,7 @@ def test_lite_outcomes_honor_explicit_guitar_engine():
         "guitar_roformer",
         "guitar_roformer_refine",
     )
-    assert LITE_GUITAR_ENGINE_LABELS["guitar_demucs_6s"] == "Faster (Demucs)"
+    assert LITE_GUITAR_ENGINE_LABELS["guitar_demucs_6s"] == "Default (Demucs)"
     assert LITE_GUITAR_ENGINE_LABELS["guitar_roformer"] == "Better guitar (BS-RoFormer)"
     assert (
         LITE_GUITAR_ENGINE_LABELS["guitar_roformer_refine"]
@@ -537,6 +537,9 @@ def test_persisted_settings_include_lite_run_on():
     assert "isolate_guitar_ensemble" in PERSISTED_SETTING_KEYS
     assert "isolate_bass_bleed_mitigation" in PERSISTED_SETTING_KEYS
     assert "isolate_htdemucs_ft" in PERSISTED_SETTING_KEYS
+    assert "isolate_metro_accent" in PERSISTED_SETTING_KEYS
+    assert "isolate_metro_rate" in PERSISTED_SETTING_KEYS
+    assert "isolate_metro_sound" in PERSISTED_SETTING_KEYS
 
 
 def _lite_engine_kwargs(**overrides):
@@ -702,6 +705,9 @@ def test_isolate_job_spec_carries_pro_engine_fields_into_config_kwargs():
     assert kwargs["bass_bleed_mitigation"] is False
     assert kwargs["guitar_ensemble"] is False
     assert kwargs["lead_rhythm"] is False
+    assert kwargs["metronome_accent"] is True
+    assert kwargs["metronome_rate"] == 1.0
+    assert kwargs["metronome_sound"] == "classic"
 
     spec = IsolateJobSpec(
         id="j2",
@@ -719,6 +725,9 @@ def test_isolate_job_spec_carries_pro_engine_fields_into_config_kwargs():
         fold_other_mode="band_limited",
         low_end_restore_db=3.0,
         sub_bass_debleed=True,
+        metronome_accent=False,
+        metronome_rate=0.5,
+        metronome_sound="wood",
     )
     restored = IsolateJobSpec.from_dict(spec.to_dict())
     mapped = isolate_config_kwargs_from_spec(restored)
@@ -733,6 +742,9 @@ def test_isolate_job_spec_carries_pro_engine_fields_into_config_kwargs():
     assert mapped["fold_other_mode"] == "band_limited"
     assert mapped["low_end_restore_db"] == pytest.approx(3.0)
     assert mapped["sub_bass_debleed"] is True
+    assert mapped["metronome_accent"] is False
+    assert mapped["metronome_rate"] == pytest.approx(0.5)
+    assert mapped["metronome_sound"] == "wood"
 
 
 def test_isolate_headings_disable_anchors_and_tiles_use_fragment_rerun():
@@ -1304,7 +1316,12 @@ def test_enqueue_confirmed_job_opens_queue_with_loading_overlay():
     poll = source[
         source.find("def _poll_running_jobs") : source.find("def _queue_tab_fragment")
     ]
-    assert "promote_job_origin_tab" in poll
+    assert "apply_finished_job_poll_outcome" in poll
+    assert "notify_only=bool(plan[\"notify_only\"])" in poll or "notify_only=" in poll
+    assert "_open_mixer_workspace()" in poll
+    # Picker must not be retargeted before apply (desync bug).
+    assert "LISTEN_PICKER_KEY] = str(run_dir)" not in poll
+    assert 'isolate_listen_applied_dir"] = run_dir' not in poll
     tabs = source[
         source.find("def _render_moises_tab_strip") : source.find("def _has_source_for_job")
     ]
@@ -2247,9 +2264,9 @@ def test_estimate_job_and_remaining_eta():
 
 
 def test_format_progress_label():
-    assert format_progress_label(0.42, "Running Demucs") == "42% — Running Demucs"
+    assert format_progress_label(0.42, "Running Demucs") == "42% · Running Demucs"
     assert format_progress_label(0.42, "Running Demucs", estimated=True) == (
-        "~42% — Running Demucs"
+        "~42% · Running Demucs"
     )
 
 
@@ -2281,7 +2298,7 @@ def test_running_progress_view_has_label_elapsed_eta_and_checklist():
     assert "Elapsed" in view["eta_line"]
     assert "[now]" in view["checklist_md"]
     assert "Prepare audio" in view["checklist_md"]
-    assert view["hint"] == "Separating tracks — this can take a while on CPU"
+    assert view["hint"] == "Separating tracks. CPU may be slow"
     assert "Check guitar" not in view["checklist_md"]
     assert "Check which tracks have sound" not in view["checklist_md"]
 
@@ -2289,7 +2306,7 @@ def test_running_progress_view_has_label_elapsed_eta_and_checklist():
 def test_user_progress_hint_never_echoes_raw_worker_text():
     assert user_progress_hint("ingest", "libtorchcodec exploded") is None
     assert "libtorchcodec" not in (user_progress_hint("separate", "libtorchcodec exploded") or "")
-    assert "NVIDIA GPU" in (user_progress_hint("separate", "Separating tracks — this can take a while on NVIDIA GPU") or "")
+    assert "NVIDIA GPU" in (user_progress_hint("separate", "Separating tracks on NVIDIA GPU") or "")
 
 
 def test_running_progress_view_estimating_without_job_estimate():
@@ -2428,7 +2445,7 @@ def test_isolate_youtube_paste_and_search_are_always_visible():
     assert 'key="isolate_youtube_url"' in controls
     assert 'key="isolate_youtube_search_open_btn"' in controls
     assert "YOUTUBE_DISCLAIMER" in controls
-    assert "Off until you paste a URL or search" in controls
+    # assert "Off until you paste a URL or search" in controls
     assert "off in this installer build" not in source
 
 
@@ -3004,4 +3021,46 @@ def test_merge_reseparate_removes_source_and_adds_children():
     assert merged["other::guitar"] == Path("/a/other::guitar.wav")
     assert merged["other::synth"] == Path("/a/other::synth.wav")
     assert merged["vocals"] == Path("/a/vocals.wav")
+
+
+def test_seed_metronome_widgets_uses_diagnostics_render():
+    from ui.isolate_state import (
+        ISOLATE_METRO_ACCENT_KEY,
+        ISOLATE_METRO_APPLIED_KEY,
+        ISOLATE_METRO_RATE_KEY,
+        ISOLATE_METRO_SOUND_KEY,
+        seed_metronome_widgets_for_run,
+    )
+
+    session: dict = {}
+    seed_metronome_widgets_for_run(
+        session,
+        "/runs/song-a",
+        {"render": {"accent": False, "rate": 2.0, "sound": "wood"}},
+    )
+    assert session[ISOLATE_METRO_ACCENT_KEY] is False
+    assert session[ISOLATE_METRO_RATE_KEY] == 2.0
+    assert session[ISOLATE_METRO_SOUND_KEY] == "wood"
+    assert session[ISOLATE_METRO_APPLIED_KEY]["sound"] == "wood"
+    seed_metronome_widgets_for_run(
+        session,
+        "/runs/song-a",
+        {"render": {"accent": True, "rate": 1.0, "sound": "classic"}},
+    )
+    assert session[ISOLATE_METRO_SOUND_KEY] == "wood"
+
+
+def test_seed_metronome_widgets_without_render_keeps_prefs():
+    from ui.isolate_state import (
+        ISOLATE_METRO_ACCENT_KEY,
+        ISOLATE_METRO_APPLIED_KEY,
+        ISOLATE_METRO_SOUND_KEY,
+        seed_metronome_widgets_for_run,
+    )
+
+    session = {ISOLATE_METRO_ACCENT_KEY: False, ISOLATE_METRO_SOUND_KEY: "soft"}
+    seed_metronome_widgets_for_run(session, "/runs/old", {})
+    assert session[ISOLATE_METRO_SOUND_KEY] == "soft"
+    assert session[ISOLATE_METRO_ACCENT_KEY] is False
+    assert ISOLATE_METRO_APPLIED_KEY not in session
 

@@ -2,7 +2,7 @@
 
 ## Two products, one shared engine
 
-- **Desktop** (local): Streamlit `ui/`, frozen by `packaging/` (`launcher.py`, `audio_tools.spec`). Serial in-process isolate jobs. **Lite** auto-profiles speed/device/guitar from RAM/GPU (`audio_to_tab.hardware`); **Pro** exposes every control.
+- **Desktop** (local): Streamlit `ui/` (Audio Isolation = separate/mix; YouTube Audio = save file only; Tab PDF), frozen by `packaging/` (`launcher.py`, `audio_tools.spec`). Serial in-process isolate jobs. **Lite** auto-profiles speed/device/guitar from RAM/GPU (`audio_to_tab.hardware`); **Pro** exposes every control (Isolation/Tab PDF). YouTube Audio ignores Lite/Pro.
 - **Website** (hosted): FastAPI `backend/` + React SPA `web/` + Caddy; jobs via Postgres/Redis/MinIO + arq worker (`docker-compose.yml`). **Streamlit is NOT in the hosted stack.** Hosted Auto/`lite` processing modes live in `backend/capabilities.py`.
 - **Shared** engine: `src/audio_to_tab/` (isolate, mixer, ingest, tab-PDF pipeline). Import as `audio_to_tab`.
 

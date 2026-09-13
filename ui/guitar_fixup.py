@@ -195,7 +195,7 @@ def reset_mixer_guitar_fixup(
     if not restore_guitar_from_backup(guitar_path):
         return GuitarFixupResult(
             ok=False,
-            message="No saved original guitar stem — nothing to reset.",
+            message="No saved original guitar stem. Nothing to reset.",
         )
     updates = refresh_guitar_diagnostics(guitar_path, run_dir, stem_paths=stem_paths)
     recovery_path = run_dir / "low_end_recovery_diagnostics.json"
@@ -222,7 +222,7 @@ def switch_mixer_guitar_variant(
         need = GUITAR_PREREFINE_NAME if use_prerefine else GUITAR_REFINED_NAME
         return GuitarFixupResult(
             ok=False,
-            message=f"No `{need}` backup in this run — re-separate with MelBand refine to create it.",
+            message=f"No `{need}` backup in this run. Re-separate with MelBand refine to create it.",
         )
     updates = refresh_guitar_diagnostics(guitar_path, run_dir, stem_paths=stem_paths)
     return GuitarFixupResult(

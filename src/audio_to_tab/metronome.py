@@ -6,6 +6,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import soundfile as sf
@@ -15,12 +16,109 @@ from audio_to_tab.tempo import MAX_PLAUSIBLE_BPM, MIN_PLAUSIBLE_BPM
 logger = logging.getLogger(__name__)
 
 METRONOME_STEM_ID = "metronome"
+METRONOME_DIAGNOSTICS_NAME = "metronome_diagnostics.json"
 _ANALYSIS_STEM_PRIORITY = ("drums", "other", "guitar", "vocals", "bass")
 _MIN_BEATS = 2
 _CLICK_DURATION_SEC = 0.05
 _BEAT_CLICK_HZ = 1000.0
 _DOWNBEAT_CLICK_HZ = 1500.0
 _PEAK = 0.5
+_ORDINARY_MIX = 0.7
+_RATE_2X_GAP_LIMIT = 1.75
+_INTRO_ENERGY_RATIO = 0.2
+_STABLE_IOI_REL = 0.2
+_STABLE_MIN_BEATS = 4
+
+METRONOME_RATE_CHOICES: tuple[float, ...] = (0.5, 1.0, 2.0)
+METRONOME_SOUND_IDS: tuple[str, ...] = ("classic", "soft", "wood", "hi_tick")
+METRONOME_SOUND_LABELS: dict[str, str] = {
+    "classic": "Classic",
+    "soft": "Soft",
+    "wood": "Wood",
+    "hi_tick": "Hi-tick",
+}
+
+_SOUND_PRESETS: dict[str, dict[str, float]] = {
+    "classic": {
+        "beat_hz": _BEAT_CLICK_HZ,
+        "down_hz": _DOWNBEAT_CLICK_HZ,
+        "duration": _CLICK_DURATION_SEC,
+        "peak": _PEAK,
+        "decay": 12.0,
+    },
+    "soft": {
+        "beat_hz": 800.0,
+        "down_hz": 1200.0,
+        "duration": 0.06,
+        "peak": 0.35,
+        "decay": 8.0,
+    },
+    "wood": {
+        "beat_hz": 900.0,
+        "down_hz": 900.0,
+        "duration": 0.018,
+        "peak": _PEAK,
+        "decay": 22.0,
+    },
+    "hi_tick": {
+        "beat_hz": 2200.0,
+        "down_hz": 2800.0,
+        "duration": 0.02,
+        "peak": _PEAK,
+        "decay": 18.0,
+    },
+}
+
+
+@dataclass(frozen=True)
+class MetronomeRenderOptions:
+    accent: bool = True
+    rate: float = 1.0
+    sound: str = "classic"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "accent": bool(self.accent),
+            "rate": float(self.rate),
+            "sound": str(self.sound),
+        }
+
+
+def coerce_metronome_rate(value: Any) -> float:
+    raw = value
+    if isinstance(raw, str):
+        raw = raw.strip().lower().rstrip("x")
+    try:
+        rate = float(raw)
+    except (TypeError, ValueError):
+        return 1.0
+    if abs(rate - 0.5) < 1e-9:
+        return 0.5
+    if abs(rate - 2.0) < 1e-9:
+        return 2.0
+    return 1.0
+
+
+def coerce_metronome_sound(value: Any) -> str:
+    text = str(value or "classic").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {"hitick": "hi_tick", "hi_tick": "hi_tick"}
+    text = aliases.get(text, text)
+    if text in METRONOME_SOUND_IDS:
+        return text
+    return "classic"
+
+
+def coerce_metronome_render_options(
+    *,
+    accent: Any = True,
+    rate: Any = 1.0,
+    sound: Any = "classic",
+) -> MetronomeRenderOptions:
+    return MetronomeRenderOptions(
+        accent=True if accent is None else bool(accent),
+        rate=coerce_metronome_rate(rate),
+        sound=coerce_metronome_sound(sound),
+    )
 
 
 @dataclass(frozen=True)
@@ -30,6 +128,23 @@ class MetronomeResult:
     beat_count: int
     confidence: str
     source: str
+    sr: int = 0
+    duration_sec: float = 0.0
+    body_start_sec: float = 0.0
+    first_detected_sec: float = 0.0
+    detected_times: tuple[float, ...] = ()
+    click_times_1x: tuple[float, ...] = ()
+    beats_per_measure: int = 4
+    render: MetronomeRenderOptions = MetronomeRenderOptions()
+
+    def slim_meta(self) -> dict[str, Any]:
+        return {
+            "bpm": self.bpm,
+            "beat_count": self.beat_count,
+            "confidence": self.confidence,
+            "source": self.source,
+            "render": self.render.to_dict(),
+        }
 
 
 def pick_metronome_source(
@@ -189,6 +304,232 @@ def build_click_times(
     return times
 
 
+def _beat_local_rms(
+    detected: np.ndarray,
+    mono: np.ndarray,
+    sr: int,
+    *,
+    win_sec: float = 0.04,
+) -> np.ndarray:
+    win = max(1, int(win_sec * sr))
+    out = np.zeros(detected.size, dtype=np.float64)
+    n = len(mono)
+    for i, t in enumerate(detected):
+        center = round(float(t) * sr)
+        sl = mono[max(0, center - win) : min(n, center + win)]
+        if sl.size:
+            samples = sl.astype(np.float64, copy=False)
+            out[i] = float(np.sqrt(np.mean(samples * samples)))
+    return out
+
+
+def _first_stable_run_index(
+    detected: np.ndarray,
+    period: float,
+    *,
+    min_beats: int = _STABLE_MIN_BEATS,
+) -> int:
+    if detected.size < min_beats or period <= 0:
+        return 0
+    need = min_beats - 1
+    intervals = np.diff(detected)
+    ok = np.abs(intervals - period) <= (_STABLE_IOI_REL * period)
+    for i in range(ok.size - need + 1):
+        if bool(np.all(ok[i : i + need])):
+            return i
+    return 0
+
+
+def gate_unreliable_intro_beats(
+    detected: np.ndarray,
+    mono: np.ndarray,
+    sr: int,
+    period: float,
+) -> tuple[np.ndarray, float]:
+    """Drop weak/irregular intro onsets; keep a trusted body start.
+
+    Lead-in clicks are still filled from this origin back to t=0.
+    """
+    times = np.asarray(detected, dtype=np.float64).reshape(-1)
+    times = times[np.isfinite(times)]
+    times = np.sort(times)
+    if times.size == 0:
+        return times, 0.0
+    if times.size < _MIN_BEATS or period <= 0 or sr <= 0 or len(mono) == 0:
+        return times, float(times[0])
+
+    energies = _beat_local_rms(times, mono, sr)
+    split = max(1, energies.size // 2)
+    body_energy = float(np.median(energies[split:]))
+    floor = max(body_energy * _INTRO_ENERGY_RATIO, 1e-5)
+    loud = energies >= floor
+    loud_idx = int(np.argmax(loud)) if np.any(loud) else 0
+    stable_idx = _first_stable_run_index(times, period)
+    start_idx = max(loud_idx, stable_idx)
+    body_start = float(times[start_idx])
+    gated = times[start_idx:]
+    if gated.size < _MIN_BEATS:
+        return times, float(times[0])
+    return gated, body_start
+
+
+def apply_click_rate(
+    times_1x: np.ndarray,
+    *,
+    rate: float,
+    ref_sec: float,
+) -> np.ndarray:
+    """Map a 1x hybrid grid to 0.5x / 1x / 2x audible click times."""
+    times = np.asarray(times_1x, dtype=np.float64).reshape(-1)
+    times = times[np.isfinite(times)]
+    times = np.sort(times)
+    rate = coerce_metronome_rate(rate)
+    if times.size == 0 or rate == 1.0:
+        return times
+    ref_idx = int(np.argmin(np.abs(times - float(ref_sec))))
+    if rate == 0.5:
+        beat_index = np.arange(times.size, dtype=np.int64) - ref_idx
+        return times[beat_index % 2 == 0]
+    if times.size < 2:
+        return times
+    diffs = np.diff(times)
+    median_period = float(np.median(diffs)) if diffs.size else 0.0
+    limit = _RATE_2X_GAP_LIMIT * median_period if median_period > 0 else float("inf")
+    extra = [
+        0.5 * (float(t0) + float(t1))
+        for t0, t1, gap in zip(times[:-1], times[1:], diffs, strict=True)
+        if 1e-4 < float(gap) <= limit
+    ]
+    if not extra:
+        return times
+    merged = np.concatenate([times, np.asarray(extra, dtype=np.float64)])
+    merged.sort()
+    keep = np.ones(merged.size, dtype=bool)
+    keep[1:] = np.diff(merged) > 1e-4
+    return merged[keep]
+
+
+def _synth_click_wave(
+    sr: int,
+    freq: float,
+    duration: float,
+    *,
+    decay: float,
+) -> np.ndarray:
+    n = max(1, round(float(sr) * float(duration)))
+    t = np.arange(n, dtype=np.float64) / float(sr)
+    env = np.exp(-float(decay) * t / max(float(duration), 1e-6))
+    return (env * np.sin(2.0 * np.pi * float(freq) * t)).astype(np.float32)
+
+
+def _place_clicks(
+    times: np.ndarray,
+    *,
+    sr: int,
+    length: int,
+    wave: np.ndarray,
+) -> np.ndarray:
+    out = np.zeros(int(length), dtype=np.float32)
+    wave = np.asarray(wave, dtype=np.float32).reshape(-1)
+    if wave.size == 0 or sr <= 0:
+        return out
+    n = int(length)
+    for t in times:
+        start = round(float(t) * sr)
+        if start < 0 or start >= n:
+            continue
+        end = min(n, start + wave.size)
+        out[start:end] += wave[: end - start]
+    return out
+
+
+def _downbeat_times_1x(
+    times_1x: np.ndarray,
+    *,
+    ref_sec: float,
+    beats_per_measure: int,
+) -> np.ndarray:
+    times = np.asarray(times_1x, dtype=np.float64).reshape(-1)
+    if times.size == 0:
+        return times
+    measure = max(1, int(beats_per_measure))
+    ref_idx = int(np.argmin(np.abs(times - float(ref_sec))))
+    beat_index = np.arange(times.size, dtype=np.int64) - ref_idx
+    return times[beat_index % measure == 0]
+
+
+def _times_in_set(candidates: np.ndarray, reference: np.ndarray, *, tol: float = 1e-4) -> np.ndarray:
+    if candidates.size == 0 or reference.size == 0:
+        return np.zeros(0, dtype=np.float64)
+    keep = np.zeros(candidates.size, dtype=bool)
+    for i, t in enumerate(candidates):
+        keep[i] = bool(np.any(np.abs(reference - float(t)) <= tol))
+    return candidates[keep]
+
+
+def render_metronome_wav(
+    times_1x: np.ndarray,
+    output_path: str | Path,
+    *,
+    sr: int,
+    n_samples: int,
+    options: MetronomeRenderOptions | None = None,
+    ref_sec: float,
+    beats_per_measure: int = 4,
+) -> bool:
+    """Write a stereo click WAV from a stored 1x grid. Does not beat-track."""
+    opts = options or MetronomeRenderOptions()
+    opts = coerce_metronome_render_options(
+        accent=opts.accent, rate=opts.rate, sound=opts.sound
+    )
+    preset = _SOUND_PRESETS.get(opts.sound, _SOUND_PRESETS["classic"])
+    times_1x = np.asarray(times_1x, dtype=np.float64).reshape(-1)
+    times_1x = np.sort(times_1x[np.isfinite(times_1x)])
+    audible = apply_click_rate(times_1x, rate=opts.rate, ref_sec=ref_sec)
+    if audible.size < 1 or sr <= 0 or n_samples <= 0:
+        return False
+
+    beat_wave = _synth_click_wave(
+        sr, float(preset["beat_hz"]), float(preset["duration"]), decay=float(preset["decay"])
+    )
+    down_wave = _synth_click_wave(
+        sr, float(preset["down_hz"]), float(preset["duration"]), decay=float(preset["decay"])
+    )
+    if opts.accent:
+        downs_1x = _downbeat_times_1x(
+            times_1x, ref_sec=ref_sec, beats_per_measure=beats_per_measure
+        )
+        down = _times_in_set(audible, downs_1x)
+        others = audible
+        if down.size:
+            mask = np.zeros(audible.size, dtype=bool)
+            for i, t in enumerate(audible):
+                mask[i] = bool(np.any(np.abs(down - float(t)) <= 1e-4))
+            others = audible[~mask]
+        clicks = _place_clicks(down if down.size else audible[:1], sr=sr, length=n_samples, wave=down_wave)
+        if others.size:
+            clicks = clicks + _ORDINARY_MIX * _place_clicks(
+                others, sr=sr, length=n_samples, wave=beat_wave
+            )
+    else:
+        clicks = _place_clicks(audible, sr=sr, length=n_samples, wave=beat_wave)
+
+    peak = float(np.max(np.abs(clicks))) if clicks.size else 0.0
+    if peak <= 0:
+        return False
+    target = float(preset["peak"])
+    clicks = clicks * (target / peak)
+    stereo = np.column_stack([clicks, clicks]).astype(np.float32)
+    dest = Path(output_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        sf.write(str(dest), stereo, int(sr), subtype="PCM_16")
+    except Exception as exc:
+        logger.debug("metronome: write failed: %s", exc)
+        return False
+    return True
+
+
 def generate_metronome_stem(
     audio_path: str | Path,
     output_path: str | Path,
@@ -196,6 +537,7 @@ def generate_metronome_stem(
     sr: int | None = None,
     beats_per_measure: int = 4,
     source: str = "source",
+    render: MetronomeRenderOptions | None = None,
 ) -> MetronomeResult | None:
     """Beat-track the source, then write clicks on detected beats (plus lead-in)."""
     try:
@@ -204,6 +546,11 @@ def generate_metronome_stem(
         logger.debug("librosa missing; skipping metronome stem")
         return None
 
+    opts = coerce_metronome_render_options(
+        accent=True if render is None else render.accent,
+        rate=1.0 if render is None else render.rate,
+        sound="classic" if render is None else render.sound,
+    )
     src = Path(audio_path)
     dest = Path(output_path)
     if not src.is_file():
@@ -239,59 +586,34 @@ def generate_metronome_stem(
         return None
 
     bpm, _phase = refine_tempo_phase(detected, bpm_hint)
-    times = build_click_times(detected, duration_sec=duration_sec, bpm=bpm)
+    period = 60.0 / bpm if bpm > 0 else 0.0
+    gated, body_start = gate_unreliable_intro_beats(detected, mono, native_sr, period)
+    if gated.size >= 3:
+        bpm, _phase = refine_tempo_phase(gated, bpm)
+    if gated.size < _MIN_BEATS:
+        gated = detected
+        body_start = float(detected[0])
+
+    times = build_click_times(gated, duration_sec=duration_sec, bpm=bpm)
     if times.size < _MIN_BEATS:
         return None
 
     n = len(mono)
-    measure = max(1, int(beats_per_measure))
-    # Accent by sequential index relative to the first detected beat so lead-in
-    # downbeats stay consistent when we extrapolate backward into silence.
-    ref_idx = int(np.argmin(np.abs(times - float(detected[0]))))
-    beat_index = np.arange(times.size, dtype=np.int64) - ref_idx
-    down_mask = beat_index % measure == 0
-    down = times[down_mask]
-    others = times[~down_mask]
-    try:
-        click_down = librosa.clicks(
-            times=down if down.size else times[:1],
-            sr=native_sr,
-            click_freq=_DOWNBEAT_CLICK_HZ,
-            click_duration=_CLICK_DURATION_SEC,
-            length=n,
-        )
-        if others.size:
-            click_beat = librosa.clicks(
-                times=others,
-                sr=native_sr,
-                click_freq=_BEAT_CLICK_HZ,
-                click_duration=_CLICK_DURATION_SEC,
-                length=n,
-            )
-        else:
-            click_beat = np.zeros(n, dtype=np.float32)
-    except Exception as exc:
-        logger.debug("metronome: clicks failed: %s", exc)
-        return None
-
-    clicks = np.asarray(click_down, dtype=np.float32) + 0.7 * np.asarray(
-        click_beat, dtype=np.float32
-    )
-    peak = float(np.max(np.abs(clicks))) if clicks.size else 0.0
-    if peak <= 0:
-        return None
-    clicks = clicks * (_PEAK / peak)
-    stereo = np.column_stack([clicks, clicks]).astype(np.float32)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        sf.write(str(dest), stereo, native_sr, subtype="PCM_16")
-    except Exception as exc:
-        logger.debug("metronome: write failed: %s", exc)
+    ref_sec = float(gated[0])
+    if not render_metronome_wav(
+        times,
+        dest,
+        sr=native_sr,
+        n_samples=n,
+        options=opts,
+        ref_sec=ref_sec,
+        beats_per_measure=beats_per_measure,
+    ):
         return None
 
     confidence = (
         "high"
-        if detected.size >= 8 and MIN_PLAUSIBLE_BPM <= bpm <= MAX_PLAUSIBLE_BPM
+        if gated.size >= 8 and MIN_PLAUSIBLE_BPM <= bpm <= MAX_PLAUSIBLE_BPM
         else "low"
     )
     return MetronomeResult(
@@ -300,6 +622,14 @@ def generate_metronome_stem(
         beat_count=int(times.size),
         confidence=confidence,
         source=source,
+        sr=native_sr,
+        duration_sec=float(duration_sec),
+        body_start_sec=float(body_start),
+        first_detected_sec=ref_sec,
+        detected_times=tuple(float(t) for t in gated),
+        click_times_1x=tuple(float(t) for t in times),
+        beats_per_measure=max(1, int(beats_per_measure)),
+        render=opts,
     )
 
 
@@ -310,9 +640,161 @@ def write_metronome_diagnostics(path: Path, result: MetronomeResult) -> Path:
         "confidence": result.confidence,
         "source": result.source,
         "path": str(result.path),
+        "sr": result.sr,
+        "duration_sec": result.duration_sec,
+        "body_start_sec": result.body_start_sec,
+        "first_detected_sec": result.first_detected_sec,
+        "detected_times": list(result.detected_times),
+        "click_times_1x": list(result.click_times_1x),
+        "beats_per_measure": result.beats_per_measure,
+        "render": result.render.to_dict(),
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path
+
+
+def load_metronome_diagnostics(path: str | Path) -> dict[str, Any] | None:
+    dest = Path(path)
+    if not dest.is_file():
+        return None
+    try:
+        raw = json.loads(dest.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _times_from_payload(raw: Any) -> np.ndarray:
+    if not isinstance(raw, list):
+        return np.zeros(0, dtype=np.float64)
+    values = []
+    for item in raw:
+        try:
+            values.append(float(item))
+        except (TypeError, ValueError):
+            continue
+    return np.asarray(values, dtype=np.float64)
+
+
+def _pick_source_from_dir(
+    output_dir: Path,
+    *,
+    artifacts: dict[str, Path] | None = None,
+    fallback: Path | None = None,
+) -> tuple[Path, str] | None:
+    if artifacts:
+        picked = pick_metronome_source(artifacts, fallback=fallback)
+        if picked is not None:
+            return picked
+    for name in _ANALYSIS_STEM_PRIORITY:
+        path = output_dir / f"{name}.wav"
+        if path.is_file():
+            return path, name
+    if fallback is not None and Path(fallback).is_file():
+        return Path(fallback), "source"
+    return None
+
+
+def _result_from_payload(
+    dest: Path,
+    payload: dict[str, Any],
+    *,
+    options: MetronomeRenderOptions,
+    times_1x: np.ndarray,
+    detected: np.ndarray,
+) -> MetronomeResult:
+    first = float(detected[0]) if detected.size else float(payload.get("first_detected_sec") or 0.0)
+    body = float(payload.get("body_start_sec") or first)
+    sr = int(payload.get("sr") or 0)
+    duration = float(payload.get("duration_sec") or 0.0)
+    bpm = float(payload.get("bpm") or 0.0)
+    confidence = str(payload.get("confidence") or "low")
+    source = str(payload.get("source") or "source")
+    measure = max(1, int(payload.get("beats_per_measure") or 4))
+    return MetronomeResult(
+        path=dest,
+        bpm=bpm,
+        beat_count=int(times_1x.size),
+        confidence=confidence,
+        source=source,
+        sr=sr,
+        duration_sec=duration,
+        body_start_sec=body,
+        first_detected_sec=first,
+        detected_times=tuple(float(t) for t in detected),
+        click_times_1x=tuple(float(t) for t in times_1x),
+        beats_per_measure=measure,
+        render=options,
+    )
+
+
+def rebake_metronome_artifact(
+    output_dir: str | Path,
+    options: MetronomeRenderOptions | None = None,
+    *,
+    diagnostics_path: str | Path | None = None,
+    artifacts: dict[str, Path] | None = None,
+    fallback: Path | None = None,
+) -> MetronomeResult | None:
+    """Rewrite metronome.wav from a stored 1x grid (or re-track if needed)."""
+    opts = options or MetronomeRenderOptions()
+    opts = coerce_metronome_render_options(
+        accent=opts.accent, rate=opts.rate, sound=opts.sound
+    )
+    out_dir = Path(output_dir)
+    diag_path = Path(diagnostics_path) if diagnostics_path else out_dir / METRONOME_DIAGNOSTICS_NAME
+    dest = out_dir / f"{METRONOME_STEM_ID}.wav"
+    payload = load_metronome_diagnostics(diag_path) or {}
+    times_1x = _times_from_payload(payload.get("click_times_1x"))
+    detected = _times_from_payload(payload.get("detected_times"))
+    sr = int(payload.get("sr") or 0)
+    n_samples = 0
+    if dest.is_file():
+        try:
+            info = sf.info(str(dest))
+            if sr <= 0:
+                sr = int(info.samplerate)
+            n_samples = int(info.frames)
+        except Exception:
+            n_samples = 0
+    duration = float(payload.get("duration_sec") or 0.0)
+    if n_samples <= 0 and sr > 0 and duration > 0:
+        n_samples = round(duration * sr)
+    ref_sec = float(payload.get("first_detected_sec") or (detected[0] if detected.size else 0.0))
+    measure = max(1, int(payload.get("beats_per_measure") or 4))
+
+    if times_1x.size >= _MIN_BEATS and sr > 0 and n_samples > 0:
+        if render_metronome_wav(
+            times_1x,
+            dest,
+            sr=sr,
+            n_samples=n_samples,
+            options=opts,
+            ref_sec=ref_sec,
+            beats_per_measure=measure,
+        ):
+            result = _result_from_payload(
+                dest, payload, options=opts, times_1x=times_1x, detected=detected
+            )
+            write_metronome_diagnostics(diag_path, result)
+            return result
+        return None
+
+    picked = _pick_source_from_dir(out_dir, artifacts=artifacts, fallback=fallback)
+    if picked is None:
+        return None
+    audio_path, source = picked
+    result = generate_metronome_stem(
+        audio_path,
+        dest,
+        source=source,
+        render=opts,
+        beats_per_measure=measure,
+    )
+    if result is None:
+        return None
+    write_metronome_diagnostics(diag_path, result)
+    return result
 
 
 def attach_metronome_artifact(
@@ -320,6 +802,7 @@ def attach_metronome_artifact(
     output_dir: Path,
     *,
     fallback: Path | None = None,
+    render: MetronomeRenderOptions | None = None,
 ) -> MetronomeResult | None:
     """Write metronome.wav into ``artifacts`` when beat tracking succeeds."""
     picked = pick_metronome_source(artifacts, fallback=fallback)
@@ -331,11 +814,12 @@ def attach_metronome_artifact(
         audio_path,
         out_dir / f"{METRONOME_STEM_ID}.wav",
         source=source,
+        render=render,
     )
     if result is None:
         return None
     artifacts[METRONOME_STEM_ID] = result.path
     artifacts["metronome_diagnostics"] = write_metronome_diagnostics(
-        out_dir / "metronome_diagnostics.json", result
+        out_dir / METRONOME_DIAGNOSTICS_NAME, result
     )
     return result

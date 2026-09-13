@@ -1,7 +1,13 @@
-"""Save isolate downloads to a chosen folder and reveal it in the OS file manager.
+"""Save desktop downloads to a chosen folder and reveal it in the OS file manager.
 
-No tkinter — the frozen app excludes it. Folder picking uses osascript /
-PowerShell / zenity.
+Used by Isolate Downloads and the YouTube Audio page. No tkinter — the frozen
+app excludes it. Folder picking uses osascript / PowerShell / zenity.
+
+Caveats for callers/UX:
+- The native dialog can appear behind a pywebview window; tell users to Alt+Tab.
+- Linux without zenity: ``choose_export_dir`` returns None (same as cancel).
+- ``convert_audio`` / export helpers overwrite an existing same-named file (ffmpeg ``-y``).
+- ``open_path_in_os`` opens the folder (or the file's parent), not a file-select highlight.
 """
 
 from __future__ import annotations

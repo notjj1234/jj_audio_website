@@ -4,6 +4,18 @@ import {
   Theme,
 } from "streamlit-component-lib";
 import "./style.css";
+import {
+  METRONOME_RATE_CHOICES,
+  METRONOME_SOUND_LABELS,
+  MetronomeConfig,
+  MetronomeOptions,
+  MetronomeSoundId,
+  buildMetronomeAudioBuffer,
+  coerceMetronomeOptions,
+  coerceMetronomeRate,
+  coerceMetronomeSound,
+  metronomePeaksFromTimes,
+} from "./metronomeClicks";
 
 const DB_MIN = -25;
 const DB_MAX = 25;
@@ -263,7 +275,8 @@ class StemMixerEngine {
 
   async loadStems(
     stems: StemInfo[],
-    onProgress: (loaded: number, total: number, message: string) => void
+    onProgress: (loaded: number, total: number, message: string) => void,
+    liveBuffers?: Record<string, (ctx: AudioContext, durationSec: number) => AudioBuffer>
   ): Promise<{ errors: string[] }> {
     await this.stopSources(false);
     for (const gain of this.gains.values()) gain.disconnect();
@@ -281,14 +294,36 @@ class StemMixerEngine {
     const errors: string[] = [];
     let loaded = 0;
     const total = stems.length;
+    const deferred: StemInfo[] = [];
 
     for (const stem of stems) {
+      if (liveBuffers?.[stem.id]) {
+        deferred.push(stem);
+        continue;
+      }
       onProgress(loaded, total, `Loading ${stem.label}…`);
       try {
         const res = await fetch(stem.url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const arr = await res.arrayBuffer();
         const buf = await ctx.decodeAudioData(arr.slice(0));
+        this.buffers.set(stem.id, buf);
+        this.duration = Math.max(this.duration, buf.duration);
+        const gain = ctx.createGain();
+        gain.connect(this.masterGain!);
+        this.gains.set(stem.id, gain);
+      } catch (e) {
+        errors.push(`${stem.label}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      loaded += 1;
+      onProgress(loaded, total, `Loaded ${loaded}/${total}`);
+    }
+
+    for (const stem of deferred) {
+      onProgress(loaded, total, `Loading ${stem.label}…`);
+      try {
+        const synth = liveBuffers![stem.id]!;
+        const buf = synth(ctx, this.duration);
         this.buffers.set(stem.id, buf);
         this.duration = Math.max(this.duration, buf.duration);
         const gain = ctx.createGain();
@@ -311,6 +346,51 @@ class StemMixerEngine {
     );
     this.tick();
     return { errors };
+  }
+
+  /** Hot-swap one stem buffer without stopping the rest of the mix. */
+  replaceStemBuffer(id: string, buf: AudioBuffer): void {
+    this.buffers.set(id, buf);
+    this.duration = 0;
+    for (const b of this.buffers.values()) {
+      this.duration = Math.max(this.duration, b.duration);
+    }
+    if (!this.ctx || !this.masterGain) return;
+    if (!this.gains.has(id)) {
+      const gain = this.ctx.createGain();
+      gain.connect(this.masterGain);
+      this.gains.set(id, gain);
+      if (!this.stemIds.includes(id)) this.stemIds.push(id);
+    }
+    if (!this.playing) {
+      this.tick();
+      return;
+    }
+    const offset = this.currentTime();
+    const old = this.sources.get(id);
+    if (old) {
+      try {
+        old.onended = null;
+        old.stop();
+      } catch {
+        /* */
+      }
+      try {
+        old.disconnect();
+      } catch {
+        /* */
+      }
+      this.sources.delete(id);
+    }
+    const gain = this.gains.get(id);
+    if (gain && offset < buf.duration) {
+      const src = this.ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(gain);
+      src.start(this.ctx.currentTime, offset);
+      this.sources.set(id, src);
+    }
+    this.tick();
   }
 
   applyGains(gains: Record<string, number>): void {
@@ -433,6 +513,12 @@ let state: MixerState = {
 };
 let stemInfos: StemInfo[] = [];
 let trackTitle = "";
+let metroConfig: MetronomeConfig | null = null;
+let metroOptions: MetronomeOptions = coerceMetronomeOptions({
+  accent: true,
+  rate: 1,
+  sound: "classic",
+});
 
 let wantPlaying = false;
 let transportBusy = false;
@@ -491,6 +577,7 @@ function statePayload(): string {
     muted: state.muted,
     soloed: state.soloed,
     masterVolumeDb: state.masterVolumeDb,
+    metronomeOptions: metroConfig ? metroOptions : null,
   });
 }
 
@@ -506,12 +593,16 @@ function reportState(immediate = false): void {
     const payload = statePayload();
     if (payload === lastPublished) return;
     lastPublished = payload;
-    Streamlit.setComponentValue({
+    const value: Record<string, unknown> = {
       volumesDb: { ...state.volumesDb },
       muted: { ...state.muted },
       soloed: { ...state.soloed },
       masterVolumeDb: state.masterVolumeDb,
-    });
+    };
+    if (metroConfig) {
+      value.metronomeOptions = { ...metroOptions };
+    }
+    Streamlit.setComponentValue(value);
   };
   if (immediate) {
     if (reportTimer !== null) window.clearTimeout(reportTimer);
@@ -656,21 +747,29 @@ function renderUI(theme?: Theme): void {
       const db = clampDb(state.volumesDb[stem.id] ?? DB_DEFAULT);
       const muted = !!state.muted[stem.id];
       const soloed = !!state.soloed[stem.id];
-      const wave = waveformSeekHtml(stem.peaks, stem.label);
+      const liveMetro = stem.id === "metronome" && metroConfig != null;
+      const wave = waveformSeekHtml(stem.peaks, stem.label, {
+        variant: liveMetro ? "metro" : "default",
+      });
       const download = stem.downloadUrl
         ? `<a class="download-link" href="${stem.downloadUrl}" download="${escapeHtml(
             stem.downloadFilename || `${stem.label}.wav`
           )}">Download</a>`
         : "";
-      const preview = wave || download
-        ? `<div class="stem-preview">${wave}${download}</div>`
-        : "";
-      const nameTitle = stem.hint ? ` title="${escapeHtml(stem.hint)}"` : "";
-      const hint = stem.hint
-        ? `<span class="stem-hint">${escapeHtml(stem.hint)}</span>`
-        : "";
+      const preview = liveMetro
+        ? metronomePreviewHtml(wave, download)
+        : wave || download
+          ? `<div class="stem-preview">${wave}${download}</div>`
+          : "";
+      // Metronome: keep a short title tooltip only — no body hint clutter.
+      const nameTitle =
+        stem.hint && !liveMetro ? ` title="${escapeHtml(stem.hint)}"` : "";
+      const hint =
+        stem.hint && !liveMetro
+          ? `<span class="stem-hint">${escapeHtml(stem.hint)}</span>`
+          : "";
       return `
-        <div class="stem-row" data-id="${escapeHtml(stem.id)}">
+        <div class="stem-row${liveMetro ? " is-metro" : ""}" data-id="${escapeHtml(stem.id)}">
           <button type="button" class="toggle mute${muted ? " active" : ""}" data-id="${escapeHtml(stem.id)}"
             aria-label="${muted ? "Unmute" : "Mute"} ${escapeHtml(stem.label)}"
             aria-pressed="${muted ? "true" : "false"}">M</button>
@@ -822,6 +921,8 @@ function renderUI(theme?: Theme): void {
       updateMuteAllLabel();
     };
   });
+
+  bindMetronomeOptionControls();
 
   engine.setTimeCallback((t, dur, playing) => {
     const currentEl = document.getElementById("time-current");
@@ -1003,9 +1104,115 @@ function peaksFromBuffer(buf: AudioBuffer, numPoints = 512): number[] {
 
 function applyDecodedPeaks(): void {
   for (const stem of stemInfos) {
+    if (stem.id === "metronome" && metroConfig) {
+      stem.peaks = metronomePeaksFromTimes(
+        metroConfig.times1x,
+        metroConfig.durationSec || engine.getDuration(),
+        metroOptions,
+        metroConfig.refSec
+      );
+      continue;
+    }
     const buf = engine.getBuffer(stem.id);
     if (!buf) continue;
     stem.peaks = peaksFromBuffer(buf);
+  }
+}
+
+function metronomeToolbarHtml(): string {
+  const rateBtns = METRONOME_RATE_CHOICES.map((r) => {
+    const active = Math.abs(metroOptions.rate - r) < 1e-9;
+    return `<button type="button" class="metro-rate-btn${active ? " active" : ""}" data-rate="${r}" aria-pressed="${active ? "true" : "false"}">${r}x</button>`;
+  }).join("");
+  const soundIds = Object.keys(METRONOME_SOUND_LABELS) as MetronomeSoundId[];
+  const soundOpts = soundIds
+    .map(
+      (id) =>
+        `<option value="${id}"${metroOptions.sound === id ? " selected" : ""}>${escapeHtml(
+          METRONOME_SOUND_LABELS[id]
+        )}</option>`
+    )
+    .join("");
+  return `
+    <div class="metro-toolbar" role="group" aria-label="Click track options">
+      <div class="metro-rate-seg" role="group" aria-label="Click rate">${rateBtns}</div>
+      <button type="button" class="metro-chip${metroOptions.accent ? " active" : ""}" id="metro-accent"
+        aria-pressed="${metroOptions.accent ? "true" : "false"}">Accent</button>
+      <label class="metro-sound-wrap">
+        <span class="visually-hidden">Click sound</span>
+        <select id="metro-sound" aria-label="Click sound">${soundOpts}</select>
+      </label>
+    </div>`;
+}
+
+function metronomePreviewHtml(wave: string, download: string): string {
+  return `<div class="stem-preview metro-preview">
+    <div class="metro-wave">
+      ${metronomeToolbarHtml()}
+      ${wave}
+    </div>
+    ${download}
+  </div>`;
+}
+
+function applyLiveMetronomeBuffer(): void {
+  if (!metroConfig) return;
+  const ctx = engine.createContextForDecode();
+  const buf = buildMetronomeAudioBuffer(ctx, metroConfig, metroOptions);
+  engine.replaceStemBuffer("metronome", buf);
+  applyDecodedPeaks();
+  const row = document.querySelector<HTMLElement>('.stem-row[data-id="metronome"]');
+  if (!row) return;
+  const preview = row.querySelector(".stem-preview");
+  const stem = stemInfos.find((s) => s.id === "metronome");
+  if (!stem || !preview) return;
+  const wave = waveformSeekHtml(stem.peaks, stem.label, { variant: "metro" });
+  const download = stem.downloadUrl
+    ? `<a class="download-link" href="${stem.downloadUrl}" download="${escapeHtml(
+        stem.downloadFilename || `${stem.label}.wav`
+      )}">Download</a>`
+    : "";
+  preview.outerHTML = metronomePreviewHtml(wave, download);
+  const nextPreview = row.querySelector(".stem-preview");
+  nextPreview?.querySelectorAll<HTMLElement>(".wave-seek").forEach((el) => {
+    el.onpointerdown = (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      seekFromWavePointer(el, event.clientX);
+    };
+  });
+  bindMetronomeOptionControls();
+  updatePlayheads(engine.currentTime(), engine.getDuration());
+  scheduleFrameHeight();
+}
+
+function bindMetronomeOptionControls(): void {
+  if (!metroConfig) return;
+  const apply = (next: Partial<MetronomeOptions>) => {
+    metroOptions = coerceMetronomeOptions({ ...metroOptions, ...next });
+    applyLiveMetronomeBuffer();
+    applyStateGains();
+    reportState(true);
+  };
+  document.querySelectorAll<HTMLButtonElement>(".metro-rate-btn").forEach((btn) => {
+    btn.onclick = (event) => {
+      event.stopPropagation();
+      apply({ rate: coerceMetronomeRate(btn.dataset.rate) });
+    };
+  });
+  const accent = document.getElementById("metro-accent") as HTMLButtonElement | null;
+  if (accent) {
+    accent.onclick = (event) => {
+      event.stopPropagation();
+      apply({ accent: !metroOptions.accent });
+    };
+  }
+  const sound = document.getElementById("metro-sound") as HTMLSelectElement | null;
+  if (sound) {
+    sound.onchange = () => {
+      apply({ sound: coerceMetronomeSound(sound.value) });
+    };
+    sound.onpointerdown = (event) => event.stopPropagation();
   }
 }
 
@@ -1016,10 +1223,14 @@ function waveformBarLayout(n: number, width: number): { slot: number; barW: numb
   return { slot, barW };
 }
 
-function waveformSeekHtml(peaks: number[] | undefined, label: string): string {
+function waveformSeekHtml(
+  peaks: number[] | undefined,
+  label: string,
+  opts?: { variant?: "default" | "metro" }
+): string {
   if (!peaks || peaks.length === 0) return "";
   const width = 400;
-  const height = 52;
+  const height = opts?.variant === "metro" ? 44 : 52;
   const mid = height / 2;
   const n = peaks.length;
   const norm = waveformNorm(peaks);
@@ -1027,16 +1238,18 @@ function waveformSeekHtml(peaks: number[] | undefined, label: string): string {
   const bars: string[] = [
     `<line class="wave-baseline" x1="0" y1="${mid}" x2="${width}" y2="${mid}" />`,
   ];
+  const metro = opts?.variant === "metro";
   for (let i = 0; i < n; i++) {
     const peak = peaks[i] ?? 0;
     if (peak <= 0) continue;
     const amp = Math.sqrt(Math.min(1, peak / norm)) * (mid - 2);
-    const h = Math.max(3, amp * 2);
-    const x = i * slot + (slot - barW) / 2;
+    const h = Math.max(metro ? 4 : 3, amp * 2 * (metro ? 0.85 : 1));
+    const x = i * slot + (slot - (metro ? Math.min(barW, 1.6) : barW)) / 2;
     const y = mid - h / 2;
+    const w = metro ? Math.min(barW, 1.6) : barW;
     bars.push(
-      `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${barW.toFixed(2)}" ` +
-        `height="${h.toFixed(2)}" rx="1" ry="1" />`
+      `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${w.toFixed(2)}" ` +
+        `height="${h.toFixed(2)}" rx="0.8" ry="0.8" />`
     );
   }
   const svg =
@@ -1065,8 +1278,63 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
-function stemKey(stems: StemInfo[]): string {
-  return stems.map((s) => `${s.id}|${s.url}`).join(";");
+function stemKey(stems: StemInfo[], metro: MetronomeConfig | null): string {
+  const stemPart = stems
+    .map((s) => {
+      if (s.id === "metronome" && metro && metro.times1x.length > 0) {
+        return `${s.id}|live`;
+      }
+      return `${s.id}|${s.url}`;
+    })
+    .join(";");
+  if (!metro || metro.times1x.length === 0) return stemPart;
+  const first = metro.times1x[0] ?? 0;
+  const last = metro.times1x[metro.times1x.length - 1] ?? 0;
+  return `${stemPart}|m:${metro.times1x.length}:${first.toFixed(3)}:${last.toFixed(3)}:${metro.durationSec.toFixed(3)}`;
+}
+
+function parseMetronomeArg(raw: unknown): MetronomeConfig | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const timesRaw = obj.times1x ?? obj.click_times_1x;
+  const times1x = Array.isArray(timesRaw)
+    ? timesRaw.map((t) => Number(t)).filter((t) => Number.isFinite(t))
+    : [];
+  if (times1x.length === 0) return null;
+  const options = coerceMetronomeOptions(
+    (obj.options as Partial<MetronomeOptions> | undefined) ?? {
+      accent: obj.accent as boolean | undefined,
+      rate: obj.rate as number | undefined,
+      sound: obj.sound as string | undefined,
+    }
+  );
+  return {
+    times1x,
+    refSec: Number(obj.refSec ?? obj.first_detected_sec ?? times1x[0] ?? 0) || 0,
+    beatsPerMeasure: Math.max(1, Math.floor(Number(obj.beatsPerMeasure ?? obj.beats_per_measure ?? 4) || 4)),
+    durationSec: Math.max(0.05, Number(obj.durationSec ?? obj.duration_sec ?? 0) || 0),
+    options,
+  };
+}
+
+function softUpdateStemDownloads(stems: StemInfo[]): void {
+  stemInfos = stems.map((next) => {
+    const prev = stemInfos.find((s) => s.id === next.id);
+    return {
+      ...next,
+      peaks: prev?.peaks ?? next.peaks,
+    };
+  });
+  for (const stem of stemInfos) {
+    const row = document.querySelector(`.stem-row[data-id="${CSS.escape(stem.id)}"]`);
+    if (!row || !stem.downloadUrl) continue;
+    const link = row.querySelector<HTMLAnchorElement>("a.download-link");
+    if (!link) continue;
+    link.href = stem.downloadUrl;
+    if (stem.downloadFilename) {
+      link.setAttribute("download", stem.downloadFilename);
+    }
+  }
 }
 
 async function onRender(event: Event): Promise<void> {
@@ -1078,10 +1346,12 @@ async function onRender(event: Event): Promise<void> {
     initialSoloed?: Record<string, boolean>;
     initialMasterVolumeDb?: number;
     trackTitle?: string;
+    metronome?: unknown;
   };
 
   const stems = args.stems ?? [];
-  const key = stemKey(stems);
+  const nextMetro = parseMetronomeArg(args.metronome);
+  const key = stemKey(stems, nextMetro);
   const status = () => document.getElementById("status");
   const nextTitle = args.trackTitle ?? "";
   if (nextTitle !== trackTitle) {
@@ -1089,63 +1359,87 @@ async function onRender(event: Event): Promise<void> {
     updateTrackTitleDisplay();
   }
 
-  if (key !== lastStemKey) {
-    try {
-      const raw = sessionStorage.getItem(TRANSPORT_STORAGE_KEY);
-      if (raw) {
-        const stored = JSON.parse(raw) as { stemKey?: string };
-        if (stored.stemKey !== key) {
-          sessionStorage.removeItem(TRANSPORT_STORAGE_KEY);
-        }
+  if (key === lastStemKey) {
+    softUpdateStemDownloads(stems);
+    scheduleFrameHeight();
+    return;
+  }
+
+  try {
+    const raw = sessionStorage.getItem(TRANSPORT_STORAGE_KEY);
+    if (raw) {
+      const stored = JSON.parse(raw) as { stemKey?: string };
+      if (stored.stemKey !== key) {
+        sessionStorage.removeItem(TRANSPORT_STORAGE_KEY);
       }
-    } catch {
-      /* ignore */
     }
-    lastStemKey = key;
-    wantPlaying = false;
-    transportBusy = false;
-    transportPending = null;
-    stemInfos = stems;
-    const masterInit = Number(args.initialMasterVolumeDb);
-    const volumesIn = { ...(args.initialVolumesDb ?? {}) };
-    for (const id of Object.keys(volumesIn)) {
-      volumesIn[id] = clampDb(Number(volumesIn[id]));
-    }
-    state = {
-      volumesDb: volumesIn,
-      muted: { ...(args.initialMuted ?? {}) },
-      soloed: { ...(args.initialSoloed ?? {}) },
-      masterVolumeDb: Number.isFinite(masterInit) ? clampDb(masterInit) : DB_DEFAULT,
+  } catch {
+    /* ignore */
+  }
+  lastStemKey = key;
+  wantPlaying = false;
+  transportBusy = false;
+  transportPending = null;
+  stemInfos = stems;
+  metroConfig = nextMetro;
+  metroOptions = nextMetro
+    ? coerceMetronomeOptions(nextMetro.options)
+    : coerceMetronomeOptions({ accent: true, rate: 1, sound: "classic" });
+  const masterInit = Number(args.initialMasterVolumeDb);
+  const volumesIn = { ...(args.initialVolumesDb ?? {}) };
+  for (const id of Object.keys(volumesIn)) {
+    volumesIn[id] = clampDb(Number(volumesIn[id]));
+  }
+  state = {
+    volumesDb: volumesIn,
+    muted: { ...(args.initialMuted ?? {}) },
+    soloed: { ...(args.initialSoloed ?? {}) },
+    masterVolumeDb: Number.isFinite(masterInit) ? clampDb(masterInit) : DB_DEFAULT,
+  };
+  for (const s of stems) {
+    if (state.volumesDb[s.id] === undefined) state.volumesDb[s.id] = DB_DEFAULT;
+    else state.volumesDb[s.id] = clampDb(state.volumesDb[s.id]);
+    if (state.muted[s.id] === undefined) state.muted[s.id] = s.id === "metronome";
+    if (state.soloed[s.id] === undefined) state.soloed[s.id] = false;
+  }
+  renderUI(data.theme);
+  const st = status();
+  if (st) st.textContent = "Loading stems…";
+  const liveBuffers: Record<string, (ctx: AudioContext, durationSec: number) => AudioBuffer> =
+    {};
+  if (metroConfig) {
+    liveBuffers.metronome = (ctx, durationSec) => {
+      const cfg: MetronomeConfig = {
+        ...metroConfig!,
+        durationSec: Math.max(metroConfig!.durationSec, durationSec, 0.05),
+      };
+      metroConfig = cfg;
+      return buildMetronomeAudioBuffer(ctx, cfg, metroOptions);
     };
-    for (const s of stems) {
-      if (state.volumesDb[s.id] === undefined) state.volumesDb[s.id] = DB_DEFAULT;
-      else state.volumesDb[s.id] = clampDb(state.volumesDb[s.id]);
-      if (state.muted[s.id] === undefined) state.muted[s.id] = s.id === "metronome";
-      if (state.soloed[s.id] === undefined) state.soloed[s.id] = false;
-    }
-    renderUI(data.theme);
-    const st = status();
-    if (st) st.textContent = "Loading stems…";
-    const { errors } = await engine.loadStems(stems, (loaded, total, msg) => {
+  }
+  const { errors } = await engine.loadStems(
+    stems,
+    (loaded, total, msg) => {
       const el = status();
       if (el) el.textContent = msg || `${loaded}/${total}`;
       scheduleFrameHeight();
-    });
-    applyStateGains();
-    applyDecodedPeaks();
-    // Do not reportState(true) on load — that remounts the iframe via a parent
-    // Streamlit rerun. Only publish when the user changes mute/solo/volume.
-    lastPublished = statePayload();
-    const el = status();
-    if (el) {
-      el.textContent = errors.length
-        ? `Loaded with errors: ${errors.join("; ")}`
-        : `Loaded ${stems.length} stem(s). Adjust levels while playing — playback will not restart.`;
-    }
-    renderUI(data.theme);
-    applyStateGains();
-    restoreTransport();
+    },
+    liveBuffers
+  );
+  applyStateGains();
+  applyDecodedPeaks();
+  // Do not reportState(true) on load — that remounts the iframe via a parent
+  // Streamlit rerun. Only publish when the user changes mute/solo/volume.
+  lastPublished = statePayload();
+  const el = status();
+  if (el) {
+    el.textContent = errors.length
+      ? `Loaded with errors: ${errors.join("; ")}`
+      : `Loaded ${stems.length} stem(s). Adjust levels while playing — playback will not restart.`;
   }
+  renderUI(data.theme);
+  applyStateGains();
+  restoreTransport();
 
   scheduleFrameHeight();
 }

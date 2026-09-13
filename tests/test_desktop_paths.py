@@ -1025,6 +1025,26 @@ def test_tab_pdf_page_has_explicit_developer_playground_disclaimer():
     assert "Demo only — tabs are rough drafts" not in page
 
 
+def test_youtube_audio_page_nav_order_and_freeze_import():
+    root = Path(__file__).resolve().parents[1]
+    app = (root / "ui" / "app.py").read_text(encoding="utf-8")
+    spec = (root / "packaging" / "audio_tools.spec").read_text(encoding="utf-8")
+    page = (root / "ui" / "pages" / "youtube_audio.py").read_text(encoding="utf-8")
+    nav_block = app.split("_nav =")[1].split("pg = st.navigation")[0]
+    isolate_at = nav_block.find("isolate.py")
+    youtube_at = nav_block.find("youtube_audio.py")
+    tab_at = nav_block.find("tab_pdf.py")
+    assert 0 <= isolate_at < youtube_at < tab_at
+    assert 'title="Audio Isolation"' in nav_block
+    assert 'title="YouTube Audio"' in nav_block
+    assert 'title="Tab PDF (demo)"' in nav_block
+    assert 'st.title(\n        "YouTube Audio"' in page
+    assert "ui.pages.youtube_audio" in spec
+    assert "Search songs" in page
+    assert "Save audio to folder" in page
+    assert 'st.session_state[YT_AUDIO_FMT_KEY] = _DEFAULT_FMT' in page or '_DEFAULT_FMT = "mp3"' in page
+
+
 def test_tab_pdf_lite_hides_engine_widgets():
     page = (
         Path(__file__).resolve().parents[1] / "ui" / "pages" / "tab_pdf.py"

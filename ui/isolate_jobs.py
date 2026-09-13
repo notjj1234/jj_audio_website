@@ -76,6 +76,9 @@ class IsolateJobSpec:
     # the UI replaces that draft slot with ``run_dir`` instead of opening a
     # second tab.
     origin_tab: str | None = None
+    metronome_accent: bool = True
+    metronome_rate: float = 1.0
+    metronome_sound: str = "classic"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -117,6 +120,9 @@ def isolate_config_kwargs_from_spec(spec: IsolateJobSpec) -> dict[str, Any]:
         "bleed_gate": spec.bleed_gate,
         "bass_bleed_mitigation": spec.bass_bleed_mitigation,
         "guitar_ensemble": spec.guitar_ensemble,
+        "metronome_accent": spec.metronome_accent,
+        "metronome_rate": spec.metronome_rate,
+        "metronome_sound": spec.metronome_sound,
     }
 
 
@@ -848,6 +854,13 @@ def _run_one_job(job_id: str) -> None:
                             "confidence": raw.get("confidence"),
                             "source": raw.get("source"),
                         }
+                        render = raw.get("render")
+                        if isinstance(render, dict):
+                            metro_meta["render"] = {
+                                "accent": render.get("accent"),
+                                "rate": render.get("rate"),
+                                "sound": render.get("sound"),
+                            }
                 except Exception:
                     metro_meta = None
             write_run_metadata(
@@ -1183,4 +1196,49 @@ def apply_succeeded_job_to_session(
         session["isolate_viewing_run_dir"] = str(run_dir)
     for key in _MIXER_RESET_KEYS:
         session.pop(key, None)
+    return True
+
+
+def apply_finished_job_poll_outcome(
+    session: Any,
+    status: dict[str, Any],
+    *,
+    notify_only: bool,
+) -> bool:
+    """Handle a newly finished isolate job during UI poll.
+
+    Always promotes the job's origin draft tab into the finished ``run_dir``
+    strip slot. Stem load + listen-picker retarget happen only when
+    ``notify_only`` is False and apply succeeds (keeps strip focus and mixer
+    artifacts in sync).
+
+    Returns True when the Mixer workspace should open (auto-apply loaded).
+    On notify-only, sets ``isolate_flash`` and leaves picker/artifacts alone.
+    """
+    from ui.isolate_state import LISTEN_PICKER_KEY, promote_job_origin_tab
+
+    promote_job_origin_tab(session, status)
+    if notify_only:
+        title = status.get("title") or "track"
+        session["isolate_flash"] = (
+            f"**{title}** finished. Open it from the mix tabs on Mixer…"
+        )
+        return False
+
+    job_id = str(status.get("id") or "").strip() or "latest"
+    if not apply_succeeded_job_to_session(session, status, viewing_mode=job_id):
+        return False
+
+    run_dir = str(status.get("run_dir") or "").strip()
+    if run_dir:
+        session["isolate_listen_applied_dir"] = run_dir
+        session[LISTEN_PICKER_KEY] = run_dir
+    produced = [
+        n
+        for n, path in (status.get("artifacts") or {}).items()
+        if Path(path).suffix.lower() == ".wav" and not str(n).endswith("_diagnostics")
+    ]
+    session["isolate_flash"] = (
+        f"Separated {len(produced)} tracks. Live mixer and downloads are on Mixer."
+    )
     return True
