@@ -142,6 +142,8 @@ if _window_icon.is_file():
 
 def _desktop_edition() -> str:
     raw = os.environ.get("AUDIO_TOOLS_EDITION", "cpu").strip().lower()
+    if raw in {"both", "combined", "cpu+cuda", "cpu-cuda", "all"}:
+        return "both"
     if raw in {"cuda", "nvidia", "gpu"}:
         return "cuda"
     return "cpu"

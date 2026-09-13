@@ -63,7 +63,7 @@ CPU separation often takes about as long as the song (or longer). Streamlit **St
 
 ## YouTube downloads
 
-Public YouTube URLs only (no login, no age-restricted / private / members-only). The UI already shows a ToS disclaimer; you are responsible for having rights to the audio.
+Public YouTube URLs only (no login, no age-restricted / private / members-only). The UI shows a short FYI note about using audio you’re allowed to save.
 
 **Which page?**
 

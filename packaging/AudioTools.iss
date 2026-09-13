@@ -2,12 +2,13 @@
 ; Compile after: pyinstaller packaging/audio_tools.spec
 ;   powershell -File packaging/make_windows_installer.ps1 -Flavor cpu
 ;   powershell -File packaging/make_windows_installer.ps1 -Flavor cuda
+;   powershell -File packaging/make_windows_installer.ps1 -Flavor both
 ;
 ; Optional defines (ISCC /DName=Value):
 ;   DistDir    - folder containing AudioTools.exe (default: ..\dist\AudioTools)
 ;   OutputDir  - where Setup.exe is written (default: ..\dist)
 ;   AppVersion - version string (default: 0.1.3)
-;   Flavor     - cpu (default) or cuda
+;   Flavor     - cpu (default), cuda, or both
 
 #ifndef DistDir
   #define DistDir "..\dist\AudioTools"
@@ -29,7 +30,12 @@
 ; Evergreen WebView2 Runtime client id
 #define WebView2ClientGuid "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 
-#if Flavor == "cuda"
+#if Flavor == "both"
+  #define MyAppName "Audio Tools"
+  #define MyAppFolder "AudioTools Combined"
+  #define MyAppId "{{B8D2F4A6-1E57-4C90-8A3D-9F6E2B1C0D84}"
+  #define MyAppVerDesc "CPU + NVIDIA CUDA demo"
+#elif Flavor == "cuda"
   #define MyAppName "Audio Tools (NVIDIA)"
   #define MyAppFolder "AudioTools NVIDIA"
   #define MyAppId "{{C4E91A2B-7D83-4F16-9B50-2A8E6C3D1F47}"
@@ -126,7 +132,8 @@ end;
 
 function SetupIsCuda: Boolean;
 begin
-  Result := CompareText('{#Flavor}', 'cuda') = 0;
+  { CUDA torch freezes: NVIDIA-only and combined CPU+GPU. }
+  Result := (CompareText('{#Flavor}', 'cuda') = 0) or (CompareText('{#Flavor}', 'both') = 0);
 end;
 
 function NvidiaAdapterPresent: Boolean;

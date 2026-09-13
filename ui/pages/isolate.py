@@ -96,6 +96,7 @@ from ui.isolate_state import (
     close_open_mix_tab,
     draft_tab_job_overlays,
     focus_new_draft_tab,
+    is_loaded_mix_tab,
     is_new_draft_tab,
     mark_draft_tab_processing,
     open_home_shell,
@@ -3295,16 +3296,14 @@ def _focus_mix_tab(rows: list[dict], run_dir: str) -> None:
 
 def _close_mix_tab(rows: list[dict], run_dir: str) -> None:
     neighbor = close_open_mix_tab(st.session_state, run_dir)
-    active = str(
-        st.session_state.get(LISTEN_PICKER_KEY)
-        or st.session_state.get("isolate_listen_applied_dir")
-        or ""
-    )
-    if active == str(run_dir):
-        if neighbor:
+    if is_loaded_mix_tab(st.session_state, run_dir):
+        if neighbor and is_new_draft_tab(neighbor):
+            focus_new_draft_tab(st.session_state, neighbor)
+        elif neighbor:
             _focus_mix_tab(rows, neighbor)
         else:
             _clear_loaded_mixer()
+            open_home_shell(st.session_state)
     _persist_isolate_ui_state()
     _rerun_scroll_top()
 
@@ -3607,12 +3606,9 @@ def _render_moises_tab_strip(browser_id: str | None) -> None:
             _persist_isolate_ui_state()
             _rerun_scroll_top()
             return
-        active = str(
-            st.session_state.get(LISTEN_PICKER_KEY)
-            or st.session_state.get("isolate_listen_applied_dir")
-            or ""
-        )
-        if active == tab_id:
+        # Always detach loaded mixer pointers for the closed run. Otherwise the
+        # strip's ``if loaded: add_open_mix_tab(loaded)`` reopens the last tab.
+        if is_loaded_mix_tab(st.session_state, tab_id):
             if neighbor and is_new_draft_tab(neighbor):
                 focus_new_draft_tab(st.session_state, neighbor)
             elif neighbor:

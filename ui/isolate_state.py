@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
 import sys
 import time
@@ -1642,6 +1643,45 @@ def mark_draft_tab_processing(
     session[SHELL_TAB_KEY] = tab_id
 
 
+def mix_tab_ids_equal(a: str | Path | None, b: str | Path | None) -> bool:
+    """True when two strip ids refer to the same draft or run_dir path."""
+    left = str(a or "").strip()
+    right = str(b or "").strip()
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    if is_new_draft_tab(left) or is_new_draft_tab(right):
+        return False
+    return os.path.normcase(os.path.normpath(left)) == os.path.normcase(
+        os.path.normpath(right)
+    )
+
+
+def is_loaded_mix_tab(
+    session: Mapping[str, Any],
+    run_dir: str | Path | None,
+) -> bool:
+    """True when ``run_dir`` is the session's loaded / listening mix.
+
+    Closing that tab must clear these pointers; otherwise
+    ``add_open_mix_tab(loaded)`` on the next strip render reopens it and the
+    last remaining mix tab looks uncloseable.
+    """
+    path = str(run_dir or "").strip()
+    if not path or is_new_draft_tab(path):
+        return False
+    for key in (
+        LISTEN_PICKER_KEY,
+        "isolate_listen_applied_dir",
+        "isolate_run_dir",
+        "isolate_viewing_run_dir",
+    ):
+        if mix_tab_ids_equal(session.get(key), path):
+            return True
+    return False
+
+
 def close_open_mix_tab(
     session: MutableMapping[str, Any],
     run_dir: str | Path | None,
@@ -1656,8 +1696,12 @@ def close_open_mix_tab(
         if is_new_draft_tab(p) or Path(p).is_dir()
     ]
     if not path or path not in tabs:
-        session[OPEN_MIX_TABS_KEY] = tabs
-        return tabs[-1] if tabs else None
+        # Path may differ only by slash/case on Windows — still try to match.
+        match = next((p for p in tabs if mix_tab_ids_equal(p, path)), None)
+        if match is None:
+            session[OPEN_MIX_TABS_KEY] = tabs
+            return tabs[-1] if tabs else None
+        path = match
     idx = tabs.index(path)
     tabs = [p for p in tabs if p != path]
     session[OPEN_MIX_TABS_KEY] = tabs

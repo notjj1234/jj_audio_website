@@ -1,18 +1,19 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Compile AudioTools-<version>-windows-x64-<cpu|cuda>-setup.exe with Inno Setup.
+  Compile AudioTools-<version>-windows-x64-<cpu|cuda|both>-setup.exe with Inno Setup.
 
 .EXAMPLE
   .\packaging\make_windows_installer.ps1 -Flavor cpu -CopyToDownloads
   .\packaging\make_windows_installer.ps1 -Flavor cuda -CopyToDownloads
+  .\packaging\make_windows_installer.ps1 -Flavor both -CopyToDownloads
 #>
 [CmdletBinding()]
 param(
     [string]$DistDir = "",
     [string]$OutputDir = "",
     [string]$AppVersion = "",
-    [ValidateSet("cpu", "cuda")]
+    [ValidateSet("cpu", "cuda", "both")]
     [string]$Flavor = "cpu",
     [switch]$CopyToDownloads
 )

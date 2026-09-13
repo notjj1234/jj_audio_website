@@ -115,16 +115,29 @@ def test_resolve_faster_always_cpu_on_cpu_edition(monkeypatch):
     assert resolved["quality"] == "fast"
 
 
-def test_resolve_faster_uses_cuda_on_cuda_edition(monkeypatch):
+def test_resolve_faster_uses_cuda_on_cuda_only_edition(monkeypatch):
     monkeypatch.setenv("AUDIO_TOOLS_EDITION", "cuda")
     resolved = resolve_desktop_speed("faster", CPU_MID, platform="win32")
     assert resolved["device"] == "cuda"
     assert resolved["quality"] == "fast"
 
 
+def test_resolve_faster_stays_cpu_on_both_edition(monkeypatch):
+    monkeypatch.setenv("AUDIO_TOOLS_EDITION", "both")
+    resolved = resolve_desktop_speed("faster", CUDA_HIGH, platform="win32")
+    assert resolved["device"] == "cpu"
+    assert resolved["quality"] == "fast"
+
+
 def test_cuda_edition_windows_device_options_cuda_only(monkeypatch):
     monkeypatch.setenv("AUDIO_TOOLS_EDITION", "cuda")
     assert desktop_device_options(CPU_MID, platform="win32") == ["cuda"]
+    assert desktop_device_options(CUDA_HIGH, platform="win32") == ["cuda"]
+
+
+def test_both_edition_windows_device_options_cpu_and_cuda(monkeypatch):
+    monkeypatch.setenv("AUDIO_TOOLS_EDITION", "both")
+    assert desktop_device_options(CPU_MID, platform="win32") == ["cpu", "cuda"]
 
 
 def test_cuda_edition_system_summary_shows_nvidia_not_cpu(monkeypatch):

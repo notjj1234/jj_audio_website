@@ -13,7 +13,12 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-from audio_to_tab.edition import EDITION_CUDA, desktop_edition
+from audio_to_tab.edition import (
+    EDITION_BOTH,
+    EDITION_CUDA,
+    desktop_edition,
+    edition_ships_cuda_torch,
+)
 
 LOW_RAM_GB = 8.0
 # Torch MPS needs working room for the ~700 MB fp32 BS-RoFormer-SW weights plus
@@ -265,7 +270,7 @@ def get_desktop_probe(*, force: bool = False) -> HostProbe:
 
 def get_desktop_probe_without_torch() -> HostProbe:
     """RAM-only probe for first UI paint. Does not import torch."""
-    cuda_ui = _cuda_edition_windows(platform=None)
+    cuda_ui = _ships_cuda_windows(platform=None)
     return HostProbe(
         cuda=cuda_ui,
         mps=False,
@@ -278,18 +283,39 @@ def _platform(platform: str | None) -> str:
     return platform if platform is not None else sys.platform
 
 
-def _cuda_edition_windows(*, platform: str | None) -> bool:
-    """True on the NVIDIA desktop build (Windows). UI defaults to CUDA-only."""
-    return _platform(platform).startswith("win") and desktop_edition() == EDITION_CUDA
+def _ships_cuda_windows(*, platform: str | None) -> bool:
+    """True when the Windows freeze ships CUDA PyTorch (cuda or both editions)."""
+    return _platform(platform).startswith("win") and edition_ships_cuda_torch()
+
+
+def _cuda_only_edition_windows(*, platform: str | None) -> bool:
+    """True on the NVIDIA-only Windows freeze (no CPU device option in Pro)."""
+    return (
+        _platform(platform).startswith("win") and desktop_edition() == EDITION_CUDA
+    )
+
+
+def _both_edition_windows(*, platform: str | None) -> bool:
+    return (
+        _platform(platform).startswith("win") and desktop_edition() == EDITION_BOTH
+    )
 
 
 def desktop_device_options(probe: HostProbe, *, platform: str | None = None) -> list[str]:
     """Devices the desktop UI may offer. Mac never lists CUDA; Apple Silicon with
-    enough RAM also lists Apple GPU (MPS)."""
-    if _cuda_edition_windows(platform=platform):
-        return ["cuda"]
-    options = ["cpu"]
+    enough RAM also lists Apple GPU (MPS).
+
+    Windows editions:
+    - ``cpu`` — CPU only (unless a live CUDA probe appears on a non-frozen run)
+    - ``cuda`` — NVIDIA GPU only
+    - ``both`` — CPU + NVIDIA GPU (combined installer)
+    """
     plat = _platform(platform)
+    if _cuda_only_edition_windows(platform=platform):
+        return ["cuda"]
+    if _both_edition_windows(platform=platform):
+        return ["cpu", "cuda"]
+    options = ["cpu"]
     if plat.startswith("win") and probe.cuda:
         options.append("cuda")
     if (
@@ -312,7 +338,7 @@ def desktop_recommend(probe: HostProbe, *, platform: str | None = None) -> dict[
     Apple GPU (MPS) → Balanced/mps on capable Macs; otherwise Faster/CPU.
     Never recommends extreme or High-GPU.
     """
-    if _cuda_edition_windows(platform=platform):
+    if _cuda_only_edition_windows(platform=platform):
         if is_low_ram(probe):
             return {
                 "speed": "faster",
@@ -377,7 +403,8 @@ def resolve_desktop_speed(
         }
 
     if speed_id == "faster":
-        device = gpu if _cuda_edition_windows(platform=platform) else "cpu"
+        # NVIDIA-only freeze keeps Faster on CUDA; combined/CPU prefer CPU for Faster.
+        device = "cuda" if _cuda_only_edition_windows(platform=platform) else "cpu"
         return {
             "id": "faster",
             "label": "Faster",
@@ -406,8 +433,6 @@ def desktop_system_summary(probe: HostProbe, *, platform: str | None = None) -> 
     ram = f"~{probe.ram_gb:g} GB RAM" if probe.ram_gb is not None else "RAM unknown"
     chip = apple_chip_label(probe.cpu_brand)
     chip_bit = f"{chip} · " if chip else ""
-    if _cuda_edition_windows(platform=platform):
-        return f"This PC: {chip_bit}{ram} · NVIDIA GPU"
     options = desktop_device_options(probe, platform=platform)
     accel = (
         "Apple GPU (MPS)"
@@ -452,16 +477,14 @@ def lite_device_choice_ids(
     options = desktop_device_options(probe, platform=platform)
     if "mps" in options:
         return ["cpu", "mps"]
-    # CUDA edition may list only cuda; still offer CPU as a Lite escape hatch.
-    if "cuda" in options or _cuda_edition_windows(platform=platform):
+    # CUDA-only edition lists only cuda; still offer CPU as a Lite escape hatch.
+    if "cuda" in options or _cuda_only_edition_windows(platform=platform):
         return ["cpu", "cuda"]
     return []
 
 
 def _lite_accel_plain_label(probe: HostProbe, *, platform: str | None = None) -> str:
     """Short device label for Lite captions (no MPS/CUDA jargon)."""
-    if _cuda_edition_windows(platform=platform):
-        return "NVIDIA GPU"
     options = desktop_device_options(probe, platform=platform)
     if "mps" in options:
         return "Apple GPU"

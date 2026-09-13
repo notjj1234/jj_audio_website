@@ -1632,6 +1632,85 @@ def test_apply_listen_picker_pending_sets_widget_key():
     assert session[LISTEN_PICKER_KEY] == "/runs/keep"
 
 
+def test_closing_last_loaded_mix_tab_stays_closed(tmp_path: Path):
+    """Closing the only mix tab must clear loaded pointers so the strip cannot re-add it.
+
+    Regression: Home + one mix tab; close removed it from open tabs but left
+    ``isolate_run_dir`` set, so the next ``add_open_mix_tab(loaded)`` revived it.
+    """
+    from ui.isolate_state import (
+        LISTEN_PICKER_KEY,
+        OPEN_MIX_TABS_KEY,
+        add_open_mix_tab,
+        close_open_mix_tab,
+        is_loaded_mix_tab,
+        mix_tab_ids_equal,
+        open_mix_tabs_for_session,
+    )
+
+    run = tmp_path / "youtube_guns"
+    run.mkdir()
+    run_s = str(run)
+    session: dict = {
+        OPEN_MIX_TABS_KEY: [run_s],
+        "isolate_run_dir": run_s,
+        # Intentionally omit listen picker / applied dir — the old close path
+        # only cleared when those matched, so run_dir alone reopened the tab.
+    }
+
+    assert is_loaded_mix_tab(session, run_s)
+    assert mix_tab_ids_equal(run_s, run_s)
+
+    neighbor = close_open_mix_tab(session, run_s)
+    assert neighbor is None
+    assert run_s not in session[OPEN_MIX_TABS_KEY]
+
+    # Mimic the fixed page handler: clear loaded state when closing that mix.
+    assert is_loaded_mix_tab(session, run_s)
+    for key in (
+        LISTEN_PICKER_KEY,
+        "isolate_listen_applied_dir",
+        "isolate_run_dir",
+        "isolate_viewing_run_dir",
+        "isolate_artifacts",
+    ):
+        session.pop(key, None)
+    assert not is_loaded_mix_tab(session, run_s)
+
+    loaded = session.get("isolate_run_dir") or session.get("isolate_listen_applied_dir")
+    if loaded:
+        add_open_mix_tab(session, loaded)
+    tabs = open_mix_tabs_for_session(session, library_dirs=[run_s])
+    assert tabs == []
+    assert run_s not in session.get(OPEN_MIX_TABS_KEY, [])
+
+
+def test_closing_last_mix_without_clearing_loaded_would_reopen(tmp_path: Path):
+    """Document the failure mode: leaving isolate_run_dir set reopens the tab."""
+    from ui.isolate_state import (
+        OPEN_MIX_TABS_KEY,
+        add_open_mix_tab,
+        close_open_mix_tab,
+        open_mix_tabs_for_session,
+    )
+
+    run = tmp_path / "only_mix"
+    run.mkdir()
+    run_s = str(run)
+    session: dict = {
+        OPEN_MIX_TABS_KEY: [run_s],
+        "isolate_run_dir": run_s,
+    }
+    close_open_mix_tab(session, run_s)
+    assert session[OPEN_MIX_TABS_KEY] == []
+
+    loaded = session.get("isolate_run_dir") or session.get("isolate_listen_applied_dir")
+    if loaded:
+        add_open_mix_tab(session, loaded)
+    tabs = open_mix_tabs_for_session(session, library_dirs=[run_s])
+    assert tabs == [run_s]
+
+
 def test_open_mix_tabs_add_close_and_cap(tmp_path: Path):
     from ui.isolate_state import (
         OPEN_MIX_TABS_KEY,

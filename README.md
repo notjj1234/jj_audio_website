@@ -34,6 +34,8 @@ pip install -e ".[demucs,desktop,roformer,separator]"
 
 ### Windows CPU
 
+Small installer. CPU torch only — no NVIDIA acceleration. Start Menu: **Audio Tools (CPU)**.
+
 ```powershell
 cd <repo>
 py -3.11 -m venv .venv-desktop-cpu          # first time only
@@ -49,7 +51,9 @@ powershell -ExecutionPolicy Bypass -File packaging/make_windows_installer.ps1 -F
 ```
 → `%USERPROFILE%\Downloads\AudioTools-0.1.3-windows-x64-cpu-setup.exe`
 
-### Windows GPU (CUDA)
+### Windows combined (CPU + NVIDIA GPU)
+
+One large installer. Ships **CUDA PyTorch** and offers **CPU or NVIDIA GPU** in the UI. Start Menu: **Audio Tools**. Prefer this for a single tester download.
 
 ```powershell
 cd <repo>
@@ -59,7 +63,22 @@ python -m pip install --upgrade pip
 python -m pip install --upgrade "torch>=2.2,<2.14" "torchaudio>=2.2,<2.12" --index-url https://download.pytorch.org/whl/cu126
 pip install "bs-roformer-infer>=0.1.5"
 pip install -e ".[demucs,desktop,separator]"
-.\scripts\dev.ps1 mixer-build
+.\scripts\dev.ps1 mixer-build                   # skip if frontend/build is committed
+python packaging/bundle_ffmpeg.py
+$env:AUDIO_TOOLS_EDITION = "both"
+pyinstaller packaging/audio_tools.spec --noconfirm --clean
+powershell -ExecutionPolicy Bypass -File packaging/make_windows_installer.ps1 -Flavor both -CopyToDownloads
+```
+→ `%USERPROFILE%\Downloads\AudioTools-0.1.3-windows-x64-both-setup.exe`
+
+### Windows GPU (CUDA) only
+
+Same large CUDA torch freeze as combined, but the UI targets **NVIDIA GPU** (Start Menu: **Audio Tools (NVIDIA)**). Needs an NVIDIA GPU + drivers for isolation.
+
+```powershell
+cd <repo>
+# Reuse .venv-desktop from the combined section (CUDA torch already installed)
+.\.venv-desktop\Scripts\Activate.ps1
 python packaging/bundle_ffmpeg.py
 $env:AUDIO_TOOLS_EDITION = "cuda"
 pyinstaller packaging/audio_tools.spec --noconfirm --clean

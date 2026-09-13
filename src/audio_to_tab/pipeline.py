@@ -26,8 +26,7 @@ from audio_to_tab.transcribe import transcribe_audio
 logger = logging.getLogger(__name__)
 
 YOUTUBE_DISCLAIMER = (
-    "YouTube audio download may violate YouTube Terms of Service. "
-    "You are responsible for ensuring you have rights to transcribe the material."
+    "FYI: public YouTube links only. Use audio you’re allowed to save."
 )
 
 DEMUCS_INSTALL_HINT = (

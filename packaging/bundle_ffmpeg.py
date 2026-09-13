@@ -15,14 +15,13 @@ from pathlib import Path
 OUT_ROOT = Path(__file__).resolve().parent / "ffmpeg"
 
 # Prefer well-known static/shared builds suitable for torchcodec (shared libs).
-# Pinned to BtbN autobuild-2026-08-29-13-12 (master N-126313-g1ae4048218) for
-# reproducibility; bump all three BtbN URLs to one dated autobuild when updating.
+# Pinned to BtbN ``latest`` win64/linux shared GPL assets (stable download URLs).
 FFMPEG_SOURCES = {
     # Windows x86_64 — BtbN shared GPL build (includes shared DLLs)
     ("Windows", "AMD64"): {
         "url": (
             "https://github.com/BtbN/FFmpeg-Builds/releases/download/"
-            "autobuild-2026-08-29-13-12/ffmpeg-N-126313-g1ae4048218-win64-gpl-shared.zip"
+            "latest/ffmpeg-master-latest-win64-gpl-shared.zip"
         ),
         "kind": "zip",
         "bin_names": ("ffmpeg.exe",),
@@ -47,7 +46,7 @@ FFMPEG_SOURCES = {
     ("Linux", "x86_64"): {
         "url": (
             "https://github.com/BtbN/FFmpeg-Builds/releases/download/"
-            "autobuild-2026-08-29-13-12/ffmpeg-N-126313-g1ae4048218-linux64-gpl-shared.tar.xz"
+            "latest/ffmpeg-master-latest-linux64-gpl-shared.tar.xz"
         ),
         "kind": "tar",
         "bin_names": ("ffmpeg",),
@@ -55,7 +54,7 @@ FFMPEG_SOURCES = {
     ("Linux", "aarch64"): {
         "url": (
             "https://github.com/BtbN/FFmpeg-Builds/releases/download/"
-            "autobuild-2026-08-29-13-12/ffmpeg-N-126313-g1ae4048218-linuxarm64-gpl-shared.tar.xz"
+            "latest/ffmpeg-master-latest-linuxarm64-gpl-shared.tar.xz"
         ),
         "kind": "tar",
         "bin_names": ("ffmpeg",),
