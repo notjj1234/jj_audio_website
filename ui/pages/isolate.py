@@ -89,6 +89,8 @@ from ui.isolate_state import (
     ISOLATE_EXPORT_DIR_KEY,
     ISOLATE_UI_STATE_FILENAME,
     ISOLATE_USER_ID_FILENAME,
+    OPEN_MIX_TABS_KEY,
+    ISOLATE_SKIP_REHYDRATE_KEY,
     LISTEN_PICKER_KEY,
     LISTEN_PICKER_NEXT_KEY,
     add_open_mix_tab,
@@ -222,6 +224,7 @@ from audio_to_tab.hardware import (  # noqa: E402
     desktop_system_summary,
     ensure_cuda_available,
     get_desktop_probe,
+    lite_auto_choice,
     lite_auto_speed_id,
     lite_detected_caption,
     lite_device_choice_ids,
@@ -1433,7 +1436,10 @@ def _render_outcome_picker(
             **persist,
         )
     else:
-        speed_id = lite_auto_speed_id(probe)
+        # Live free-RAM / swap headroom can force CPU + Faster even when MPS/CUDA
+        # is eligible (musicians often run a DAW alongside).
+        lite_auto = lite_auto_choice(probe)
+        speed_id = str(lite_auto["speed"])
     speed = resolve_speed_preset(speed_id, probe, model=resolved["model"])
     if pro:
         if speed["help"]:
@@ -1470,18 +1476,29 @@ def _render_outcome_picker(
         )
         st.caption(lite_detected_caption(probe))
         run_choices = lite_device_choice_ids(probe)
+        using_reason = lite_auto.get("reason")
         if run_choices:
-            if st.session_state.get("isolate_lite_run_on") not in run_choices:
+            if not st.session_state.get("isolate_lite_run_on_manual"):
+                auto_dev = str(lite_auto["device"])
+                st.session_state["isolate_lite_run_on"] = (
+                    auto_dev if auto_dev in run_choices else run_choices[-1]
+                )
+            elif st.session_state.get("isolate_lite_run_on") not in run_choices:
                 default_run = (
                     speed["device"] if speed["device"] in run_choices else run_choices[-1]
                 )
                 st.session_state["isolate_lite_run_on"] = default_run
+
+            def _mark_lite_run_on_manual() -> None:
+                st.session_state["isolate_lite_run_on_manual"] = True
+
             run_on = st.radio(
                 "Run on",
                 options=run_choices,
                 format_func=lite_device_plain_label,
                 key="isolate_lite_run_on",
                 horizontal=True,
+                on_change=_mark_lite_run_on_manual,
                 help=(
                     "CPU is often faster when free memory is tight (swap thrash). "
                     "GPU is usually quicker when RAM is free."
@@ -1496,17 +1513,36 @@ def _render_outcome_picker(
             else:
                 st.session_state["isolate_quality"] = speed["quality"]
                 using_speed = str(speed["id"])
+            # Only show the low-memory note when auto (not a manual Run-on pick)
+            # chose CPU for headroom.
+            caption_reason = (
+                using_reason
+                if (
+                    not st.session_state.get("isolate_lite_run_on_manual")
+                    and using_reason == "low_free_memory"
+                    and run_on == "cpu"
+                )
+                else None
+            )
             st.caption(
                 lite_using_caption(
                     probe,
                     guitar_engine=str(guitar_engine),
                     device=str(run_on),
                     speed=using_speed,
+                    reason=caption_reason,
                 )
             )
         else:
-            st.caption(lite_using_caption(probe, guitar_engine=str(guitar_engine)))
-
+            st.caption(
+                lite_using_caption(
+                    probe,
+                    guitar_engine=str(guitar_engine),
+                    device=str(lite_auto["device"]),
+                    speed=str(lite_auto["speed"]),
+                    reason=using_reason,
+                )
+            )
     return list(option_ids), resolved, preset_error
 
 
@@ -2269,8 +2305,13 @@ def _render_separation_controls() -> dict:
     custom_stems = list(resolved.get("stems") or [])
 
     speed_id = st.session_state.get("isolate_speed_preset")
+    lite_auto = lite_auto_choice(probe) if not pro else None
     if not pro or speed_id not in SPEED_PRESETS:
-        speed_id = lite_auto_speed_id(probe)
+        speed_id = (
+            str(lite_auto["speed"])
+            if lite_auto is not None
+            else lite_auto_speed_id(probe)
+        )
     speed = resolve_speed_preset(speed_id, probe, model=resolved["model"])
     device_options = desktop_device_options(probe)
     allowed_devices = list(device_options)
@@ -2283,6 +2324,18 @@ def _render_separation_controls() -> dict:
 
     quality = st.session_state.get("isolate_quality", speed["quality"])
     device = st.session_state.get("isolate_device", speed["device"])
+    if lite_auto is not None and not st.session_state.get("isolate_lite_run_on_manual"):
+        # Re-probe at form build / Separate so the job matches current headroom.
+        # Do not write isolate_lite_run_on here — the Run-on radio already owns
+        # that key (set before the widget in the outcome picker).
+        device = str(lite_auto["device"])
+        st.session_state["isolate_device"] = device
+        if device == "cpu":
+            quality = "fast"
+            st.session_state["isolate_quality"] = "fast"
+        else:
+            quality = speed["quality"]
+            st.session_state["isolate_quality"] = quality
     output_name = st.session_state.get("isolate_output_name", default_name or "")
     guitar_checkpoint = None
     if st.session_state.get("isolate_guitar_ft") and resolved["model"] == "htdemucs_6s":
@@ -2362,6 +2415,7 @@ def _rehydrate_artifacts_from_disk(browser_id: str | None) -> None:
 
 def _refresh_isolate_from_disk(browser_id: str | None) -> None:
     ensure_worker_started()
+    st.session_state.pop(ISOLATE_SKIP_REHYDRATE_KEY, None)
     _rehydrate_artifacts_from_disk(browser_id)
     _persist_isolate_ui_state()
     st.rerun()
@@ -2369,6 +2423,7 @@ def _refresh_isolate_from_disk(browser_id: str | None) -> None:
 
 def _open_mixer_workspace() -> None:
     """Request the mix shell on the next full run (Moises tab strip)."""
+    st.session_state.pop(ISOLATE_SKIP_REHYDRATE_KEY, None)
     open_mix_shell(st.session_state)
 
 
@@ -3079,6 +3134,20 @@ def _resolve_audio_for_job(choice: dict) -> tuple[Path | None, str | None]:
 
 
 def _enqueue_confirmed_job(choice: dict, audio_path: Path) -> None:
+    if not is_pro_mode(st.session_state) and not st.session_state.get(
+        "isolate_lite_run_on_manual"
+    ):
+        # Final headroom check at enqueue (not a background timer).
+        lite_auto = lite_auto_choice(get_desktop_probe())
+        choice = dict(choice)
+        choice["device"] = str(lite_auto["device"])
+        if choice["device"] == "cpu":
+            choice["quality"] = "fast"
+        # Update job-facing session keys only — isolate_lite_run_on is a radio
+        # widget key and must not be written after the widget is instantiated.
+        st.session_state["isolate_device"] = choice["device"]
+        st.session_state["isolate_quality"] = choice["quality"]
+
     start_sec = float(choice.get("start_sec") or 0.0)
     max_duration_sec = choice.get("max_duration_sec")
     region_label = choice.get("region_label")
@@ -3274,6 +3343,7 @@ def _apply_library_row(row: dict, *, viewing_mode: str, reopen_name: bool) -> bo
         viewing_mode=viewing_mode,
     ):
         return False
+    st.session_state.pop(ISOLATE_SKIP_REHYDRATE_KEY, None)
     run_dir = status.get("run_dir")
     if run_dir:
         st.session_state["isolate_listen_applied_dir"] = str(run_dir)
@@ -3302,8 +3372,13 @@ def _close_mix_tab(rows: list[dict], run_dir: str) -> None:
         elif neighbor:
             _focus_mix_tab(rows, neighbor)
         else:
-            _clear_loaded_mixer()
-            open_home_shell(st.session_state)
+            _dismiss_last_mix_tab()
+    elif neighbor is None and not any(
+        not is_new_draft_tab(t)
+        for t in (st.session_state.get(OPEN_MIX_TABS_KEY) or [])
+    ):
+        # Last mix tab closed even if pointer match failed — still detach.
+        _dismiss_last_mix_tab()
     _persist_isolate_ui_state()
     _rerun_scroll_top()
 
@@ -3322,7 +3397,12 @@ def _library_rows_available(browser_id: str | None) -> list[dict]:
     return usable
 
 
-def _clear_loaded_mixer() -> None:
+def _clear_loaded_mixer(*, dismiss: bool = False) -> None:
+    """Drop in-session mixer pointers.
+
+    ``dismiss=True`` means the user closed the last mix tab — skip auto-rehydrate
+    so the next paint does not revive that tab from the library.
+    """
     for key in (
         "isolate_artifacts",
         "isolate_base_name",
@@ -3348,6 +3428,16 @@ def _clear_loaded_mixer() -> None:
         "isolate_flash",
     ):
         st.session_state.pop(key, None)
+    if dismiss:
+        st.session_state[ISOLATE_SKIP_REHYDRATE_KEY] = True
+    else:
+        st.session_state.pop(ISOLATE_SKIP_REHYDRATE_KEY, None)
+
+
+def _dismiss_last_mix_tab() -> None:
+    """Close the last mix without letting rehydrate reopen it."""
+    _clear_loaded_mixer(dismiss=True)
+    open_home_shell(st.session_state)
 
 
 def _rename_listen_run() -> None:
@@ -3462,8 +3552,8 @@ def _render_listening_switcher(browser_id: str | None, rows: list[dict] | None =
             st.session_state.pop(LISTEN_PICKER_KEY, None)
             st.session_state.pop(LISTEN_PICKER_NEXT_KEY, None)
             if was_active:
-                _clear_loaded_mixer()
                 if neighbor:
+                    _clear_loaded_mixer()
                     row = next((r for r in rows if str(r.get("run_dir")) == neighbor), None)
                     if row is not None:
                         _apply_library_row(
@@ -3472,9 +3562,9 @@ def _render_listening_switcher(browser_id: str | None, rows: list[dict] | None =
                             reopen_name=True,
                         )
                     else:
-                        open_home_shell(st.session_state)
+                        _dismiss_last_mix_tab()
                 else:
-                    open_home_shell(st.session_state)
+                    _dismiss_last_mix_tab()
             _persist_isolate_ui_state()
             _rerun_scroll_top()
         else:
@@ -3615,8 +3705,12 @@ def _render_moises_tab_strip(browser_id: str | None) -> None:
                 _focus_mix_tab(rows, neighbor)
                 open_mix_shell(st.session_state)
             else:
-                _clear_loaded_mixer()
-                open_home_shell(st.session_state)
+                _dismiss_last_mix_tab()
+        elif neighbor is None and not any(
+            not is_new_draft_tab(t)
+            for t in (st.session_state.get(OPEN_MIX_TABS_KEY) or [])
+        ):
+            _dismiss_last_mix_tab()
         _persist_isolate_ui_state()
         _rerun_scroll_top()
 

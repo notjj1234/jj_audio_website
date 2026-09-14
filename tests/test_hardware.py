@@ -7,8 +7,11 @@ import pytest
 from audio_to_tab.hardware import (
     CUDA_UNAVAILABLE_MESSAGE,
     MAC_ACCEL_NOTE,
+    MEMORY_TIGHT_FREE_GB,
+    MEMORY_TIGHT_SWAP_GB,
     NVIDIA_ONLY_DISCLAIMER,
     HostProbe,
+    MemoryPressure,
     apple_chip_label,
     desktop_device_options,
     desktop_recommend,
@@ -17,11 +20,14 @@ from audio_to_tab.hardware import (
     ensure_cuda_available,
     get_desktop_probe_without_torch,
     lite_accelerator_available,
+    lite_auto_choice,
+    lite_auto_device,
     lite_auto_speed_id,
     lite_detected_caption,
     lite_device_choice_ids,
     lite_device_plain_label,
     lite_using_caption,
+    memory_pressure_is_tight,
     recommended_cpu_threads,
     apply_recommended_cpu_threads,
     cpu_thread_env,
@@ -298,6 +304,102 @@ def test_lite_auto_speed_matches_desktop_recommend():
     assert lite_auto_speed_id(CUDA_HIGH, platform="win32") == "balanced"
 
 
+def test_memory_pressure_is_tight_thresholds():
+    assert memory_pressure_is_tight(None) is False
+    assert memory_pressure_is_tight(MemoryPressure(free_gb=None, total_gb=16.0)) is False
+    assert memory_pressure_is_tight(
+        MemoryPressure(free_gb=MEMORY_TIGHT_FREE_GB, total_gb=16.0)
+    ) is False
+    assert memory_pressure_is_tight(
+        MemoryPressure(free_gb=MEMORY_TIGHT_FREE_GB - 0.1, total_gb=16.0)
+    ) is True
+    # Fraction gate: 5 GB free on 32 GB is above absolute 4 but under 20%.
+    assert memory_pressure_is_tight(MemoryPressure(free_gb=5.0, total_gb=32.0)) is True
+    assert memory_pressure_is_tight(MemoryPressure(free_gb=8.0, total_gb=32.0)) is False
+    assert memory_pressure_is_tight(
+        MemoryPressure(
+            free_gb=10.0,
+            total_gb=32.0,
+            swap_used_gb=MEMORY_TIGHT_SWAP_GB,
+        )
+    ) is True
+    assert memory_pressure_is_tight(
+        MemoryPressure(free_gb=10.0, total_gb=32.0, swap_used_gb=1.0)
+    ) is False
+
+
+def test_lite_auto_choice_prefers_cpu_under_memory_pressure():
+    healthy = MemoryPressure(free_gb=10.0, total_gb=16.0, swap_used_gb=0.0)
+    tight = MemoryPressure(free_gb=2.5, total_gb=16.0, swap_used_gb=0.5)
+
+    mps_ok = lite_auto_choice(MPS_MAC, platform="darwin", pressure=healthy)
+    assert mps_ok["device"] == "mps"
+    assert mps_ok["speed"] == "balanced"
+    assert mps_ok["reason"] is None
+
+    mps_tight = lite_auto_choice(MPS_MAC, platform="darwin", pressure=tight)
+    assert mps_tight["device"] == "cpu"
+    assert mps_tight["speed"] == "faster"
+    assert mps_tight["reason"] == "low_free_memory"
+    assert lite_auto_device(MPS_MAC, platform="darwin", pressure=tight) == "cpu"
+
+    cuda_ok = lite_auto_choice(CUDA_HIGH, platform="win32", pressure=healthy)
+    assert cuda_ok["device"] == "cuda"
+    assert cuda_ok["speed"] == "balanced"
+
+    cuda_tight = lite_auto_choice(CUDA_HIGH, platform="win32", pressure=tight)
+    assert cuda_tight["device"] == "cpu"
+    assert cuda_tight["speed"] == "faster"
+    assert cuda_tight["reason"] == "low_free_memory"
+
+    # Probe failure / unknown pressure must not override hardware recommend.
+    unknown = lite_auto_choice(
+        MPS_MAC, platform="darwin", pressure=MemoryPressure(free_gb=None)
+    )
+    assert unknown["device"] == "mps"
+    assert unknown["reason"] is None
+
+    # Already-CPU hosts stay Faster with no low-memory reason.
+    eight = HostProbe(cuda=False, mps=True, ram_gb=8.0)
+    cpu_host = lite_auto_choice(eight, platform="darwin", pressure=tight)
+    assert cpu_host["device"] == "cpu"
+    assert cpu_host["speed"] == "faster"
+    assert cpu_host["reason"] is None
+
+
+def test_probe_memory_pressure_darwin_parses_vm_stat(monkeypatch):
+    from audio_to_tab import hardware as hw
+
+    monkeypatch.setattr(hw.sys, "platform", "darwin")
+
+    def fake_check_output(cmd, text=True):
+        joined = " ".join(cmd)
+        if "hw.memsize" in joined:
+            return str(16 * 1024**3)
+        if "vm.swapusage" in joined:
+            return "total = 2048.00M  used = 512.00M  free = 1536.00M  (encrypted)"
+        if cmd[0] == "vm_stat":
+            return (
+                "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+                "Pages free:                               100000.\n"
+                "Pages active:                             200000.\n"
+                "Pages inactive:                           150000.\n"
+                "Pages speculative:                         10000.\n"
+                "Pages wired down:                         120000.\n"
+                "Pages purgeable:                           20000.\n"
+            )
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(hw.subprocess, "check_output", fake_check_output)
+    pressure = hw.probe_memory_pressure()
+    assert pressure is not None
+    assert pressure.total_gb == 16.0
+    assert pressure.swap_used_gb == pytest.approx(0.5, abs=0.01)
+    # (100k+10k+20k+150k) * 16384 / 1024**3
+    assert pressure.free_gb == pytest.approx(4.27, abs=0.05)
+    assert memory_pressure_is_tight(pressure) is False
+
+
 def test_lite_detected_and_using_captions_plain_language():
     eight = HostProbe(cuda=False, mps=True, ram_gb=8.0)
     detected = lite_detected_caption(eight, platform="darwin")
@@ -358,6 +460,18 @@ def test_lite_detected_and_using_captions_plain_language():
     assert "Faster" in using_override
     assert "CPU" in using_override
     assert "Apple GPU" not in using_override
+    assert "low free memory" not in using_override
+
+    using_pressure = lite_using_caption(
+        MPS_MAC,
+        guitar_engine="guitar_roformer",
+        platform="darwin",
+        device="cpu",
+        speed="faster",
+        reason="low_free_memory",
+    )
+    assert "low free memory" in using_pressure
+    assert "CPU" in using_pressure
 
 
 def test_apple_chip_label_only_keeps_apple_brands():

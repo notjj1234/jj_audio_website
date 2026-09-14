@@ -7,6 +7,7 @@ does not drift.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -24,6 +25,11 @@ LOW_RAM_GB = 8.0
 # Torch MPS needs working room for the ~700 MB fp32 BS-RoFormer-SW weights plus
 # activations; 8 GB unified-memory Macs (mostly base M1/M2/M3/M4) stay on CPU.
 MPS_MIN_RAM_GB = 12.0
+# Live headroom gates for Lite auto: prefer CPU when free/available RAM is low
+# or swap is already heavy (unified-memory Macs thrash under DAW + tabs + MPS).
+MEMORY_TIGHT_FREE_GB = 4.0
+MEMORY_TIGHT_FREE_FRAC = 0.20
+MEMORY_TIGHT_SWAP_GB = 2.0
 
 NVIDIA_ONLY_DISCLAIMER = (
     "GPU acceleration is NVIDIA CUDA only (not AMD, Intel, or Apple GPUs). "
@@ -54,6 +60,19 @@ class HostProbe:
     ram_gb: float | None
     single_flight: bool = False
     cpu_brand: str | None = None
+
+
+@dataclass(frozen=True)
+class MemoryPressure:
+    """Live memory headroom (not installed capacity).
+
+    ``free_gb`` is approximate available/reclaimable physical RAM. ``swap_used_gb``
+    is set on macOS when measurable; None means unknown (do not treat as tight).
+    """
+
+    free_gb: float | None
+    total_gb: float | None = None
+    swap_used_gb: float | None = None
 
 
 def probe_torch() -> tuple[bool, bool]:
@@ -120,6 +139,170 @@ def probe_ram_gb() -> float | None:
             pass
 
     return None
+
+
+def _darwin_swap_used_gb() -> float | None:
+    """Parse ``sysctl vm.swapusage`` used field when present."""
+    try:
+        out = subprocess.check_output(["sysctl", "-n", "vm.swapusage"], text=True)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # Example: "total = 1024.00M  used = 234.50M  free = 789.50M  ..."
+    used_m: float | None = None
+    tokens = out.replace("=", " ").split()
+    for i, tok in enumerate(tokens):
+        if tok.lower() != "used" or i + 1 >= len(tokens):
+            continue
+        raw = tokens[i + 1].upper().rstrip("B")
+        try:
+            if raw.endswith("G"):
+                used_m = float(raw[:-1]) * 1024.0
+            elif raw.endswith("M"):
+                used_m = float(raw[:-1])
+            elif raw.endswith("K"):
+                used_m = float(raw[:-1]) / 1024.0
+            else:
+                used_m = float(raw) / (1024.0 * 1024.0)
+        except ValueError:
+            used_m = None
+        break
+    if used_m is None:
+        return None
+    return round(used_m / 1024.0, 2)
+
+
+def _darwin_available_ram_gb() -> tuple[float | None, float | None]:
+    """Return (available_gb, total_gb) from vm_stat + hw.memsize."""
+    total = None
+    try:
+        out = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True).strip()
+        total = int(out) / (1024**3)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        total = None
+    try:
+        vm = subprocess.check_output(["vm_stat"], text=True)
+    except (OSError, subprocess.SubprocessError):
+        return None, total
+    page_size = 4096
+    counts: dict[str, int] = {}
+    for line in vm.splitlines():
+        lower = line.lower()
+        if "page size of" in lower:
+            bits = lower.replace(".", " ").split()
+            for i, bit in enumerate(bits):
+                if bit == "of" and i + 1 < len(bits):
+                    with contextlib.suppress(ValueError):
+                        page_size = int(bits[i + 1])
+            continue
+        if ":" not in line:
+            continue
+        key, _, rest = line.partition(":")
+        num = rest.strip().rstrip(".").replace(",", "")
+        try:
+            counts[key.strip().lower()] = int(num)
+        except ValueError:
+            continue
+    # Approximate pressure-facing headroom: free + speculative + purgeable + inactive.
+    pages = (
+        counts.get("pages free", 0)
+        + counts.get("pages speculative", 0)
+        + counts.get("pages purgeable", 0)
+        + counts.get("pages inactive", 0)
+    )
+    if pages <= 0:
+        return None, total
+    free_gb = (pages * page_size) / (1024**3)
+    return round(free_gb, 2), (round(total, 1) if total is not None else None)
+
+
+def _win_available_ram_gb() -> tuple[float | None, float | None]:
+    """Return (avail_phys_gb, total_phys_gb) via GlobalMemoryStatusEx."""
+    try:
+        import ctypes
+
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        stat = MEMORYSTATUSEX()
+        stat.dwLength = ctypes.sizeof(stat)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+            return None, None
+        total = round(stat.ullTotalPhys / (1024**3), 1)
+        free = round(stat.ullAvailPhys / (1024**3), 2)
+        return free, total
+    except (OSError, AttributeError, ValueError):
+        return None, None
+
+
+def probe_memory_pressure() -> MemoryPressure | None:
+    """Live free/available RAM (+ macOS swap used). None if the host cannot be measured."""
+    try:
+        if sys.platform == "darwin":
+            free_gb, total_gb = _darwin_available_ram_gb()
+            if free_gb is None and total_gb is None:
+                return None
+            return MemoryPressure(
+                free_gb=free_gb,
+                total_gb=total_gb,
+                swap_used_gb=_darwin_swap_used_gb(),
+            )
+        if sys.platform == "win32":
+            free_gb, total_gb = _win_available_ram_gb()
+            if free_gb is None and total_gb is None:
+                return None
+            return MemoryPressure(free_gb=free_gb, total_gb=total_gb, swap_used_gb=None)
+        # Best-effort POSIX: MemAvailable from /proc/meminfo.
+        total_kb = None
+        avail_kb = None
+        try:
+            with open("/proc/meminfo", encoding="utf-8") as fh:
+                for line in fh:
+                    if line.startswith("MemTotal:"):
+                        total_kb = int(line.split()[1])
+                    elif line.startswith("MemAvailable:"):
+                        avail_kb = int(line.split()[1])
+        except (OSError, ValueError):
+            return None
+        if avail_kb is None and total_kb is None:
+            return None
+        return MemoryPressure(
+            free_gb=round(avail_kb / (1024**2), 2) if avail_kb is not None else None,
+            total_gb=round(total_kb / (1024**2), 1) if total_kb is not None else None,
+        )
+    except Exception:
+        return None
+
+
+def memory_pressure_is_tight(pressure: MemoryPressure | None) -> bool:
+    """True when live headroom suggests preferring CPU over GPU for Lite auto.
+
+    Unknown pressure (None / missing free) does **not** force CPU — fall back to
+    installed-hardware recommend.
+    """
+    if pressure is None or pressure.free_gb is None:
+        return False
+    if pressure.free_gb < MEMORY_TIGHT_FREE_GB:
+        return True
+    if (
+        pressure.total_gb is not None
+        and pressure.total_gb > 0
+        and (pressure.free_gb / pressure.total_gb) < MEMORY_TIGHT_FREE_FRAC
+    ):
+        return True
+    return (
+        pressure.swap_used_gb is not None
+        and pressure.swap_used_gb >= MEMORY_TIGHT_SWAP_GB
+    )
 
 
 def probe_cpu_brand() -> str | None:
@@ -455,8 +638,48 @@ def lite_accelerator_available(probe: HostProbe, *, platform: str | None = None)
 
 
 def lite_auto_speed_id(probe: HostProbe, *, platform: str | None = None) -> str:
-    """Speed preset id Lite should apply for this host (ignores Pro persistence)."""
+    """Speed preset id from installed hardware only (no live memory probe).
+
+    Prefer :func:`lite_auto_choice` when Lite should also respect free RAM.
+    """
     return str(desktop_recommend(probe, platform=platform)["speed"])
+
+
+def lite_auto_choice(
+    probe: HostProbe,
+    *,
+    platform: str | None = None,
+    pressure: MemoryPressure | None = None,
+) -> dict[str, Any]:
+    """Lite device + speed auto, including live memory headroom.
+
+    Starts from :func:`desktop_recommend`. When that would pick MPS/CUDA but
+    ``pressure`` is tight, returns CPU + Faster with reason ``low_free_memory``.
+
+    If ``pressure`` is omitted, probes the host once. Probe failure / unknown
+    free RAM does not override the hardware recommend.
+    """
+    if pressure is None:
+        pressure = probe_memory_pressure()
+    rec = desktop_recommend(probe, platform=platform)
+    device = str(rec["device"])
+    speed = str(rec["speed"])
+    reason: str | None = None
+    if device in {"mps", "cuda"} and memory_pressure_is_tight(pressure):
+        device = "cpu"
+        speed = "faster"
+        reason = "low_free_memory"
+    return {"device": device, "speed": speed, "reason": reason}
+
+
+def lite_auto_device(
+    probe: HostProbe,
+    *,
+    platform: str | None = None,
+    pressure: MemoryPressure | None = None,
+) -> str:
+    """Device id Lite should auto-pick (CPU under memory pressure)."""
+    return str(lite_auto_choice(probe, platform=platform, pressure=pressure)["device"])
 
 
 def lite_device_plain_label(device: str) -> str:
@@ -510,11 +733,13 @@ def lite_using_caption(
     platform: str | None = None,
     device: str | None = None,
     speed: str | None = None,
+    reason: str | None = None,
 ) -> str:
     """One-line Lite choice (Using: Faster on CPU · standard guitar model).
 
     Optional ``device`` / ``speed`` reflect a user Run-on pick; otherwise the
-    auto recommendation for this host is used.
+    auto recommendation for this host is used. ``reason="low_free_memory"``
+    appends a plain-language note when auto chose CPU for headroom.
     """
     rec = desktop_recommend(probe, platform=platform)
     speed_id = speed if speed is not None else str(rec["speed"])
@@ -525,7 +750,10 @@ def lite_using_caption(
     where = lite_device_plain_label(device_id)
     strong = guitar_engine in {"guitar_roformer", "guitar_roformer_refine"}
     guitar_bit = "strong guitar model" if strong else "standard guitar model"
-    return f"Using: {speed_label} on {where} · {guitar_bit}"
+    line = f"Using: {speed_label} on {where} · {guitar_bit}"
+    if reason == "low_free_memory" and device_id == "cpu":
+        return f"{line} (low free memory)"
+    return line
 
 
 def ensure_cuda_available(device: str, probe: HostProbe | None = None) -> None:

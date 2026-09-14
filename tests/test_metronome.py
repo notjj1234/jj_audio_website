@@ -15,6 +15,7 @@ from audio_to_tab.metronome import (
     attach_metronome_artifact,
     build_click_times,
     coerce_metronome_render_options,
+    detect_beats_per_measure,
     gate_unreliable_intro_beats,
     generate_metronome_stem,
     load_metronome_diagnostics,
@@ -139,6 +140,24 @@ def test_build_click_times_fills_lead_in_and_keeps_body():
         assert any(abs(x - t) < 1e-9 for x in times)
 
 
+def test_build_click_times_fills_internal_gap():
+    """A drum-less middle section must still get clicks on the beat grid."""
+    period = 0.5
+    detected = np.concatenate(
+        [
+            np.arange(0.0, 4.0 + 1e-9, period),
+            np.arange(10.0, 14.0 + 1e-9, period),
+        ]
+    )
+    times = build_click_times(detected, duration_sec=14.5, bpm=120.0)
+    for expected in (4.5, 5.0, 6.0, 7.5, 9.0, 9.5):
+        assert any(abs(float(t) - expected) < 1e-6 for t in times)
+    assert float(np.max(np.diff(times))) < 1.5 * period
+    # Detected beats stay exactly where the performance put them.
+    for t in detected:
+        assert any(abs(float(x) - float(t)) < 1e-9 for x in times)
+
+
 def test_build_click_times_no_mid_song_drift():
     """Tempo change mid-file: hybrid keeps late detected beats; rigid grid would miss."""
     early = np.arange(0.0, 10.0, 0.5)
@@ -244,6 +263,16 @@ def test_pick_metronome_source_falls_back_to_original(tmp_path: Path):
     assert pick_metronome_source({}) is None
 
 
+def test_pick_metronome_source_prefers_full_mix_over_drums(tmp_path: Path):
+    """Drums go quiet in verses; the mix keeps rhythm in every section."""
+    drums = tmp_path / "drums.wav"
+    _write_pulse_train(drums)
+    mix = tmp_path / "song.wav"
+    mix.write_bytes(b"x")
+    assert pick_metronome_source({"drums": drums}, fallback=mix) == (mix, "source")
+    assert pick_metronome_source({"drums": drums}) == (drums, "drums")
+
+
 def test_gate_unreliable_intro_beats_drops_quiet_irregular_onsets():
     sr = 22050
     duration = 6.0
@@ -283,6 +312,62 @@ def test_gate_keeps_loud_pulse_train_from_start():
     gated, body_start = gate_unreliable_intro_beats(detected, mono, sr, period)
     assert body_start == pytest.approx(0.0, abs=0.01)
     assert gated.size == detected.size
+
+
+def _accented_beats(
+    accent_every: int,
+    *,
+    beats: int = 24,
+    period: float = 0.5,
+    sr: int = 22050,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Beat times plus mono audio where every ``accent_every``-th beat is louder."""
+    times = np.arange(beats, dtype=np.float64) * period
+    mono = np.zeros(int(sr * (beats + 1) * period), dtype=np.float32)
+    click = int(0.02 * sr)
+    for i, t in enumerate(times):
+        start = int(round(float(t) * sr))
+        mono[start : start + click] = 0.9 if i % accent_every == 0 else 0.35
+    return times, mono, sr
+
+
+def test_detect_beats_per_measure_reads_accent_pattern():
+    three, mono3, sr = _accented_beats(3)
+    assert detect_beats_per_measure(three, mono3, sr, 120.0) == 3
+
+    four, mono4, _ = _accented_beats(4)
+    assert detect_beats_per_measure(four, mono4, sr, 120.0) == 4
+
+    # No accents at all → keep the 4/4 default instead of guessing.
+    flat, mono_flat, _ = _accented_beats(1)
+    assert detect_beats_per_measure(flat, mono_flat, sr, 120.0) == 4
+
+    # Too few beats to see a measure → default.
+    short = np.arange(4, dtype=np.float64) * 0.5
+    assert detect_beats_per_measure(short, mono3, sr, 120.0) == 4
+
+
+def test_generate_metronome_detects_three_four_and_honors_override(tmp_path: Path):
+    sr = 22050
+    period = 0.5
+    beats = 36
+    duration = (beats + 1) * period
+    times = np.arange(beats, dtype=np.float64) * period
+    y = np.zeros(int(sr * duration), dtype=np.float32)
+    click = int(0.02 * sr)
+    for i, t in enumerate(times):
+        start = int(round(float(t) * sr))
+        y[start : start + click] = 0.9 if i % 3 == 0 else 0.35
+    src = tmp_path / "waltz.wav"
+    sf.write(str(src), np.column_stack([y, y]), sr, subtype="PCM_16")
+
+    auto = generate_metronome_stem(src, tmp_path / "auto.wav")
+    assert auto is not None
+    assert auto.beats_per_measure == 3
+
+    forced = generate_metronome_stem(src, tmp_path / "forced.wav", beats_per_measure=2)
+    assert forced is not None
+    assert forced.beats_per_measure == 2
 
 
 def test_apply_click_rate_identity_and_half_and_double():

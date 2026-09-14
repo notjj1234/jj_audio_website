@@ -494,11 +494,17 @@ def test_lite_outcome_picker_uses_card_keys_not_pro_track_picker():
     assert "_render_section_and_outcomes(" in branch
     assert "prefer_roformer=prefer_roformer" in branch
     assert "get_desktop_probe()" in controls
-    assert "lite_auto_speed_id(probe)" in controls
+    assert "lite_auto_choice(probe)" in controls
+    assert "lite_auto_choice(probe)" in picker
+    assert "isolate_lite_run_on_manual" in picker
     assert "lite_detected_caption(probe)" in picker
     assert "lite_using_caption(" in picker
     assert 'key="isolate_lite_run_on"' in picker
+    assert 'st.session_state["isolate_lite_run_on"]' in picker
+    # Form build must not rewrite the radio key after the widget exists.
+    assert 'st.session_state["isolate_lite_run_on"]' not in controls
     assert "lite_device_choice_ids(probe)" in picker
+    assert "low free memory" in picker or 'reason="low_free_memory"' in picker or "caption_reason" in picker
     assert "_render_machine_panel(" in picker
     assert "_render_machine_panel(" not in controls
     assert controls.count("_render_machine_panel(") == 0
@@ -507,6 +513,22 @@ def test_lite_outcome_picker_uses_card_keys_not_pro_track_picker():
     assert "_render_track_picker(persist=persist)" not in branch
     for banned in ("keys", "wind", "strings", "multimedia"):
         assert f"isolate_stem_pick_{banned}" not in source
+
+
+def test_lite_enqueue_reprobes_memory_unless_manual():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    enqueue = source[
+        source.find("def _enqueue_confirmed_job") : source.find("def _enqueue_reseparate_job")
+        if "def _enqueue_reseparate_job" in source
+        else source.find("def _render_new_workspace")
+    ]
+    assert "isolate_lite_run_on_manual" in enqueue
+    assert "lite_auto_choice(" in enqueue
+    assert 'st.session_state["isolate_device"]' in enqueue
+    assert 'st.session_state["isolate_quality"]' in enqueue
+    # Radio key must not be written after the widget is instantiated on this run.
+    assert 'st.session_state["isolate_lite_run_on"]' not in enqueue
 
 
 def test_pro_machine_panel_is_inside_outcome_fragment_only():
@@ -1639,6 +1661,7 @@ def test_closing_last_loaded_mix_tab_stays_closed(tmp_path: Path):
     ``isolate_run_dir`` set, so the next ``add_open_mix_tab(loaded)`` revived it.
     """
     from ui.isolate_state import (
+        ISOLATE_SKIP_REHYDRATE_KEY,
         LISTEN_PICKER_KEY,
         OPEN_MIX_TABS_KEY,
         add_open_mix_tab,
@@ -1646,6 +1669,7 @@ def test_closing_last_loaded_mix_tab_stays_closed(tmp_path: Path):
         is_loaded_mix_tab,
         mix_tab_ids_equal,
         open_mix_tabs_for_session,
+        select_rehydrate_row,
     )
 
     run = tmp_path / "youtube_guns"
@@ -1675,6 +1699,7 @@ def test_closing_last_loaded_mix_tab_stays_closed(tmp_path: Path):
         "isolate_artifacts",
     ):
         session.pop(key, None)
+    session[ISOLATE_SKIP_REHYDRATE_KEY] = True
     assert not is_loaded_mix_tab(session, run_s)
 
     loaded = session.get("isolate_run_dir") or session.get("isolate_listen_applied_dir")
@@ -1683,6 +1708,20 @@ def test_closing_last_loaded_mix_tab_stays_closed(tmp_path: Path):
     tabs = open_mix_tabs_for_session(session, library_dirs=[run_s])
     assert tabs == []
     assert run_s not in session.get(OPEN_MIX_TABS_KEY, [])
+
+    # Clearing artifacts must not let rehydrate revive the closed tab.
+    rows = [{"run_dir": run_s, "title": "Guns"}]
+    assert select_rehydrate_row(session, rows, wav_exists=lambda _: True) is None
+
+
+def test_select_rehydrate_skips_after_last_mix_tab_dismissed():
+    from ui.isolate_state import ISOLATE_SKIP_REHYDRATE_KEY, select_rehydrate_row
+
+    rows = [{"run_dir": "/runs/a", "title": "A"}]
+    session = {ISOLATE_SKIP_REHYDRATE_KEY: True}
+    assert select_rehydrate_row(session, rows, wav_exists=lambda _: True) is None
+    session.pop(ISOLATE_SKIP_REHYDRATE_KEY)
+    assert select_rehydrate_row(session, rows, wav_exists=lambda _: True)["run_dir"] == "/runs/a"
 
 
 def test_closing_last_mix_without_clearing_loaded_would_reopen(tmp_path: Path):
@@ -2467,6 +2506,9 @@ def test_poll_and_queue_fragments_run_every_one_second():
     assert "_mix_tabs_nonce" not in tabs
     assert "isolate_moises_tabs_{nonce}" not in tabs
     assert "consume_mix_tab_event" in tabs
+    assert "_dismiss_last_mix_tab()" in tabs
+    assert "ISOLATE_SKIP_REHYDRATE_KEY" in source
+    assert "dismiss=True" in source
     status = source[
         source.find("def _render_status_strip") : source.find("def _poll_running_jobs")
     ]

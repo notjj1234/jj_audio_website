@@ -1319,6 +1319,10 @@ LISTEN_PICKER_KEY = "isolate_listen_picker"
 LISTEN_PICKER_NEXT_KEY = "_isolate_listen_picker_next"
 OPEN_MIX_TABS_KEY = "isolate_open_mix_tabs"
 OPEN_MIX_TABS_MAX = 12
+# Set when the user closes the last mix tab so ``select_rehydrate_row`` does not
+# immediately reload the latest run (which would re-open the tab via
+# ``add_open_mix_tab``). Cleared when a mix is opened intentionally.
+ISOLATE_SKIP_REHYDRATE_KEY = "isolate_skip_rehydrate"
 NEW_DRAFT_TAB_ID = "__new__"
 NEW_DRAFT_TAB_PREFIX = "__new__"
 DRAFT_SOURCES_KEY = "isolate_draft_sources"
@@ -1972,7 +1976,13 @@ def select_rehydrate_row(
     *,
     wav_exists,
 ) -> dict[str, Any] | None:
-    """Library row to load when the session has no usable mixer wavs."""
+    """Library row to load when the session has no usable mixer wavs.
+
+    Skips when the user just closed the last mix tab — otherwise clearing
+    artifacts for that close would immediately revive the tab via rehydrate.
+    """
+    if session.get(ISOLATE_SKIP_REHYDRATE_KEY):
+        return None
     if session_mixer_artifacts_ok(session, wav_exists=wav_exists):
         return None
     preferred = session.get("isolate_viewing_run_dir") or session.get("isolate_run_dir")

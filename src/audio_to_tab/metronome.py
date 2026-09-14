@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 from dataclasses import dataclass
@@ -28,6 +29,11 @@ _RATE_2X_GAP_LIMIT = 1.75
 _INTRO_ENERGY_RATIO = 0.2
 _STABLE_IOI_REL = 0.2
 _STABLE_MIN_BEATS = 4
+_DEFAULT_BEATS_PER_MEASURE = 4
+_METER_CANDIDATES = (3, 4)
+_METER_MIN_MEASURES = 3
+_METER_MIN_CONTRAST = 1.15
+_METER_WIN_MARGIN = 1.05
 
 METRONOME_RATE_CHOICES: tuple[float, ...] = (0.5, 1.0, 2.0)
 METRONOME_SOUND_IDS: tuple[str, ...] = ("classic", "soft", "wood", "hi_tick")
@@ -147,24 +153,40 @@ class MetronomeResult:
         }
 
 
-def pick_metronome_source(
+def _metronome_source_candidates(
     artifacts: dict[str, Path],
     *,
     fallback: Path | None = None,
-) -> tuple[Path, str] | None:
-    """Prefer drums (then mix-like stems), else the original/clipped source."""
+) -> list[tuple[Path, str]]:
+    """Beat-tracking inputs, best first: the mix, then drums / mix-like stems."""
+    candidates: list[tuple[Path, str]] = []
+    if fallback is not None:
+        path = Path(fallback)
+        if path.is_file():
+            candidates.append((path, "source"))
     for name in _ANALYSIS_STEM_PRIORITY:
         raw = artifacts.get(name)
         if raw is None:
             continue
         path = Path(raw)
         if path.is_file() and path.suffix.lower() == ".wav":
-            return path, name
-    if fallback is not None:
-        path = Path(fallback)
-        if path.is_file():
-            return path, "source"
-    return None
+            candidates.append((path, name))
+    return candidates
+
+
+def pick_metronome_source(
+    artifacts: dict[str, Path],
+    *,
+    fallback: Path | None = None,
+) -> tuple[Path, str] | None:
+    """Prefer the original/clipped mix, else drums (then other mix-like stems).
+
+    The mix carries rhythmic energy from every instrument, so beat tracking keeps
+    working through drum-less sections. A single stem only has onsets while that
+    instrument plays, which left verses without usable beats.
+    """
+    candidates = _metronome_source_candidates(artifacts, fallback=fallback)
+    return candidates[0] if candidates else None
 
 
 def _wrapped_residuals(times: np.ndarray, phase: float, period: float) -> np.ndarray:
@@ -257,11 +279,13 @@ def build_click_times(
     duration_sec: float,
     bpm: float,
 ) -> np.ndarray:
-    """Hybrid click times: detected beats in the body, extrapolated at the edges.
+    """Hybrid click times: detected beats in the body, extrapolated across gaps.
 
     A single global BPM grid drifts over long songs. Keeping librosa's beat times
     for the body follows the performance; walking backward from the first beat
     (and optionally forward past the last) still fills lead-in / trailing gaps.
+    Holes inside the body — sections where the analysis source went quiet — are
+    subdivided so the click keeps going instead of dropping out mid-song.
     """
     if duration_sec <= 0 or bpm <= 0:
         return np.zeros(0, dtype=np.float64)
@@ -290,13 +314,29 @@ def build_click_times(
             tail.append(t)
             t += period
 
+    # Subdivide each internal hole evenly so the fill stays phase-locked to the
+    # detected beats on both sides (a one-sided march would collide with the
+    # beat that ends the gap).
+    infill: list[float] = []
+    if body.size > 1:
+        for t0, t1 in itertools.pairwise(body):
+            gap = float(t1) - float(t0)
+            if gap <= 1.5 * period:
+                continue
+            steps = max(2, round(gap / period))
+            step = gap / steps
+            infill.extend(float(t0) + i * step for i in range(1, steps))
+
     parts: list[np.ndarray] = []
     if lead:
         parts.append(np.asarray(lead, dtype=np.float64))
     parts.append(body)
+    if infill:
+        parts.append(np.asarray(infill, dtype=np.float64))
     if tail:
         parts.append(np.asarray(tail, dtype=np.float64))
     times = np.concatenate(parts)
+    times.sort()
     if times.size > 1:
         keep = np.ones(times.size, dtype=bool)
         keep[1:] = np.diff(times) > 1e-4
@@ -371,6 +411,59 @@ def gate_unreliable_intro_beats(
     if gated.size < _MIN_BEATS:
         return times, float(times[0])
     return gated, body_start
+
+
+def detect_beats_per_measure(
+    detected: np.ndarray,
+    mono: np.ndarray,
+    sr: int,
+    bpm: float,
+) -> int:
+    """Infer 3 or 4 beats per measure from where the accents land.
+
+    Scores each candidate meter by how much louder its strongest beat class is
+    than the rest (per-beat RMS). A 4/4 accent pattern read as 3 (or vice versa)
+    smears across every class and scores ~1.0, so the contrast separates them.
+    Falls back to 4 whenever the audio is too short or the accents are flat.
+    """
+    times = np.asarray(detected, dtype=np.float64).reshape(-1)
+    times = np.sort(times[np.isfinite(times)])
+    if sr <= 0 or bpm <= 0 or len(mono) == 0:
+        return _DEFAULT_BEATS_PER_MEASURE
+    if times.size < _METER_MIN_MEASURES * min(_METER_CANDIDATES):
+        return _DEFAULT_BEATS_PER_MEASURE
+
+    energies = _beat_local_rms(times, mono, sr)
+    if not np.any(energies > 0):
+        return _DEFAULT_BEATS_PER_MEASURE
+
+    index = np.arange(times.size, dtype=np.int64)
+    scores: dict[int, float] = {}
+    for meter in _METER_CANDIDATES:
+        if times.size < _METER_MIN_MEASURES * meter:
+            continue
+        best = 0.0
+        for phase in range(meter):
+            on = energies[index % meter == phase]
+            off = energies[index % meter != phase]
+            if on.size == 0 or off.size == 0:
+                continue
+            off_mean = float(np.mean(off))
+            if off_mean <= 0:
+                continue
+            best = max(best, float(np.mean(on)) / off_mean)
+        if best > 0:
+            scores[meter] = best
+    if not scores:
+        return _DEFAULT_BEATS_PER_MEASURE
+
+    winner = max(scores, key=lambda m: scores[m])
+    runner_up = max((s for m, s in scores.items() if m != winner), default=0.0)
+    if scores[winner] < _METER_MIN_CONTRAST:
+        return _DEFAULT_BEATS_PER_MEASURE
+    if scores[winner] < _METER_WIN_MARGIN * runner_up:
+        return _DEFAULT_BEATS_PER_MEASURE
+    return int(winner)
 
 
 def apply_click_rate(
@@ -535,11 +628,15 @@ def generate_metronome_stem(
     output_path: str | Path,
     *,
     sr: int | None = None,
-    beats_per_measure: int = 4,
+    beats_per_measure: int = _DEFAULT_BEATS_PER_MEASURE,
     source: str = "source",
     render: MetronomeRenderOptions | None = None,
 ) -> MetronomeResult | None:
-    """Beat-track the source, then write clicks on detected beats (plus lead-in)."""
+    """Beat-track the source, then write clicks on detected beats (plus lead-in).
+
+    ``beats_per_measure`` left at the default is detected from the audio; any
+    other value is treated as an explicit override.
+    """
     try:
         import librosa
     except ImportError:
@@ -598,6 +695,10 @@ def generate_metronome_stem(
     if times.size < _MIN_BEATS:
         return None
 
+    measure = max(1, int(beats_per_measure))
+    if measure == _DEFAULT_BEATS_PER_MEASURE:
+        measure = detect_beats_per_measure(gated, mono, native_sr, bpm)
+
     n = len(mono)
     ref_sec = float(gated[0])
     if not render_metronome_wav(
@@ -607,7 +708,7 @@ def generate_metronome_stem(
         n_samples=n,
         options=opts,
         ref_sec=ref_sec,
-        beats_per_measure=beats_per_measure,
+        beats_per_measure=measure,
     ):
         return None
 
@@ -628,7 +729,7 @@ def generate_metronome_stem(
         first_detected_sec=ref_sec,
         detected_times=tuple(float(t) for t in gated),
         click_times_1x=tuple(float(t) for t in times),
-        beats_per_measure=max(1, int(beats_per_measure)),
+        beats_per_measure=measure,
         render=opts,
     )
 
@@ -676,23 +777,24 @@ def _times_from_payload(raw: Any) -> np.ndarray:
     return np.asarray(values, dtype=np.float64)
 
 
-def _pick_source_from_dir(
+def _source_candidates_from_dir(
     output_dir: Path,
     *,
     artifacts: dict[str, Path] | None = None,
     fallback: Path | None = None,
-) -> tuple[Path, str] | None:
+) -> list[tuple[Path, str]]:
     if artifacts:
-        picked = pick_metronome_source(artifacts, fallback=fallback)
-        if picked is not None:
-            return picked
+        candidates = _metronome_source_candidates(artifacts, fallback=fallback)
+        if candidates:
+            return candidates
+    candidates = []
+    if fallback is not None and Path(fallback).is_file():
+        candidates.append((Path(fallback), "source"))
     for name in _ANALYSIS_STEM_PRIORITY:
         path = output_dir / f"{name}.wav"
         if path.is_file():
-            return path, name
-    if fallback is not None and Path(fallback).is_file():
-        return Path(fallback), "source"
-    return None
+            candidates.append((path, name))
+    return candidates
 
 
 def _result_from_payload(
@@ -780,21 +882,22 @@ def rebake_metronome_artifact(
             return result
         return None
 
-    picked = _pick_source_from_dir(out_dir, artifacts=artifacts, fallback=fallback)
-    if picked is None:
-        return None
-    audio_path, source = picked
-    result = generate_metronome_stem(
-        audio_path,
-        dest,
-        source=source,
-        render=opts,
-        beats_per_measure=measure,
-    )
-    if result is None:
-        return None
-    write_metronome_diagnostics(diag_path, result)
-    return result
+    # Try each candidate: a mix that cannot be decoded must not block the stems.
+    for audio_path, source in _source_candidates_from_dir(
+        out_dir, artifacts=artifacts, fallback=fallback
+    ):
+        result = generate_metronome_stem(
+            audio_path,
+            dest,
+            source=source,
+            render=opts,
+            beats_per_measure=measure,
+        )
+        if result is None:
+            continue
+        write_metronome_diagnostics(diag_path, result)
+        return result
+    return None
 
 
 def attach_metronome_artifact(
@@ -805,21 +908,20 @@ def attach_metronome_artifact(
     render: MetronomeRenderOptions | None = None,
 ) -> MetronomeResult | None:
     """Write metronome.wav into ``artifacts`` when beat tracking succeeds."""
-    picked = pick_metronome_source(artifacts, fallback=fallback)
-    if picked is None:
-        return None
-    audio_path, source = picked
     out_dir = Path(output_dir)
-    result = generate_metronome_stem(
-        audio_path,
-        out_dir / f"{METRONOME_STEM_ID}.wav",
-        source=source,
-        render=render,
-    )
-    if result is None:
-        return None
-    artifacts[METRONOME_STEM_ID] = result.path
-    artifacts["metronome_diagnostics"] = write_metronome_diagnostics(
-        out_dir / METRONOME_DIAGNOSTICS_NAME, result
-    )
-    return result
+    # Mix first; fall through to stems when it cannot be read or tracked.
+    for audio_path, source in _metronome_source_candidates(artifacts, fallback=fallback):
+        result = generate_metronome_stem(
+            audio_path,
+            out_dir / f"{METRONOME_STEM_ID}.wav",
+            source=source,
+            render=render,
+        )
+        if result is None:
+            continue
+        artifacts[METRONOME_STEM_ID] = result.path
+        artifacts["metronome_diagnostics"] = write_metronome_diagnostics(
+            out_dir / METRONOME_DIAGNOSTICS_NAME, result
+        )
+        return result
+    return None
