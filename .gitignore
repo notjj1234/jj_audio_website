@@ -25,8 +25,10 @@ eval/lead_rhythm/RESULTS.md
 /frontend/build/
 /frontend/.flutter-plugins-dependencies
 
-# Stem mixer frontend (keep built assets; ignore deps)
+# Desktop component frontends (keep built assets; ignore deps)
 ui/stem_mixer_component/frontend/node_modules/
+ui/mix_tabs_component/frontend/node_modules/
+ui/region_picker_component/frontend/node_modules/
 
 # Production SPA
 web/node_modules/

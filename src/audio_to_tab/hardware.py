@@ -50,7 +50,7 @@ CUDA_UNAVAILABLE_MESSAGE = (
 # Cached after the first torch import — probing is expensive.
 _cached_probe: HostProbe | None = None
 _CPU_BRAND_UNSET = object()
-_cached_cpu_brand: str | None | object = _CPU_BRAND_UNSET
+_cached_cpu_brand: str | object | None = _CPU_BRAND_UNSET
 
 
 @dataclass(frozen=True)

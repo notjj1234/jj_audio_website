@@ -1,6 +1,6 @@
 # Desktop-first test/lint gate (see docs/issues.md I-072).
 # Runs on every push/PR:
-#   - pytest across Linux, Windows, macOS (Intel runner)
+#   - pytest across Linux, Windows, macOS (Intel runner: macos-15-intel)
 #   - ruff lint over src/audio_to_tab (the engine shipped in the desktop build)
 # Install profile mirrors `make install`: CPU torch + the Demucs extra. Tests
 # mock torch/demucs availability, but a few integration tests (e.g.
@@ -23,7 +23,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-13]
+        # macos-13 is retired; macos-15-intel matches desktop-release Intel Mac jobs.
+        os: [ubuntu-latest, windows-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
