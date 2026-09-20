@@ -504,7 +504,8 @@ def test_lite_outcome_picker_uses_card_keys_not_pro_track_picker():
     # Form build must not rewrite the radio key after the widget exists.
     assert 'st.session_state["isolate_lite_run_on"]' not in controls
     assert "lite_device_choice_ids(probe)" in picker
-    assert "low free memory" in picker or 'reason="low_free_memory"' in picker or "caption_reason" in picker
+    assert "caption_reason" in picker
+    assert "GPU is the default" in picker
     assert "_render_machine_panel(" in picker
     assert "_render_machine_panel(" not in controls
     assert controls.count("_render_machine_panel(") == 0
@@ -1318,9 +1319,12 @@ def test_enqueue_confirmed_job_opens_queue_with_loading_overlay():
     enqueue = source[
         source.find("def _enqueue_confirmed_job") : source.find("def _library_status_row")
     ]
-    # Overlay first; draft-origin jobs stay on that tab instead of jumping Home.
+    # Queue opens on the next paint. Do not raise the nav overlay — jobs stay
+    # interactive and the overlay contract is nav-only.
     assert '["_isolate_pending_queue"] = True' in enqueue
-    assert "_request_loading_overlay()" in enqueue
+    assert "[ISOLATE_QUEUE_PANEL_OPEN_KEY] = True" in enqueue
+    assert "_request_loading_overlay()" not in enqueue
+    assert '["_nav_loading"]' not in enqueue
     assert "_rerun_scroll_top()" in enqueue
     assert "origin_tab=" in enqueue
     assert "mark_draft_tab_processing" in enqueue
@@ -2497,6 +2501,10 @@ def test_poll_and_queue_fragments_run_every_one_second():
     assert "_rerun_preserve_scroll()" in queue_row
     assert "_rerun_scroll_top()" in queue_row
     assert "open_mixer_" in queue_row
+    assert "_render_running_progress(" in queue_row
+    assert "_retry_failed_job(" in queue_row
+    assert "isolate_queue_retry_" in queue_row
+    assert 'st.caption("Separating…")' not in queue_row
     tabs = source[
         source.find("def _render_moises_tab_strip") : source.find("def _has_source_for_job")
     ]
@@ -2513,7 +2521,30 @@ def test_poll_and_queue_fragments_run_every_one_second():
         source.find("def _render_status_strip") : source.find("def _poll_running_jobs")
     ]
     assert 'key="isolate_status_strip"' in status
-    assert "st.empty()" in status
+    assert 'key="isolate_status_running"' not in status
+    assert "_render_running_progress(" not in status
+    assert "_render_compact_running_hint(" in status
+    assert "ISOLATE_QUEUE_PANEL_OPEN_KEY" in status
+    assert 'Separating **' not in status
+    assert "if not (failed or show_running_hint or stopping_previous or show_queued):" in status
+    idle = status[
+        status.find("show_queued =") : status.find(
+            'with st.container(key="isolate_status_strip")'
+        )
+    ]
+    assert "return" in idle
+    assert "st.empty()" not in idle
+    compact = source[
+        source.find("def _render_compact_running_hint") : source.find(
+            "def _retry_failed_job"
+        )
+    ]
+    assert "Open Queue for Pause/Stop" in compact
+    retry = source[
+        source.find("def _retry_failed_job") : source.find("def _job_source_title")
+    ]
+    assert "requeue_job(job_id)" in retry
+    assert "Add the file again on Home." in retry
     assert "if not (running or failed or show_queued or stopping_previous):" not in status
     main = source[source.find("def main") :]
     assert "isolate_scroll_top_token" in main
@@ -2522,10 +2553,79 @@ def test_poll_and_queue_fragments_run_every_one_second():
         Path(__file__).resolve().parents[1] / "ui" / "app.py"
     ).read_text(encoding="utf-8")
     assert "st-key-isolate_status_strip" in css
-    assert "st-key-isolate_status_running" in css
-    assert "min-height: 6.5rem" in css
+    assert "st-key-isolate_status_running" not in css
+    assert "min-height: 6.5rem" not in css
     assert ":not(:last-of-type)" in css
     assert 'iframe[title*="mix_tabs"]' not in css
+    assert "st-key-isolate_sticky_chrome" in css
+    assert (
+        '[data-testid="stLayoutWrapper"]:has(.st-key-isolate_sticky_chrome)'
+        in css
+    )
+    assert (
+        '[data-testid="stElementContainer"]:has(.st-key-isolate_sticky_chrome)'
+        in css
+    )
+    assert 'key="isolate_sticky_chrome"' in main
+    assert main.find("_render_moises_tab_strip") < main.find("_poll_running_jobs()")
+
+
+def test_home_queue_is_floating_panel_not_bottom_section():
+    """Queue is a header-toggled floating card on Home or mix, painted early."""
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    main = source[source.find("def main") :]
+    assert 'st.subheader("Queue")' not in main
+    assert 'st.divider()' not in main
+    assert 'key="isolate_queue_toggle"' in main
+    assert "ISOLATE_QUEUE_PANEL_OPEN_KEY" in main
+    assert 'key="isolate_queue_float"' in source
+    assert "_render_queue_float_panel()" in main
+    assert "_queue_tab_fragment()" in source
+    assert 'shell != "mix"' not in main
+    assert 'if st.session_state.get(ISOLATE_QUEUE_PANEL_OPEN_KEY):' in main
+    assert main.find("_render_queue_float_panel()") < main.find(
+        'if shell == "mix":'
+    )
+    assert main.find("_render_queue_float_panel()") < main.find(
+        "_render_mixer_workspace"
+    )
+    assert main.find("_render_queue_float_panel()") < main.find(
+        "_render_new_workspace"
+    )
+    assert "open Queue for jobs" in source
+    assert "See Queue" not in source
+    assert "scroll to Queue" not in source
+    assert "Open Queue." in source
+    css = (
+        Path(__file__).resolve().parents[1] / "ui" / "app.py"
+    ).read_text(encoding="utf-8")
+    assert "st-key-isolate_queue_float" in css
+    assert "st-key-isolate_queue_toggle" in css
+    assert "position: fixed !important" in css
+    assert "420px" in css
+    assert "55vh" in css
+    assert "not a sidebar" in css.lower() or "not a sidebar / drawer" in css
+    queue_row = source[
+        source.find("def _render_queue_job_row") : source.find("def _render_failed_strip")
+    ]
+    assert "Open in Mixer" in queue_row
+    assert "pause_job_" in queue_row
+    assert "isolate_stop_ask_" in queue_row
+    assert "delete_finished_" in queue_row
+    assert "_render_running_progress(" in queue_row
+    assert "isolate_queue_retry_" in queue_row
+    assert "_retry_failed_job(" in queue_row
+    assert 'st.caption("Separating…")' not in queue_row
+    fragment = source[
+        source.find("def _queue_tab_fragment") : source.find("def _mixer_and_downloads_fragment")
+    ]
+    assert "@st.fragment(run_every=1.0)" in source[
+        source.find("def _queue_tab_fragment") - 80 : source.find("def _mixer_and_downloads_fragment")
+    ]
+    assert "_render_job_queue_panel()" in fragment
+    assert "on_click=_toggle_queue_panel" in main
+    assert "isolate_queue_panel_open" in source
 
 
 def test_new_tab_section_and_output_name_prominent_before_advanced():
@@ -2582,6 +2682,8 @@ def test_mixer_builds_current_mix_on_save_click():
     ]
     assert "_build_current_mix(" in panel
     assert 'key="isolate_save_mix"' in panel
+    assert "Alt+Tab" in panel
+    assert "overwrites a same-named" in panel
 
 
 def test_mixer_workspace_lite_shares_fixup_and_tab_pdf_carry_over():
@@ -2594,6 +2696,17 @@ def test_mixer_workspace_lite_shares_fixup_and_tab_pdf_carry_over():
     assert "_render_guitar_fixup_panel(" in mixer_ws
     assert "Make a tab PDF from this" in mixer_ws
     assert "if pro and source_audio_path" not in mixer_ws
+    assert "_request_loading_overlay()" in mixer_ws
+
+
+def test_file_ready_banner_points_at_home_not_new():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    banner = source[
+        source.find("def _render_file_ready_banner") : source.find("def main")
+    ]
+    assert "on Home to" in banner
+    assert "on New to" not in banner
 
 
 def test_desktop_mixer_renders_stem_hint_captions():

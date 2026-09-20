@@ -95,11 +95,13 @@ def mps_eligible(probe: HostProbe) -> bool:
 
 
 def device_options(probe: HostProbe) -> list[str]:
-    options = ["cpu"]
+    """Hosted device list. GPU first when available (matches desktop)."""
+    options: list[str] = []
     if probe.cuda:
         options.append("cuda")
     if mps_eligible(probe):
         options.append("mps")
+    options.append("cpu")
     return options
 
 

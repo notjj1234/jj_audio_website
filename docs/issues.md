@@ -17,6 +17,8 @@ Desktop **Lite** auto-profile (speed / device / guitar from RAM/GPU, Detected/Us
 
 **2026-09-08 follow-through:** I-500, I-501, I-503, I-505, I-509 are **implemented-in-code**. I-502 / I-504 / I-506 / I-507 / I-508 stay documented tradeoffs (honesty copy + Drop C HPF test; no fake clean-guitar engine).
 
+**2026-09-20 follow-through:** Desktop isolation defaults are **GPU-first** when the host offers CUDA (Windows) or eligible MPS (Mac ≥12 GB). Faster speed presets and Lite auto stay on GPU; memory-pressure no longer downgrades to CPU. The 12 GB MPS gate and 8 GB Mac CPU floor remain.
+
 Do **not** “fix” 8 GB Macs by enabling MPS. `MPS_MIN_RAM_GB = 12` in `src/audio_to_tab/hardware.py` exists because unified-memory OOM/swap is worse than CPU.
 
 ---
@@ -49,6 +51,14 @@ These IDs appear elsewhere in the repo (CI, tests, eval, `.opencode` plans). **D
 | I-508 | Med | guitar function | engine (upstream) | `lead_rhythm.py` (not default) | Lead + rhythm + acoustic collapse to one guitar stem. | guitar-ft / MelBand cards. | Same ceiling as I-502. | documented model limit | Lead/rhythm stays non-default; guitar card says one guitar track. |
 | I-509 | Med | performance | website | `ProcessingModeSelect.tsx`; `IsolatePage.tsx` | Select hid Auto and remapped it to Balanced. | API Auto existed; SPA bypassed it. | Low-end web users missed 60/90 s caps. | implemented-in-code | Isolate defaults to `auto`; Auto is the first select option; helper text uses Auto’s resolved device/cap. |
 
+---
+
+## Metronome / mixer timing (2026-09-18)
+
+| ID | Severity | Area | Surface | File:symbol | Symptom | Evidence | Low-end impact | Kind | Direction (research only) |
+|----|----------|------|---------|-------------|---------|----------|----------------|------|---------------------------|
+| I-510 | Med | metronome | engine (+ desktop/web mixer) | `metronome.py:generate_metronome_stem`; `gate_unreliable_intro_beats`; `build_click_times` | Drumless / sung intros clicked on a global drum grid: gate preferred loud drums (`max(loud, stable)`), lead-in walked back at global BPM. | Moises-style “non-smart” single BPM; librosa global `beat_track` only. | Same on 8 GB — tracking cost is onset + 2× DP on one envelope. | implemented-in-code | Adaptive map: `tempo(aggregate=None)` + `beat_track(bpm=curve)`; keep quiet locally-stable pulse; accents at `body_start_sec`; `click_times_1x` unchanged for mixer/rebake; optional `bpm_curve` diagnostics. No librosa upgrade / madmom. Talking intros stay gated. |
+
 ### Not filing (already mitigated or out of scope)
 
 - Lite auto speed/device/guitar + Detected/Using captions — shipped.
@@ -56,6 +66,8 @@ These IDs appear elsewhere in the repo (CI, tests, eval, `.opencode` plans). **D
 - `demucs_jobs=1` / `demucs_segment≈8` clamped to 7 s for HTDemucs — keep. Upstream Hybrid Transformer max segment is **7.8 s**.
 - Stem presence labels — UX only; Demucs still computes the full stem set.
 - Tab PDF, auth, visual polish — out of this audit.
+- Per-section metre / PLP-primary tracker / madmom — out of scope for I-510 v1.
+- Soft-pause on mere `visibilitychange` hide — fixed as UI wake policy (I-618); browsers may still suspend Web Audio when a tab is fully backgrounded.
 
 ### Web sources (opened for this audit)
 

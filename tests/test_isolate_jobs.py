@@ -919,6 +919,31 @@ def test_format_job_error_is_one_short_sentence_without_app_paths():
     assert cleaned
 
 
+def test_format_job_error_missing_stem_hides_application_support_path():
+    raw = (
+        "[Errno 2] No such file or directory: "
+        "'/Users/JJ/Library/Application Support/AudioTools/runs/"
+        "38472114-475f-4f8a-9e22-0c6f6773990c/other.wav'"
+    )
+    cleaned = format_job_error(raw)
+    assert cleaned == "Missing stem file"
+    assert "Application" not in cleaned
+    assert "Support" not in cleaned
+    assert "other.wav" not in cleaned
+
+
+def test_format_job_error_strips_quoted_path_with_spaces():
+    raw = (
+        "Could not load codec from "
+        "'/Users/JJ/Library/Application Support/AudioTools/libavutil.dylib'"
+    )
+    cleaned = format_job_error(raw)
+    assert "Application Support" not in cleaned
+    assert "/Users/" not in cleaned
+    assert "libavutil" not in cleaned
+    assert "Could not load codec from" in cleaned
+
+
 def test_spec_round_trips_reseparate_fields():
     import ui.isolate_jobs as jobs
 
@@ -983,6 +1008,58 @@ def test_run_one_job_reseparate_skips_metadata_and_stores_fields(jobs_dir: Path,
     assert status["reseparate_from"] == "other"
     assert status["parent_run_dir"] == str(parent)
     assert metadata_calls == []
+
+
+def test_run_one_job_success_clears_prior_error(jobs_dir: Path, monkeypatch):
+    """Succeeded status must not keep a leftover ENOENT from a racing fail write."""
+    import ui.isolate_jobs as jobs
+
+    audio = jobs_dir / "song.wav"
+    audio.write_bytes(b"wav")
+    out = jobs_dir / "out"
+    out.mkdir()
+
+    def fake_separate(*, audio_path, output_dir, config, on_progress, **kwargs):
+        on_progress("separate", "mock")
+        dest = Path(output_dir) / "vocals.wav"
+        dest.write_bytes(b"v")
+        return {"vocals": dest}
+
+    monkeypatch.setattr("audio_to_tab.isolate.separate_stems", fake_separate)
+    monkeypatch.setattr("ui.media.cleanup_mix_artifacts", lambda *_a, **_k: None)
+    monkeypatch.setattr("ui.common.write_run_metadata", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "audio_to_tab.hardware.ensure_cuda_available", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "audio_to_tab.hardware.get_desktop_probe", lambda: MagicMock()
+    )
+
+    spec = IsolateJobSpec(
+        id="leftover-err",
+        audio_path=str(audio),
+        output_dir=str(out),
+        title="Brianstorm",
+        created_at=time.time(),
+    )
+    jobs.enqueue_job(spec)
+    write_status(
+        spec.id,
+        status="failed",
+        stage="error",
+        message="Separation failed",
+        error=(
+            "[Errno 2] No such file or directory: "
+            "'/Users/JJ/Library/Application Support/AudioTools/runs/x/other.wav'"
+        ),
+        traceback="FileNotFoundError: other.wav\n",
+    )
+    jobs._run_one_job(spec.id)
+    status = jobs.read_status(spec.id)
+    assert status is not None
+    assert status["status"] == "succeeded"
+    assert status.get("error") is None
+    assert status.get("traceback") is None
 
 
 def test_apply_succeeded_job_to_session_reseparate_merges_and_repoints(tmp_path: Path):
@@ -1138,12 +1215,21 @@ def test_finalize_promotes_running_to_succeeded_when_stems_exist(jobs_dir: Path)
         created_at=time.time(),
     )
     enqueue_job(spec)
-    write_status("job-recover", status="running", stage="separate", message="Working")
+    write_status(
+        "job-recover",
+        status="running",
+        stage="separate",
+        message="Working",
+        error="leftover",
+        traceback="tb",
+    )
     jobs._finalize_job_after_process("job-recover")
     status = read_status("job-recover")
     assert status is not None
     assert status["status"] == "succeeded"
     assert status["artifacts"]["guitar"] == str(guitar)
+    assert status.get("error") is None
+    assert status.get("traceback") is None
 
 
 def test_finalize_marks_failed_when_running_without_stems(jobs_dir: Path):

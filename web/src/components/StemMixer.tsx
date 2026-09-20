@@ -45,12 +45,14 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
     [stems]
   );
 
+  const SLEEP_RESUME_HINT = "Tap Play to resume after sleep";
+
   useEffect(() => {
     const engine = engineRef.current;
     engine.installWakeHooks();
     engine.setSoftPauseCallback(() => {
       setPlaying(false);
-      setStatus("Tap Play to resume after sleep");
+      setStatus(SLEEP_RESUME_HINT);
     });
     const next: MixerState = {
       volumesDb: {},
@@ -84,6 +86,9 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
       setDuration(dur);
       setPlaying(isPlaying);
       setSeek(dur > 0 ? Math.round((t / dur) * 1000) : 0);
+      if (isPlaying) {
+        setStatus((prev) => (prev === SLEEP_RESUME_HINT ? "Playing" : prev));
+      }
     });
     return () => {
       cancelled = true;
@@ -103,10 +108,13 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
 
   const togglePlayback = () => {
     if (playing) {
-      void engineRef.current.pause();
+      void engineRef.current.pause().then(() => setPlaying(false));
       return;
     }
-    void engineRef.current.play();
+    void engineRef.current.play().then(() => {
+      setPlaying(true);
+      setStatus((prev) => (prev === SLEEP_RESUME_HINT ? "Playing" : prev));
+    });
   };
 
   const toggleMute = (id: string) => {
@@ -162,7 +170,12 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
 
       <div className="mixer-transport transport-sticky">
         <div className="mixer-transport-controls">
-          <button type="button" onClick={togglePlayback} aria-pressed={playing}>
+          <button
+            type="button"
+            className="primary"
+            onClick={togglePlayback}
+            aria-pressed={playing}
+          >
             {playing ? "Pause" : "Play"}
           </button>
           <button

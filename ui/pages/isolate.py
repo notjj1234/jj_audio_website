@@ -284,7 +284,7 @@ STEM_HINTS = {
 
 PAGE_TITLE_HELP = (
     "Split a song into separate tracks on this computer. "
-    "Use Home to separate, open a mix tab to listen, and scroll to Queue for jobs. "
+    "Use Home to separate, open a mix tab to listen, and open Queue for jobs. "
     "For download-only YouTube saves, use the YouTube Audio page."
 )
 SEPARATE_TRACKS_HELP = (
@@ -301,6 +301,7 @@ ISOLATE_YOUTUBE_SEARCH_OPEN_KEY = "isolate_youtube_search_open"
 ISOLATE_YOUTUBE_AUTO_DOWNLOAD_KEY = "isolate_youtube_auto_download"
 ISOLATE_YOUTUBE_DOWNLOADING_KEY = "_isolate_youtube_downloading"
 LITE_GUITAR_FELL_BACK_KEY = "_isolate_lite_guitar_fell_back"
+ISOLATE_QUEUE_PANEL_OPEN_KEY = "isolate_queue_panel_open"
 
 
 def _close_youtube_search_dialog() -> None:
@@ -1436,8 +1437,7 @@ def _render_outcome_picker(
             **persist,
         )
     else:
-        # Live free-RAM / swap headroom can force CPU + Faster even when MPS/CUDA
-        # is eligible (musicians often run a DAW alongside).
+        # GPU-first auto from installed hardware (CUDA / eligible MPS).
         lite_auto = lite_auto_choice(probe)
         speed_id = str(lite_auto["speed"])
     speed = resolve_speed_preset(speed_id, probe, model=resolved["model"])
@@ -1481,11 +1481,11 @@ def _render_outcome_picker(
             if not st.session_state.get("isolate_lite_run_on_manual"):
                 auto_dev = str(lite_auto["device"])
                 st.session_state["isolate_lite_run_on"] = (
-                    auto_dev if auto_dev in run_choices else run_choices[-1]
+                    auto_dev if auto_dev in run_choices else run_choices[0]
                 )
             elif st.session_state.get("isolate_lite_run_on") not in run_choices:
                 default_run = (
-                    speed["device"] if speed["device"] in run_choices else run_choices[-1]
+                    speed["device"] if speed["device"] in run_choices else run_choices[0]
                 )
                 st.session_state["isolate_lite_run_on"] = default_run
 
@@ -1500,8 +1500,8 @@ def _render_outcome_picker(
                 horizontal=True,
                 on_change=_mark_lite_run_on_manual,
                 help=(
-                    "CPU is often faster when free memory is tight (swap thrash). "
-                    "GPU is usually quicker when RAM is free."
+                    "GPU is the default when this computer has one — usually faster. "
+                    "Switch to CPU only if you need to."
                 ),
                 **persist,
             )
@@ -1513,14 +1513,13 @@ def _render_outcome_picker(
             else:
                 st.session_state["isolate_quality"] = speed["quality"]
                 using_speed = str(speed["id"])
-            # Only show the low-memory note when auto (not a manual Run-on pick)
-            # chose CPU for headroom.
+            # Caption reason is unused under GPU-first auto; keep the wire for
+            # any residual reason string from older session state.
             caption_reason = (
                 using_reason
                 if (
                     not st.session_state.get("isolate_lite_run_on_manual")
-                    and using_reason == "low_free_memory"
-                    and run_on == "cpu"
+                    and using_reason
                 )
                 else None
             )
@@ -2502,6 +2501,35 @@ def _render_running_progress(status: dict) -> None:
         st.markdown(str(view.get("checklist_md") or "\u00a0"))
 
 
+def _render_compact_running_hint(status: dict) -> None:
+    """One-line Home progress when Queue is closed. Pause/Stop stay in Queue."""
+    view = running_progress_view(status, time.time())
+    st.progress(min(1.0, max(0.0, float(view["percent"]))))
+    title = _job_source_title(status)
+    bits = [
+        str(title),
+        str(view.get("label") or ""),
+        str(view.get("eta_line") or ""),
+        "Open Queue for Pause/Stop",
+    ]
+    st.caption(" · ".join(b for b in bits if b))
+
+
+def _retry_failed_job(job_id: str) -> None:
+    """Re-queue a failed job from strip or Queue. Same spec, fresh output dir."""
+    new_id = requeue_job(job_id)
+    if new_id:
+        dismiss_failed_job(st.session_state, job_id)
+        ensure_worker_started()
+        _rerun_preserve_scroll()
+        return
+    st.session_state["isolate_flash"] = (
+        "Cannot retry. The original audio file is no longer on disk. "
+        "Add the file again on Home."
+    )
+    _rerun_preserve_scroll()
+
+
 def _job_source_title(job: dict) -> str:
     title = job.get("title") or str(job.get("id") or "")[:8] or "track"
     kind = infer_source_kind(
@@ -2509,6 +2537,27 @@ def _job_source_title(job: dict) -> str:
         source_fingerprint=job.get("source_fingerprint"),
     )
     return format_source_title(str(title), kind)
+
+
+def _toggle_queue_panel() -> None:
+    st.session_state[ISOLATE_QUEUE_PANEL_OPEN_KEY] = not bool(
+        st.session_state.get(ISOLATE_QUEUE_PANEL_OPEN_KEY)
+    )
+
+
+def _queue_visible_count() -> int:
+    """Cheap badge for the header Queue control (in-flight + finished with wavs)."""
+    try:
+        return len(jobs_visible_in_queue(list_jobs(limit=30)))
+    except Exception:
+        return 0
+
+
+def _render_queue_float_panel() -> None:
+    """Non-modal floating Queue card (Home or mix). Fixed overlay via CSS."""
+    with st.container(key="isolate_queue_float", border=True):
+        st.markdown("**Queue**")
+        _queue_tab_fragment()
 
 
 def _render_job_queue_panel() -> None:
@@ -2596,6 +2645,8 @@ def _render_queue_job_row(
         n_actions = 2
     elif status == "succeeded":
         n_actions = 2
+    elif status == "failed":
+        n_actions = 2
     else:
         n_actions = 1
     cols = st.columns([4, *([1] * n_actions)])
@@ -2622,8 +2673,7 @@ def _render_queue_job_row(
             st.caption(paused_job_caption(job.get("completed_stages")))
         elif status == "pausing":
             st.caption("Pausing…")
-        elif status == "running":
-            st.caption("Separating…")
+        # running: progress paints full-width below Pause/Stop (see below)
     if status == "succeeded" and job_id:
         with cols[1]:
             if st.button("Open in Mixer", key=f"open_mixer_{job_id}"):
@@ -2686,6 +2736,8 @@ def _render_queue_job_row(
             ):
                 st.session_state[confirm_key] = True
                 _rerun_preserve_scroll()
+        fresh = read_status(job_id) or job
+        _render_running_progress(fresh)
         return
     if status == "paused" and job_id:
         with cols[1]:
@@ -2695,6 +2747,25 @@ def _render_queue_job_row(
                 _rerun_preserve_scroll()
         with cols[2]:
             if st.button("Remove", key=f"remove_paused_{job_id}"):
+                remove_job(job_id)
+                ensure_worker_started()
+                _rerun_preserve_scroll()
+        return
+    if status == "failed" and job_id:
+        with cols[1]:
+            if st.button(
+                "Try again",
+                key=f"isolate_queue_retry_{job_id}",
+                type="primary",
+                help="Queue the same track with the same settings.",
+            ):
+                _retry_failed_job(job_id)
+        with cols[2]:
+            if st.button(
+                "Remove",
+                key=f"remove_job_{job_id}",
+                help="Drop this job from the list.",
+            ):
                 remove_job(job_id)
                 ensure_worker_started()
                 _rerun_preserve_scroll()
@@ -2724,23 +2795,13 @@ def _render_failed_strip(failed: dict) -> None:
             width="stretch",
             help="Queue the same track with the same settings.",
         ):
-            new_id = requeue_job(job_id)
-            if new_id:
-                dismiss_failed_job(st.session_state, job_id)
-                ensure_worker_started()
-                _rerun_preserve_scroll()
-            else:
-                st.session_state["isolate_flash"] = (
-                    "Cannot retry. The original audio file is no longer on disk. "
-                    "Add the file again on New."
-                )
-                _rerun_preserve_scroll()
+            _retry_failed_job(job_id)
     with dismiss_col:
         if st.button(
             "Dismiss",
             key=f"isolate_dismiss_{job_id}",
             width="stretch",
-            help="Hide this here. The job stays on Queue.",
+            help="Hide this here. The job stays in Queue.",
         ):
             dismiss_failed_job(st.session_state, job_id)
             _rerun_preserve_scroll()
@@ -2752,10 +2813,10 @@ def _render_failed_strip(failed: dict) -> None:
 
 
 def _render_status_strip(jobs: list) -> None:
-    """Sole owner of job state on this page. Always mounts so poll ticks stay put.
+    """Non-running job state on Home, plus a compact running hint if Queue is closed.
 
-    Non-blocking by design: separation runs in the background and the app stays
-    usable, so this reports progress in place instead of dimming the window.
+    Detailed % / ETA / Pause / Stop live in the Queue float. Closing Queue must
+    not hide that a separation is still running.
     """
     running = None
     failed = None
@@ -2781,25 +2842,28 @@ def _render_status_strip(jobs: list) -> None:
             active_id,
             str(active_status.get("status") or ""),
         )
+    queue_open = bool(st.session_state.get(ISOLATE_QUEUE_PANEL_OPEN_KEY))
+    show_running_hint = running is not None and not queue_open
     show_queued = running is None and failed is None and bool(waiting_ids)
+    # Idle: paint nothing. An empty keyed container reserved a random vertical
+    # gap between the Home|mix tabs and Upload on Home.
+    if not (failed or show_running_hint or stopping_previous or show_queued):
+        return
     with st.container(key="isolate_status_strip"):
-        if running:
-            with st.container(border=True, key="isolate_status_running"):
-                st.info(f"Separating **{_job_source_title(running)}**")
-                _render_running_progress(running)
-        elif failed:
+        if failed:
             with st.container(border=True):
                 _render_failed_strip(failed)
+        elif show_running_hint:
+            with st.container(border=True):
+                _render_compact_running_hint(running)
         elif stopping_previous:
             with st.container(border=True):
                 st.caption(status_strip_waiting_caption(waiting_ids, stopping_previous=True))
-        elif show_queued:
+        else:
             with st.container(border=True):
                 st.caption(
                     status_strip_waiting_caption(waiting_ids, stopping_previous=False)
                 )
-        else:
-            st.empty()
 
 
 @st.fragment(run_every=1.0)
@@ -2852,7 +2916,7 @@ def _poll_running_jobs() -> None:
         desktop_notify(message[0], message[1])
         if row.get("status") == "failed" and not applied:
             fail_title = row.get("title") or "track"
-            st.session_state["isolate_flash"] = f"**{fail_title}** failed. See Queue."
+            st.session_state["isolate_flash"] = f"**{fail_title}** failed. Open Queue."
 
     if isolate_poll_requires_full_rerun(applied=applied, plan_rerun=bool(plan["rerun"])):
         _persist_isolate_ui_state()
@@ -3017,6 +3081,10 @@ def _render_downloads_panel(
                 target = Path(str(last)) if last else export_root
                 if not open_path_in_os(target):
                     st.warning("Could not open that folder.")
+        st.caption(
+            "If the folder window is hidden, Alt+Tab. Saving overwrites a same-named "
+            "file. On Linux, a missing zenity picker is treated as cancel."
+        )
 
         st.divider()
         fmt = _download_format_widget()
@@ -3309,12 +3377,12 @@ def _enqueue_confirmed_job(choice: dict, audio_path: Path) -> None:
             "two_pass": bool(choice.get("two_pass")),
             "guitar_refine": bool(choice.get("guitar_refine")),
         }
-    # Stay on the draft tab (or Home) with Queue visible; scroll to top.
+    # Stay on the draft tab (or Home); open Queue on the next paint.
     st.session_state["_isolate_pending_queue"] = True
+    st.session_state[ISOLATE_QUEUE_PANEL_OPEN_KEY] = True
     if origin_tab:
         # Do not jump to Home chrome — processing stays on this tab.
         st.session_state["_isolate_keep_draft_tab"] = origin_tab
-    _request_loading_overlay()
     _rerun_scroll_top()
 
 
@@ -3976,60 +4044,84 @@ def _render_file_ready_banner() -> None:
     ):
         return
     st.info(
-        f"**{_staged_source_name()}** is ready. Click **Separate tracks** on New to "
+        f"**{_staged_source_name()}** is ready. Click **Separate tracks** on Home to "
         "replace the current results. Existing stems stay on disk until the new job finishes."
     )
 
 
 def main() -> None:
-    title_col, refresh_col = st.columns([6, 1], vertical_alignment="center")
-    with title_col:
-        st.title("Audio Isolation", anchor=False, help=PAGE_TITLE_HELP)
-    with refresh_col:
-        refresh_clicked = st.button(
-            "Refresh",
-            key="isolate_refresh",
-            help="Re-scan the local run library",
-            width="stretch",
+    # Title + Queue/Refresh + Home|mix|+ stay sticky as one chrome block.
+    # Status / flash / banners paint below so they never split the sticky surface.
+    with st.container(key="isolate_sticky_chrome"):
+        title_col, queue_col, refresh_col = st.columns(
+            [5.2, 1.15, 1], vertical_alignment="center"
         )
+        with title_col:
+            st.title("Audio Isolation", anchor=False, help=PAGE_TITLE_HELP)
+        queue_open = bool(st.session_state.get(ISOLATE_QUEUE_PANEL_OPEN_KEY))
+        queue_n = _queue_visible_count()
+        queue_label = f"Queue ({queue_n})" if queue_n else "Queue"
+        with queue_col:
+            st.button(
+                queue_label,
+                key="isolate_queue_toggle",
+                type="primary" if queue_open else "secondary",
+                help="Jobs: open in mixer, delete, pause, or stop.",
+                width="stretch",
+                on_click=_toggle_queue_panel,
+            )
+        with refresh_col:
+            refresh_clicked = st.button(
+                "Refresh",
+                key="isolate_refresh",
+                help="Re-scan the local run library",
+                width="stretch",
+            )
 
-    if not shutil.which("ffmpeg"):
-        st.error(
-            "ffmpeg is required for audio conversion but was not found on PATH. "
-            f"{_ffmpeg_install_hint()}"
+        if not shutil.which("ffmpeg"):
+            st.error(
+                "ffmpeg is required for audio conversion but was not found on PATH. "
+                f"{_ffmpeg_install_hint()}"
+            )
+            return
+
+        demucs_ok = is_demucs_available()
+        if not demucs_ok:
+            st.error(
+                "Audio separation requires Demucs, which is not installed. "
+                f"{DEMUCS_INSTALL_HINT}"
+            )
+            return
+
+        logger.debug("isolate paint demucs=%s", demucs_ok)
+        ensure_worker_started()
+        browser_id = _get_browser_user_id()
+        _restore_isolate_ui_state()
+        if refresh_clicked:
+            _refresh_isolate_from_disk(browser_id)
+        _rehydrate_artifacts_from_disk(browser_id)
+
+        _ensure_workspace_tab(
+            has_artifacts=bool(st.session_state.get("isolate_artifacts"))
         )
-        return
+        # The global overlay is nav-only (app.py). Job state belongs to the status
+        # strip below, which stays non-blocking because the app remains usable.
+        # Always mount this 0-height iframe so its slot never appears/disappears.
+        _scroll_main_to_top(isolate_scroll_top_token(st.session_state))
 
-    demucs_ok = is_demucs_available()
-    if not demucs_ok:
-        st.error(
-            "Audio separation requires Demucs, which is not installed. "
-            f"{DEMUCS_INSTALL_HINT}"
-        )
-        return
-
-    logger.debug("isolate paint demucs=%s", demucs_ok)
-    ensure_worker_started()
-    browser_id = _get_browser_user_id()
-    _restore_isolate_ui_state()
-    if refresh_clicked:
-        _refresh_isolate_from_disk(browser_id)
-    _rehydrate_artifacts_from_disk(browser_id)
-
-    _ensure_workspace_tab(has_artifacts=bool(st.session_state.get("isolate_artifacts")))
-    # The global overlay is nav-only (app.py). Job state belongs to the status
-    # strip below, which stays non-blocking because the app remains usable.
-    # Always mount this 0-height iframe so its slot never appears/disappears.
-    _scroll_main_to_top(isolate_scroll_top_token(st.session_state))
+        owner = browser_id if isinstance(browser_id, str) else None
+        _render_moises_tab_strip(owner)
 
     _poll_running_jobs()
     if flash := st.session_state.pop("isolate_flash", None):
         st.success(flash)
     _render_file_ready_banner()
 
-    owner = browser_id if isinstance(browser_id, str) else None
-    _render_moises_tab_strip(owner)
     shell = apply_shell_view(st.session_state)
+
+    # Paint before Home/mix so the fixed overlay appears without waiting on the form.
+    if st.session_state.get(ISOLATE_QUEUE_PANEL_OPEN_KEY):
+        _render_queue_float_panel()
 
     if shell == "mix":
         _render_mixer_workspace(owner)
@@ -4043,13 +4135,10 @@ def main() -> None:
             )
             with st.expander("Technical details"):
                 st.exception(exc)
-        st.divider()
-        st.subheader("Queue")
-        _queue_tab_fragment()
 
     st.session_state["_isolate_form_drawn"] = True
     _persist_isolate_ui_state()
-    # Separate tracks: stay on Home/Queue; keep the draft tab when one started the job.
+    # Separate tracks: stay on Home; keep the draft tab when one started the job.
     if st.session_state.pop("_isolate_pending_queue", False):
         keep_draft = str(st.session_state.pop("_isolate_keep_draft_tab", "") or "")
         if keep_draft and is_new_draft_tab(keep_draft):

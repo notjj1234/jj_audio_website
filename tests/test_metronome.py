@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -18,12 +19,16 @@ from audio_to_tab.metronome import (
     detect_beats_per_measure,
     gate_unreliable_intro_beats,
     generate_metronome_stem,
+    integrate_tempo_curve,
     load_metronome_diagnostics,
     metronome_grid_times,
+    octave_snap_bpm,
     pick_metronome_source,
     rebake_metronome_artifact,
     refine_tempo_phase,
     render_metronome_wav,
+    stabilize_tempo_curve,
+    write_metronome_diagnostics,
 )
 
 
@@ -540,3 +545,213 @@ def test_generate_metronome_talking_intro_gates_noise(tmp_path: Path):
     assert peaks.size > 0
     assert any(abs(p - 2.0) < 0.12 for p in peaks)
     assert any(p < 0.12 for p in peaks)
+
+
+def test_octave_snap_bpm_collapses_double_and_half():
+    assert octave_snap_bpm(240.0, 120.0) == pytest.approx(120.0)
+    assert octave_snap_bpm(60.0, 120.0) == pytest.approx(60.0)
+    assert octave_snap_bpm(90.0, 120.0) == pytest.approx(120.0)
+
+
+def test_stabilize_tempo_curve_median_then_snap():
+    rng = np.random.default_rng(3)
+    noisy = 120.0 + rng.uniform(-5.0, 5.0, size=400)
+    curve = stabilize_tempo_curve(noisy, sr=22050, hop_length=512, global_bpm=120.0)
+    assert curve.size == noisy.size
+    assert float(np.max(np.abs(curve - 120.0))) < 1.0
+
+
+def test_integrate_tempo_curve_constant_120():
+    times = np.linspace(0.0, 4.0, 17)
+    bpm = np.full(times.size, 120.0)
+    out = integrate_tempo_curve(
+        0.0,
+        4.0,
+        curve_times=times,
+        curve_bpm=bpm,
+        fallback_bpm=120.0,
+        include_start=True,
+    )
+    expected = np.arange(0.0, 4.0, 0.5)
+    np.testing.assert_allclose(out, expected, atol=1e-9)
+
+
+def test_build_click_times_uses_local_period_in_lead_when_confident():
+    detected = np.asarray([1.2, 1.8, 2.4], dtype=np.float64)
+    curve_times = np.linspace(0.0, 3.0, 31)
+    curve_bpm = np.full(curve_times.size, 100.0)
+    conf = np.ones(curve_times.size)
+    times = build_click_times(
+        detected,
+        duration_sec=3.0,
+        bpm=120.0,
+        tempo_curve=curve_bpm,
+        curve_times=curve_times,
+        curve_conf=conf,
+    )
+    assert any(abs(float(t) - 0.0) < 1e-6 for t in times)
+    assert any(abs(float(t) - 0.6) < 1e-6 for t in times)
+    assert not any(abs(float(t) - 0.2) < 0.04 for t in times)
+    for t in detected:
+        assert any(abs(float(x) - float(t)) < 1e-9 for x in times)
+
+
+def test_build_click_times_without_curve_matches_today():
+    detected = np.asarray([1.5, 2.0, 2.5, 3.0, 3.5], dtype=np.float64)
+    times = build_click_times(detected, duration_sec=4.0, bpm=120.0)
+    expected = np.arange(0.0, 4.0, 0.5)
+    np.testing.assert_allclose(times, expected, atol=1e-9)
+    gapped = np.concatenate(
+        [
+            np.arange(0.0, 4.0 + 1e-9, 0.5),
+            np.arange(10.0, 14.0 + 1e-9, 0.5),
+        ]
+    )
+    filled = build_click_times(gapped, duration_sec=14.5, bpm=120.0)
+    again = build_click_times(
+        gapped,
+        duration_sec=14.5,
+        bpm=120.0,
+        tempo_curve=None,
+        curve_times=None,
+        curve_conf=None,
+    )
+    np.testing.assert_allclose(filled, again, atol=1e-9)
+
+
+def test_gate_keeps_quiet_regular_intro_pulse():
+    sr = 22050
+    period = 0.5
+    duration = 6.0
+    n = int(sr * duration)
+    mono = np.zeros(n, dtype=np.float32)
+    click = int(0.02 * sr)
+    intro = np.arange(0.15, 2.0, period, dtype=np.float64)
+    drums = np.arange(2.0, duration, period, dtype=np.float64)
+    for t in intro:
+        i = int(round(float(t) * sr))
+        mono[i : i + click] = 0.15
+    for t in drums:
+        i = int(round(float(t) * sr))
+        mono[i : i + click] = 0.9
+    detected = np.concatenate([intro, drums])
+    local = np.full(detected.size, period, dtype=np.float64)
+    gated, body_start = gate_unreliable_intro_beats(
+        detected, mono, sr, period, local_periods=local
+    )
+    assert body_start == pytest.approx(2.0, abs=0.05)
+    assert any(abs(float(t) - 0.15) < 1e-9 for t in gated)
+    assert any(abs(float(t) - 2.0) < 1e-9 for t in gated)
+
+
+def test_generate_metronome_vocal_intro_follows_local_pulse(tmp_path: Path):
+    sr = 22050
+    duration = 8.0
+    n = int(sr * duration)
+    y = np.zeros(n, dtype=np.float32)
+    click = int(0.02 * sr)
+    quiet = np.arange(0.15, 2.0, 0.5, dtype=np.float64)
+    drums = np.arange(2.0, duration, 0.5, dtype=np.float64)
+    for t in quiet:
+        i = int(round(float(t) * sr))
+        y[i : i + click] = 0.16
+    for t in drums:
+        i = int(round(float(t) * sr))
+        y[i : i + click] = 0.9
+    src = tmp_path / "vocal_intro.wav"
+    out = tmp_path / "metronome.wav"
+    sf.write(str(src), np.column_stack([y, y]), sr, subtype="PCM_16")
+    result = generate_metronome_stem(src, out)
+    assert result is not None
+    clicks = np.asarray(result.click_times_1x, dtype=np.float64)
+    intro_hits = sum(
+        1 for p in quiet if any(abs(float(c) - float(p)) < 0.08 for c in clicks)
+    )
+    assert intro_hits >= max(2, quiet.size - 1)
+    late = drums[drums >= 2.0]
+    late_hits = sum(
+        1 for p in late if any(abs(float(c) - float(p)) < 0.08 for c in clicks)
+    )
+    assert late_hits >= max(3, late.size // 2)
+    assert result.body_start_sec == pytest.approx(2.0, abs=0.35)
+    assert result.first_detected_sec < 1.6
+
+
+def test_steady_tempo_matches_global_grid(tmp_path: Path):
+    src = tmp_path / "steady.wav"
+    out = tmp_path / "metronome.wav"
+    _write_pulse_train(src, bpm=120.0, duration=8.0)
+    result = generate_metronome_stem(src, out)
+    assert result is not None
+    detected = np.asarray(result.detected_times, dtype=np.float64)
+    old_grid = build_click_times(
+        detected, duration_sec=result.duration_sec, bpm=result.bpm
+    )
+    clicks = np.asarray(result.click_times_1x, dtype=np.float64)
+    n = min(old_grid.size, clicks.size)
+    assert n >= 8
+    diffs = []
+    for t in clicks:
+        diffs.append(float(np.min(np.abs(old_grid - float(t)))))
+    assert max(diffs) < 0.03
+
+
+def test_diagnostics_bpm_curve_optional_and_rebake_preserves_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    src = tmp_path / "drums.wav"
+    _write_pulse_train(src, bpm=120.0, duration=4.0)
+    result = generate_metronome_stem(src, tmp_path / "metronome.wav", source="drums")
+    assert result is not None
+    assert result.bpm_curve_t
+    assert result.bpm_curve_bpm
+    assert "bpm_curve" not in result.slim_meta()
+    diag = tmp_path / "metronome_diagnostics.json"
+    write_metronome_diagnostics(diag, result)
+    payload = load_metronome_diagnostics(diag)
+    assert payload is not None
+    assert payload["bpm_curve"]["t"]
+    assert payload["bpm_curve"]["bpm"]
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("beat_track should not run during rebake")
+
+    monkeypatch.setattr("librosa.beat.beat_track", boom)
+    rebaked = rebake_metronome_artifact(
+        tmp_path,
+        MetronomeRenderOptions(accent=False, rate=1.0, sound="classic"),
+    )
+    assert rebaked is not None
+    assert tuple(rebaked.bpm_curve_t) == tuple(result.bpm_curve_t)
+    assert tuple(rebaked.bpm_curve_bpm) == tuple(result.bpm_curve_bpm)
+
+    old_dir = tmp_path / "legacy"
+    old_dir.mkdir()
+    old_payload = dict(payload)
+    old_payload.pop("bpm_curve", None)
+    (old_dir / "metronome_diagnostics.json").write_text(
+        json.dumps(old_payload), encoding="utf-8"
+    )
+    (tmp_path / "metronome.wav").replace(old_dir / "metronome.wav")
+    legacy = rebake_metronome_artifact(
+        old_dir,
+        MetronomeRenderOptions(accent=True, rate=1.0, sound="classic"),
+    )
+    assert legacy is not None
+    assert legacy.bpm_curve_t == ()
+    assert legacy.bpm_curve_bpm == ()
+
+
+def test_generate_metronome_48000_sr_pulse_train(tmp_path: Path):
+    src = tmp_path / "drums48.wav"
+    out = tmp_path / "metronome.wav"
+    _write_pulse_train(src, bpm=120.0, duration=8.0, sr=48000)
+    result = generate_metronome_stem(src, out, source="drums")
+    assert result is not None
+    assert result.sr == 48000
+    assert result.bpm == pytest.approx(120.0, abs=8.0)
+    assert result.beat_count >= 8
+    clicks = np.asarray(result.click_times_1x, dtype=np.float64)
+    assert any(abs(float(t) - 0.5) < 0.08 for t in clicks)
+    assert any(abs(float(t) - 1.0) < 0.08 for t in clicks)
+    assert any(abs(float(t) - 4.0) < 0.12 for t in clicks)

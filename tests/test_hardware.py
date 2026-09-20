@@ -52,7 +52,7 @@ def _cpu_edition_by_default(monkeypatch):
 
 def test_mac_offers_mps_but_never_cuda():
     fake_cuda = HostProbe(cuda=True, mps=True, ram_gb=16.0)
-    assert desktop_device_options(fake_cuda, platform="darwin") == ["cpu", "mps"]
+    assert desktop_device_options(fake_cuda, platform="darwin") == ["mps", "cpu"]
     assert desktop_device_options(CUDA_HIGH, platform="darwin") == ["cpu"]
 
 def test_mac_mps_gated_behind_12gb_ram():
@@ -62,7 +62,7 @@ def test_mac_mps_gated_behind_12gb_ram():
 
 def test_windows_offers_cuda_only_when_probe_has_cuda():
     assert desktop_device_options(CPU_MID, platform="win32") == ["cpu"]
-    assert desktop_device_options(CUDA_HIGH, platform="win32") == ["cpu", "cuda"]
+    assert desktop_device_options(CUDA_HIGH, platform="win32") == ["cuda", "cpu"]
 
 def test_mac_never_offers_mps_on_windows():
     assert desktop_device_options(MPS_MAC, platform="win32") == ["cpu"]
@@ -73,10 +73,10 @@ def test_linux_desktop_policy_matches_windows_not_mac():
     assert desktop_device_options(CUDA_HIGH, platform="linux") == ["cpu"]
 
 
-def test_auto_low_ram_is_faster_cpu_even_with_cuda():
+def test_auto_low_ram_with_cuda_stays_on_gpu():
     rec = desktop_recommend(CUDA_LOW, platform="win32")
     assert rec["speed"] == "faster"
-    assert rec["device"] == "cpu"
+    assert rec["device"] == "cuda"
     assert rec["quality"] == "fast"
     assert "short clip" in rec["notes"]
 
@@ -88,7 +88,7 @@ def test_auto_windows_cuda_is_balanced_gpu():
     assert rec["quality"] == "balanced"
 
 
-def test_auto_cpu_or_mac_is_faster_cpu():
+def test_auto_cpu_or_mac_without_mps_is_faster_cpu():
     for probe, plat in (
         (CPU_MID, "win32"),
         (CPU_MID, "darwin"),
@@ -114,10 +114,10 @@ def test_auto_low_ram_mps_mac_stays_cpu():
     assert rec["speed"] == "faster"
 
 
-def test_resolve_faster_always_cpu_on_cpu_edition(monkeypatch):
+def test_resolve_faster_uses_gpu_when_available(monkeypatch):
     monkeypatch.delenv("AUDIO_TOOLS_EDITION", raising=False)
     resolved = resolve_desktop_speed("faster", CUDA_HIGH, platform="win32")
-    assert resolved["device"] == "cpu"
+    assert resolved["device"] == "cuda"
     assert resolved["quality"] == "fast"
 
 
@@ -128,10 +128,10 @@ def test_resolve_faster_uses_cuda_on_cuda_only_edition(monkeypatch):
     assert resolved["quality"] == "fast"
 
 
-def test_resolve_faster_stays_cpu_on_both_edition(monkeypatch):
+def test_resolve_faster_uses_cuda_on_both_edition(monkeypatch):
     monkeypatch.setenv("AUDIO_TOOLS_EDITION", "both")
     resolved = resolve_desktop_speed("faster", CUDA_HIGH, platform="win32")
-    assert resolved["device"] == "cpu"
+    assert resolved["device"] == "cuda"
     assert resolved["quality"] == "fast"
 
 
@@ -141,9 +141,9 @@ def test_cuda_edition_windows_device_options_cuda_only(monkeypatch):
     assert desktop_device_options(CUDA_HIGH, platform="win32") == ["cuda"]
 
 
-def test_both_edition_windows_device_options_cpu_and_cuda(monkeypatch):
+def test_both_edition_windows_device_options_gpu_first(monkeypatch):
     monkeypatch.setenv("AUDIO_TOOLS_EDITION", "both")
-    assert desktop_device_options(CPU_MID, platform="win32") == ["cpu", "cuda"]
+    assert desktop_device_options(CPU_MID, platform="win32") == ["cuda", "cpu"]
 
 
 def test_cuda_edition_system_summary_shows_nvidia_not_cpu(monkeypatch):
@@ -286,11 +286,11 @@ def test_lite_accelerator_gate_by_ram_and_platform():
     assert lite_accelerator_available(CPU_MID, platform="win32") is False
 
 
-def test_lite_device_choice_ids_cpu_plus_accelerator():
+def test_lite_device_choice_ids_gpu_first():
     eight = HostProbe(cuda=False, mps=True, ram_gb=8.0)
     assert lite_device_choice_ids(eight, platform="darwin") == []
-    assert lite_device_choice_ids(MPS_MAC, platform="darwin") == ["cpu", "mps"]
-    assert lite_device_choice_ids(CUDA_HIGH, platform="win32") == ["cpu", "cuda"]
+    assert lite_device_choice_ids(MPS_MAC, platform="darwin") == ["mps", "cpu"]
+    assert lite_device_choice_ids(CUDA_HIGH, platform="win32") == ["cuda", "cpu"]
     assert lite_device_choice_ids(CPU_MID, platform="win32") == []
     assert lite_device_plain_label("mps") == "Apple GPU"
     assert lite_device_plain_label("cuda") == "NVIDIA GPU"
@@ -328,7 +328,7 @@ def test_memory_pressure_is_tight_thresholds():
     ) is False
 
 
-def test_lite_auto_choice_prefers_cpu_under_memory_pressure():
+def test_lite_auto_choice_keeps_gpu_under_memory_pressure():
     healthy = MemoryPressure(free_gb=10.0, total_gb=16.0, swap_used_gb=0.0)
     tight = MemoryPressure(free_gb=2.5, total_gb=16.0, swap_used_gb=0.5)
 
@@ -338,19 +338,19 @@ def test_lite_auto_choice_prefers_cpu_under_memory_pressure():
     assert mps_ok["reason"] is None
 
     mps_tight = lite_auto_choice(MPS_MAC, platform="darwin", pressure=tight)
-    assert mps_tight["device"] == "cpu"
-    assert mps_tight["speed"] == "faster"
-    assert mps_tight["reason"] == "low_free_memory"
-    assert lite_auto_device(MPS_MAC, platform="darwin", pressure=tight) == "cpu"
+    assert mps_tight["device"] == "mps"
+    assert mps_tight["speed"] == "balanced"
+    assert mps_tight["reason"] is None
+    assert lite_auto_device(MPS_MAC, platform="darwin", pressure=tight) == "mps"
 
     cuda_ok = lite_auto_choice(CUDA_HIGH, platform="win32", pressure=healthy)
     assert cuda_ok["device"] == "cuda"
     assert cuda_ok["speed"] == "balanced"
 
     cuda_tight = lite_auto_choice(CUDA_HIGH, platform="win32", pressure=tight)
-    assert cuda_tight["device"] == "cpu"
-    assert cuda_tight["speed"] == "faster"
-    assert cuda_tight["reason"] == "low_free_memory"
+    assert cuda_tight["device"] == "cuda"
+    assert cuda_tight["speed"] == "balanced"
+    assert cuda_tight["reason"] is None
 
     # Probe failure / unknown pressure must not override hardware recommend.
     unknown = lite_auto_choice(
@@ -462,6 +462,7 @@ def test_lite_detected_and_using_captions_plain_language():
     assert "Apple GPU" not in using_override
     assert "low free memory" not in using_override
 
+    # reason= is ignored under GPU-first defaults (API compat only).
     using_pressure = lite_using_caption(
         MPS_MAC,
         guitar_engine="guitar_roformer",
@@ -470,7 +471,7 @@ def test_lite_detected_and_using_captions_plain_language():
         speed="faster",
         reason="low_free_memory",
     )
-    assert "low free memory" in using_pressure
+    assert "low free memory" not in using_pressure
     assert "CPU" in using_pressure
 
 

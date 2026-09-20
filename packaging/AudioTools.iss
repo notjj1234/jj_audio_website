@@ -7,7 +7,7 @@
 ; Optional defines (ISCC /DName=Value):
 ;   DistDir    - folder containing AudioTools.exe (default: ..\dist\AudioTools)
 ;   OutputDir  - where Setup.exe is written (default: ..\dist)
-;   AppVersion - version string (default: 0.1.3)
+;   AppVersion - version string (default: 0.1.4)
 ;   Flavor     - cpu (default), cuda, or both
 
 #ifndef DistDir
@@ -17,7 +17,7 @@
   #define OutputDir "..\dist"
 #endif
 #ifndef AppVersion
-  #define AppVersion "0.1.3"
+  #define AppVersion "0.1.4"
 #endif
 #ifndef Flavor
   #define Flavor "cpu"

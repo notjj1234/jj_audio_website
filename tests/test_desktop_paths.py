@@ -942,16 +942,16 @@ def test_desktop_app_version_is_0_1_1_not_website_package(monkeypatch):
     from audio_to_tab import __version__
 
     monkeypatch.delenv("AUDIO_TOOLS_EDITION", raising=False)
-    assert __version__ == "0.1.3"
-    assert common.desktop_app_version() == "0.1.3"
+    assert __version__ == "0.1.4"
+    assert common.desktop_app_version() == "0.1.4"
     pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.1.3"' in pyproject
+    assert 'version = "0.1.4"' in pyproject
     blurb = common.desktop_demo_blurb()
-    assert "Demo 0.1.3 (CPU)" in blurb
+    assert "Demo 0.1.4 (CPU)" in blurb
     assert "this PC" in blurb
     assert "github" not in blurb.lower()
     assert "ATT_SECRET" not in blurb
-    cuda_blurb = common.desktop_demo_blurb("0.1.3", "cuda")
+    cuda_blurb = common.desktop_demo_blurb("0.1.4", "cuda")
     assert "NVIDIA CUDA" in cuda_blurb
 
 
@@ -959,7 +959,7 @@ def test_inno_and_installer_script_use_versioned_filename():
     root = Path(__file__).resolve().parents[1]
     iss = (root / "packaging" / "AudioTools.iss").read_text(encoding="utf-8")
     assert "OutputBaseFilename=AudioTools-{#AppVersion}-windows-x64-{#Flavor}-setup" in iss
-    assert '#define AppVersion "0.1.3"' in iss
+    assert '#define AppVersion "0.1.4"' in iss
     assert "VersionInfoVersion={#AppVersion}" in iss
     assert "VersionInfoProductVersion={#AppVersion}" in iss
     assert "{A7C3E8F1-4B2D-4E9A-9C1F-8D6B5A2E0F73}" in iss
@@ -1004,6 +1004,9 @@ def test_streamlit_about_is_local_demo_without_hosted_urls():
     assert 'section.main [data-testid="stTabs"] button' in text
     assert "font-size: 1.4rem !important" in text
     assert "min-height: 52px !important" in text
+    assert '[data-testid="stButton"] button' in text
+    assert "scale(0.97)" in text
+    assert "prefers-reduced-motion" in text
     launcher = LAUNCHER_PATH.read_text(encoding="utf-8")
     assert "def window_title()" in launcher
     assert "edition_window_title" in launcher
@@ -1042,6 +1045,9 @@ def test_youtube_audio_page_nav_order_and_freeze_import():
     assert "ui.pages.youtube_audio" in spec
     assert "Search songs" in page
     assert "Save audio to folder" in page
+    assert "Interface Lite/Pro" in page
+    assert "Alt+Tab" in page
+    assert "overwrites a same-named file" in page
     assert 'st.session_state[YT_AUDIO_FMT_KEY] = _DEFAULT_FMT' in page or '_DEFAULT_FMT = "mp3"' in page
 
 

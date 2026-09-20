@@ -215,6 +215,51 @@ st.html(
     animation: none !important;
   }
 
+  /* Subtle iOS-adjacent button press/hover. Transform + opacity only.
+     Do not put transition on wrappers (sticky chrome / queue float). */
+  [data-testid="stButton"] button,
+  [data-testid="stDownloadButton"] button,
+  [data-testid="stFormSubmitButton"] button,
+  [data-testid="stPopover"] button {
+    transform-origin: center;
+    transition:
+      transform 90ms cubic-bezier(0.25, 0.1, 0.25, 1),
+      opacity 150ms cubic-bezier(0.25, 0.1, 0.25, 1);
+  }
+  [data-testid="stButton"] button:hover:not(:disabled),
+  [data-testid="stDownloadButton"] button:hover:not(:disabled),
+  [data-testid="stFormSubmitButton"] button:hover:not(:disabled),
+  [data-testid="stPopover"] button:hover:not(:disabled) {
+    opacity: 0.92 !important;
+  }
+  [data-testid="stButton"] button:active:not(:disabled),
+  [data-testid="stDownloadButton"] button:active:not(:disabled),
+  [data-testid="stFormSubmitButton"] button:active:not(:disabled),
+  [data-testid="stPopover"] button:active:not(:disabled) {
+    transform: scale(0.97) !important;
+    opacity: 0.88 !important;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    [data-testid="stButton"] button,
+    [data-testid="stDownloadButton"] button,
+    [data-testid="stFormSubmitButton"] button,
+    [data-testid="stPopover"] button {
+      transition: none;
+      transform: none;
+    }
+    [data-testid="stButton"] button:hover:not(:disabled),
+    [data-testid="stDownloadButton"] button:hover:not(:disabled),
+    [data-testid="stFormSubmitButton"] button:hover:not(:disabled),
+    [data-testid="stPopover"] button:hover:not(:disabled),
+    [data-testid="stButton"] button:active:not(:disabled),
+    [data-testid="stDownloadButton"] button:active:not(:disabled),
+    [data-testid="stFormSubmitButton"] button:active:not(:disabled),
+    [data-testid="stPopover"] button:active:not(:disabled) {
+      transform: none;
+      opacity: 1;
+    }
+  }
+
   /* Never let any running mask steal mixer clicks */
   div[data-testid="stDecoration"],
   .stApp > .element-container:has(+ iframe),
@@ -245,31 +290,69 @@ st.html(
     min-height: 280px !important;
   }
 
-  /* Isolate status strip: stay at top of the scrolling main pane when present.
-     Outer slot is always mounted (idle is empty). Min-height only on the
-     running inner block so 1s progress ticks do not shove the New-tab form. */
-  .st-key-isolate_status_strip,
-  div[class*="st-key-isolate_status_strip"] {
-    position: sticky;
-    top: 0;
-    z-index: 20;
-    background: var(--background-color, inherit);
-  }
-  .st-key-isolate_status_running,
-  div[class*="st-key-isolate_status_running"] {
-    min-height: 6.5rem;
-  }
-
-  /* Moises Home|mix|+ strip: always visible while scrolling Isolate */
-  .st-key-isolate_mix_tabs_strip,
-  div[class*="st-key-isolate_mix_tabs_strip"] {
+  /* Isolate sticky chrome: title + Queue/Refresh + Home|mix|+ as one pin surface.
+     Sticky must be on an ancestor whose PARENT is the tall page vertical block
+     (stLayoutWrapper / stElementContainer). Sticky on the keyed block alone fails:
+     its parent is only as tall as the chrome, so it scrolls away immediately.
+     Status strip paints below chrome (not sticky) so it never splits the header. */
+  [data-testid="stLayoutWrapper"]:has(.st-key-isolate_sticky_chrome),
+  [data-testid="stElementContainer"]:has(.st-key-isolate_sticky_chrome),
+  [data-testid="stVerticalBlockBorderWrapper"]:has(.st-key-isolate_sticky_chrome) {
     position: sticky !important;
     top: 0 !important;
-    z-index: 85 !important;
+    z-index: 90 !important;
+    background: var(--background-color, #0e1117) !important;
+    padding-bottom: 0 !important;
+    margin-bottom: 0 !important;
+  }
+  .st-key-isolate_sticky_chrome,
+  div[class*="st-key-isolate_sticky_chrome"] {
+    background: var(--background-color, #0e1117) !important;
+  }
+  /* 0-height scroll helper must not reserve a blank strip under the title. */
+  .st-key-isolate_sticky_chrome [data-testid="stCustomComponentV1"]:has(iframe[height="0"]),
+  div[class*="st-key-isolate_sticky_chrome"] [data-testid="stCustomComponentV1"]:has(iframe[height="0"]) {
+    height: 0 !important;
+    min-height: 0 !important;
+    max-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+    border: none !important;
+  }
+  .st-key-isolate_sticky_chrome iframe[height="0"],
+  div[class*="st-key-isolate_sticky_chrome"] iframe[height="0"] {
+    height: 0 !important;
+    min-height: 0 !important;
+    max-height: 0 !important;
+    display: block !important;
+    border: none !important;
+  }
+  /* Collapse residual gap under sticky chrome before Upload / mix content. */
+  [data-testid="stLayoutWrapper"]:has(.st-key-isolate_sticky_chrome) + [data-testid="stLayoutWrapper"],
+  [data-testid="stElementContainer"]:has(.st-key-isolate_sticky_chrome) + [data-testid="stElementContainer"],
+  [data-testid="stVerticalBlockBorderWrapper"]:has(.st-key-isolate_sticky_chrome)
+    + [data-testid="stVerticalBlockBorderWrapper"] {
+    margin-top: 0 !important;
+  }
+  .st-key-isolate_status_strip,
+  div[class*="st-key-isolate_status_strip"] {
+    position: relative;
+    z-index: 20;
+    background: var(--background-color, inherit);
+    margin-top: 0.35rem;
+    margin-bottom: 0.35rem;
+  }
+
+  /* Moises Home|mix|+ strip: sits inside sticky chrome (no separate sticky top). */
+  .st-key-isolate_mix_tabs_strip,
+  div[class*="st-key-isolate_mix_tabs_strip"] {
+    position: relative !important;
+    z-index: 1 !important;
     background: var(--background-color, inherit) !important;
-    padding-top: 0.15rem;
-    padding-bottom: 0.2rem;
-    margin-bottom: 0.15rem;
+    padding-top: 0.1rem;
+    padding-bottom: 0 !important;
+    margin-bottom: 0 !important;
   }
   /* Streamlit can leave leftover custom-component iframes when keys change. */
   .st-key-isolate_mix_tabs_strip [data-testid="stCustomComponentV1"]:not(:last-of-type),
@@ -296,7 +379,7 @@ st.html(
     background-color: rgba(15, 23, 42, 0.42) !important;
   }
 
-  /* Refresh sits level with the Isolate title, right of the header row */
+  /* Refresh + Queue sit level with the Isolate title, right of the header row */
   [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) {
     align-items: center !important;
   }
@@ -305,9 +388,47 @@ st.html(
     padding-top: 0 !important;
     margin-bottom: 0 !important;
   }
-  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) .st-key-isolate_refresh {
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) .st-key-isolate_refresh,
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) .st-key-isolate_queue_toggle {
     display: flex;
     justify-content: flex-end;
+  }
+
+  /* Isolate Queue: non-modal floating activity panel (not a sidebar / drawer). */
+  .st-key-isolate_queue_float,
+  div[class*="st-key-isolate_queue_float"],
+  [data-testid="stElementContainer"]:has(> .st-key-isolate_queue_float),
+  [data-testid="stVerticalBlockBorderWrapper"]:has(> .st-key-isolate_queue_float) {
+    position: fixed !important;
+    right: 1.15rem;
+    bottom: 1.15rem;
+    width: 420px;
+    max-width: calc(100vw - 2.3rem);
+    max-height: 55vh;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    z-index: 95 !important;
+    background: var(--background-color, #0e1117) !important;
+    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.38);
+    border-radius: 0.75rem;
+  }
+  .st-key-isolate_queue_float [data-testid="stHorizontalBlock"] {
+    flex-wrap: wrap !important;
+    gap: 0.35rem !important;
+    align-items: center !important;
+  }
+  .st-key-isolate_queue_float [data-testid="stHorizontalBlock"] > div:first-child {
+    flex: 1 1 100% !important;
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+  .st-key-isolate_queue_float [data-testid="stHorizontalBlock"] > div:not(:first-child) {
+    flex: 1 1 auto !important;
+    min-width: 5.5rem !important;
+    width: auto !important;
+  }
+  .st-key-isolate_queue_float [data-testid="stButton"] button p {
+    white-space: nowrap !important;
   }
 
   /* New-tab outcome/stem tiles: icon stacked above label (same for presets + custom) */

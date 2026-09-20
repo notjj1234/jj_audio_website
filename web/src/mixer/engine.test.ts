@@ -302,4 +302,49 @@ describe("mixer helpers", () => {
     expect(connected).toContain("gain->compressor");
     expect(connected).toContain("compressor->destination");
   });
+
+  it("keeps playing across document hide; wake does not soft-pause healthy audio", async () => {
+    class FakeCtx {
+      state: AudioContextState = "running";
+      currentTime = 1;
+    }
+    const engine = new StemMixerEngine();
+    let softPaused = 0;
+    engine.setSoftPauseCallback(() => {
+      softPaused += 1;
+    });
+    const internal = engine as unknown as {
+      ctx: FakeCtx;
+      playing: boolean;
+    };
+    const fake = new FakeCtx();
+    internal.ctx = fake;
+    internal.playing = true;
+    engine.installWakeHooks();
+
+    const visibility = { value: "visible" as DocumentVisibilityState };
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility.value,
+    });
+
+    visibility.value = "hidden";
+    document.dispatchEvent(new Event("visibilitychange"));
+    await Promise.resolve();
+    expect(softPaused).toBe(0);
+    expect(engine.isPlaying()).toBe(true);
+
+    const tick = window.setInterval(() => {
+      fake.currentTime += 0.05;
+    }, 20);
+    try {
+      visibility.value = "visible";
+      document.dispatchEvent(new Event("visibilitychange"));
+      await new Promise((r) => window.setTimeout(r, 200));
+      expect(softPaused).toBe(0);
+      expect(engine.isPlaying()).toBe(true);
+    } finally {
+      window.clearInterval(tick);
+    }
+  });
 });

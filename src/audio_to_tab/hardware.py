@@ -25,8 +25,9 @@ LOW_RAM_GB = 8.0
 # Torch MPS needs working room for the ~700 MB fp32 BS-RoFormer-SW weights plus
 # activations; 8 GB unified-memory Macs (mostly base M1/M2/M3/M4) stay on CPU.
 MPS_MIN_RAM_GB = 12.0
-# Live headroom gates for Lite auto: prefer CPU when free/available RAM is low
-# or swap is already heavy (unified-memory Macs thrash under DAW + tabs + MPS).
+# Live headroom thresholds (kept for probes / diagnostics). Lite auto no longer
+# downgrades GPU → CPU when free RAM is tight — GPU is the default whenever
+# the host offers it. Callers may still surface pressure in captions.
 MEMORY_TIGHT_FREE_GB = 4.0
 MEMORY_TIGHT_FREE_FRAC = 0.20
 MEMORY_TIGHT_SWAP_GB = 2.0
@@ -284,10 +285,11 @@ def probe_memory_pressure() -> MemoryPressure | None:
 
 
 def memory_pressure_is_tight(pressure: MemoryPressure | None) -> bool:
-    """True when live headroom suggests preferring CPU over GPU for Lite auto.
+    """True when live free RAM / swap looks tight.
 
-    Unknown pressure (None / missing free) does **not** force CPU — fall back to
-    installed-hardware recommend.
+    Lite auto no longer uses this to force CPU; GPU stays the default when the
+    host offers it. Kept for diagnostics and any caller that wants a readout.
+    Unknown pressure (None / missing free) is not treated as tight.
     """
     if pressure is None or pressure.free_gb is None:
         return False
@@ -485,41 +487,50 @@ def _both_edition_windows(*, platform: str | None) -> bool:
 
 
 def desktop_device_options(probe: HostProbe, *, platform: str | None = None) -> list[str]:
-    """Devices the desktop UI may offer. Mac never lists CUDA; Apple Silicon with
-    enough RAM also lists Apple GPU (MPS).
+    """Devices the desktop UI may offer. GPU is listed first when available.
 
-    Windows editions:
+    Mac never lists CUDA; Apple Silicon with enough RAM lists Apple GPU (MPS)
+    ahead of CPU. Windows editions:
     - ``cpu`` — CPU only (unless a live CUDA probe appears on a non-frozen run)
     - ``cuda`` — NVIDIA GPU only
-    - ``both`` — CPU + NVIDIA GPU (combined installer)
+    - ``both`` — NVIDIA GPU + CPU (combined installer; GPU first)
     """
     plat = _platform(platform)
     if _cuda_only_edition_windows(platform=platform):
         return ["cuda"]
-    if _both_edition_windows(platform=platform):
-        return ["cpu", "cuda"]
-    options = ["cpu"]
-    if plat.startswith("win") and probe.cuda:
-        options.append("cuda")
-    if (
+    gpu: list[str] = []
+    if _both_edition_windows(platform=platform) or (
+        plat.startswith("win") and probe.cuda
+    ):
+        gpu.append("cuda")
+    elif (
         plat.startswith("darwin")
         and probe.mps
         and (probe.ram_gb is None or probe.ram_gb >= MPS_MIN_RAM_GB)
     ):
-        options.append("mps")
-    return options
+        gpu.append("mps")
+    return [*gpu, "cpu"]
 
 
 def is_low_ram(probe: HostProbe) -> bool:
     return probe.ram_gb is not None and probe.ram_gb < LOW_RAM_GB
 
 
+def _preferred_gpu(options: list[str]) -> str:
+    """First GPU id in ``options``, else ``cpu``."""
+    if "cuda" in options:
+        return "cuda"
+    if "mps" in options:
+        return "mps"
+    return "cpu"
+
+
 def desktop_recommend(probe: HostProbe, *, platform: str | None = None) -> dict[str, Any]:
     """Auto speed/quality/device for the Streamlit desktop app.
 
-    Aligns with hosted Auto: low RAM → Faster/CPU; Windows CUDA → Balanced/cuda;
-    Apple GPU (MPS) → Balanced/mps on capable Macs; otherwise Faster/CPU.
-    Never recommends extreme or High-GPU.
+    GPU-first: Windows CUDA and eligible Mac MPS are preferred whenever listed.
+    Low RAM still picks Faster quality (and a short-clip note) but stays on GPU
+    when one is available. Never recommends extreme or High-GPU.
     """
     if _cuda_only_edition_windows(platform=platform):
         if is_low_ram(probe):
@@ -536,14 +547,28 @@ def desktop_recommend(probe: HostProbe, *, platform: str | None = None) -> dict[
             "notes": "Recommended: Balanced on NVIDIA GPU.",
         }
     options = desktop_device_options(probe, platform=platform)
+    gpu_dev = _preferred_gpu(options)
     if is_low_ram(probe):
+        if gpu_dev == "cuda":
+            return {
+                "speed": "faster",
+                "quality": "fast",
+                "device": "cuda",
+                "notes": "Recommended: Faster on NVIDIA GPU. Use a short clip (≤90 s).",
+            }
+        if gpu_dev == "mps":
+            return {
+                "speed": "faster",
+                "quality": "fast",
+                "device": "mps",
+                "notes": "Recommended: Faster on Apple GPU (MPS). Use a short clip (≤90 s).",
+            }
         return {
             "speed": "faster",
             "quality": "fast",
             "device": "cpu",
             "notes": "Recommended: Faster on CPU. Use a short clip (≤90 s).",
         }
-    gpu_dev = "cuda" if "cuda" in options else ("mps" if "mps" in options else "cpu")
     if gpu_dev == "mps":
         return {
             "speed": "balanced",
@@ -586,13 +611,12 @@ def resolve_desktop_speed(
         }
 
     if speed_id == "faster":
-        # NVIDIA-only freeze keeps Faster on CUDA; combined/CPU prefer CPU for Faster.
-        device = "cuda" if _cuda_only_edition_windows(platform=platform) else "cpu"
+        # GPU-first: Faster quality on CUDA/MPS when the host offers them.
         return {
             "id": "faster",
             "label": "Faster",
             "quality": "fast",
-            "device": device,
+            "device": gpu,
             "help": "",
         }
     if speed_id == "balanced":
@@ -651,25 +675,19 @@ def lite_auto_choice(
     platform: str | None = None,
     pressure: MemoryPressure | None = None,
 ) -> dict[str, Any]:
-    """Lite device + speed auto, including live memory headroom.
+    """Lite device + speed auto from installed hardware (GPU-first).
 
-    Starts from :func:`desktop_recommend`. When that would pick MPS/CUDA but
-    ``pressure`` is tight, returns CPU + Faster with reason ``low_free_memory``.
-
-    If ``pressure`` is omitted, probes the host once. Probe failure / unknown
-    free RAM does not override the hardware recommend.
+    Starts from :func:`desktop_recommend`. ``pressure`` is accepted for call-site
+    compatibility but no longer overrides GPU → CPU; GPU stays the default when
+    the host offers it. Manual Run-on still lets the user pick CPU.
     """
-    if pressure is None:
-        pressure = probe_memory_pressure()
+    del pressure  # retained for API compatibility; no longer gates device
     rec = desktop_recommend(probe, platform=platform)
-    device = str(rec["device"])
-    speed = str(rec["speed"])
-    reason: str | None = None
-    if device in {"mps", "cuda"} and memory_pressure_is_tight(pressure):
-        device = "cpu"
-        speed = "faster"
-        reason = "low_free_memory"
-    return {"device": device, "speed": speed, "reason": reason}
+    return {
+        "device": str(rec["device"]),
+        "speed": str(rec["speed"]),
+        "reason": None,
+    }
 
 
 def lite_auto_device(
@@ -678,7 +696,7 @@ def lite_auto_device(
     platform: str | None = None,
     pressure: MemoryPressure | None = None,
 ) -> str:
-    """Device id Lite should auto-pick (CPU under memory pressure)."""
+    """Device id Lite should auto-pick (GPU when the host offers it)."""
     return str(lite_auto_choice(probe, platform=platform, pressure=pressure)["device"])
 
 
@@ -694,15 +712,18 @@ def lite_device_plain_label(device: str) -> str:
 def lite_device_choice_ids(
     probe: HostProbe, *, platform: str | None = None
 ) -> list[str]:
-    """CPU + accelerator ids for Lite's Run-on radio, or empty if no choice."""
+    """Accelerator + CPU ids for Lite's Run-on radio, or empty if no choice.
+
+    GPU is listed first so the radio default matches the GPU-first policy.
+    """
     if not lite_accelerator_available(probe, platform=platform):
         return []
     options = desktop_device_options(probe, platform=platform)
     if "mps" in options:
-        return ["cpu", "mps"]
+        return ["mps", "cpu"]
     # CUDA-only edition lists only cuda; still offer CPU as a Lite escape hatch.
     if "cuda" in options or _cuda_only_edition_windows(platform=platform):
-        return ["cpu", "cuda"]
+        return ["cuda", "cpu"]
     return []
 
 
@@ -738,9 +759,10 @@ def lite_using_caption(
     """One-line Lite choice (Using: Faster on CPU · standard guitar model).
 
     Optional ``device`` / ``speed`` reflect a user Run-on pick; otherwise the
-    auto recommendation for this host is used. ``reason="low_free_memory"``
-    appends a plain-language note when auto chose CPU for headroom.
+    auto recommendation for this host is used. ``reason`` is ignored (kept for
+    call-site compatibility after GPU-first defaults).
     """
+    del reason
     rec = desktop_recommend(probe, platform=platform)
     speed_id = speed if speed is not None else str(rec["speed"])
     speed_label = {"faster": "Faster", "balanced": "Balanced", "best": "Best"}.get(
@@ -750,10 +772,7 @@ def lite_using_caption(
     where = lite_device_plain_label(device_id)
     strong = guitar_engine in {"guitar_roformer", "guitar_roformer_refine"}
     guitar_bit = "strong guitar model" if strong else "standard guitar model"
-    line = f"Using: {speed_label} on {where} · {guitar_bit}"
-    if reason == "low_free_memory" and device_id == "cpu":
-        return f"{line} (low free memory)"
-    return line
+    return f"Using: {speed_label} on {where} · {guitar_bit}"
 
 
 def ensure_cuda_available(device: str, probe: HostProbe | None = None) -> None:

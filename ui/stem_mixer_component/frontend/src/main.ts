@@ -96,15 +96,18 @@ class StemMixerEngine {
     this.onSoftPause = cb;
   }
 
-  /** Soft-pause + zombie/closed recovery after sleep/idle. No auto-resume. */
+  /**
+   * Recover zombie/closed AudioContext after sleep/idle. No auto-resume.
+   * Do not soft-pause on document hide — keep playing across app/window switches.
+   * Some browsers still suspend Web Audio while fully backgrounded; that surfaces
+   * via AudioContext statechange, not visibility alone.
+   */
   installWakeHooks(): void {
     if (this.wakeHooked || typeof window === "undefined") return;
     this.wakeHooked = true;
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") {
         void this.handleWake();
-      } else if (this.playing) {
-        void this.softPauseFromInterrupt();
       }
     });
     window.addEventListener("pageshow", () => {
@@ -260,15 +263,19 @@ class StemMixerEngine {
   }
 
   async handleWake(): Promise<void> {
-    if (this.playing) {
-      await this.softPauseFromInterrupt();
-    }
     if (!this.ctx) return;
+    // Only repair dead graphs. Healthy background playback must keep running.
     if (this.ctx.state === "closed") {
+      if (this.playing) {
+        await this.softPauseFromInterrupt();
+      }
       this.rebuildGraphKeepingBuffers();
       return;
     }
     if (await this.contextLooksZombie()) {
+      if (this.playing) {
+        await this.softPauseFromInterrupt();
+      }
       this.rebuildGraphKeepingBuffers();
     }
   }
@@ -527,11 +534,13 @@ let transportPending: "play" | "pause" | "stop" | null = null;
 let reportTimer: number | null = null;
 let lastPublished = "";
 
+const SLEEP_RESUME_HINT = "Tap Play to resume after sleep";
+
 engine.setSoftPauseCallback(() => {
   wantPlaying = false;
   setPlayPauseLabel(false);
   const el = document.getElementById("status");
-  if (el) el.textContent = "Tap Play to resume after sleep";
+  if (el) el.textContent = SLEEP_RESUME_HINT;
   saveTransport();
 });
 
@@ -622,6 +631,13 @@ function setPlayPauseLabel(playing: boolean): void {
   playBtn.setAttribute("aria-pressed", playing ? "true" : "false");
 }
 
+function clearSleepResumeHint(): void {
+  const el = document.getElementById("status");
+  if (el && el.textContent === SLEEP_RESUME_HINT) {
+    el.textContent = "";
+  }
+}
+
 function applyTransport(): void {
   if (transportBusy) return;
   const pending = transportPending;
@@ -646,6 +662,12 @@ function applyTransport(): void {
   transportBusy = true;
   const op = wantPlaying ? engine.play() : engine.pause();
   void op
+    .then(() => {
+      const playingNow = engine.isPlaying();
+      wantPlaying = playingNow;
+      setPlayPauseLabel(playingNow);
+      if (playingNow) clearSleepResumeHint();
+    })
     .catch(() => {
       wantPlaying = engine.isPlaying();
       setPlayPauseLabel(wantPlaying);
@@ -802,7 +824,10 @@ function renderUI(theme?: Theme): void {
   document.getElementById("btn-restart")!.onclick = () => {
     wantPlaying = true;
     setPlayPauseLabel(true);
-    void engine.restart().then(() => saveTransport());
+    void engine.restart().then(() => {
+      if (engine.isPlaying()) clearSleepResumeHint();
+      saveTransport();
+    });
   };
 
   document.getElementById("btn-muteall")!.onclick = () => {
@@ -938,6 +963,7 @@ function renderUI(theme?: Theme): void {
       }
     }
     updatePlayheads(t, dur);
+    if (playing) clearSleepResumeHint();
     if (!transportBusy && transportPending === null) {
       wantPlaying = playing;
       setPlayPauseLabel(playing);

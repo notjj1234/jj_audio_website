@@ -135,15 +135,18 @@ export class StemMixerEngine {
     this.onSoftPause = cb;
   }
 
-  /** Soft-pause + zombie/closed recovery after sleep/idle. No auto-resume. */
+  /**
+   * Recover zombie/closed AudioContext after sleep/idle. No auto-resume.
+   * Do not soft-pause on document hide — keep playing across app/window switches.
+   * Some browsers still suspend Web Audio while fully backgrounded; that surfaces
+   * via AudioContext statechange, not visibility alone.
+   */
   installWakeHooks(): void {
     if (this.wakeHooked || typeof window === "undefined") return;
     this.wakeHooked = true;
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") {
         void this.handleWake();
-      } else if (this.playing) {
-        void this.softPauseFromInterrupt();
       }
     });
     window.addEventListener("pageshow", () => {
@@ -292,15 +295,19 @@ export class StemMixerEngine {
   }
 
   async handleWake(): Promise<void> {
-    if (this.playing) {
-      await this.softPauseFromInterrupt();
-    }
     if (!this.ctx) return;
+    // Only repair dead graphs. Healthy background playback must keep running.
     if (this.ctx.state === "closed") {
+      if (this.playing) {
+        await this.softPauseFromInterrupt();
+      }
       this.rebuildGraphKeepingBuffers();
       return;
     }
     if (await this.contextLooksZombie()) {
+      if (this.playing) {
+        await this.softPauseFromInterrupt();
+      }
       this.rebuildGraphKeepingBuffers();
     }
   }

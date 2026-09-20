@@ -25,11 +25,12 @@ from audio_to_tab.isolate import (
     analyze_bass_bleed,
     analyze_guitar_stem_quality,
     apply_bass_bleed_mitigation,
+    apply_emit_stems,
+    apply_fold_other_into_guitar,
     detect_present_stems,
     effective_demucs_segment,
     effective_isolation_quality,
     fold_other_into_guitar,
-    apply_emit_stems,
     format_region_label,
     merge_two_pass_stems,
     probe_duration_sec,
@@ -83,6 +84,37 @@ def test_fold_other_into_guitar_keeps_other_without_guitar(tmp_path: Path):
     fold_other_into_guitar(artifacts)
     assert artifacts["other"] == other
     assert other.exists()
+
+
+def test_fold_other_missing_file_is_soft_skip(tmp_path: Path):
+    guitar = tmp_path / "guitar.wav"
+    _write_silent_wav(guitar)
+    artifacts = {"guitar": guitar, "other": tmp_path / "other.wav"}
+    artifacts, diag = apply_fold_other_into_guitar(artifacts, mode="band_limited")
+    assert diag.folded is False
+    assert "not a file" in diag.reason
+    assert artifacts["guitar"] == guitar
+
+
+def test_fold_other_missing_mid_flight_does_not_raise(tmp_path: Path, monkeypatch):
+    """other.wav can vanish after is_file() (peer fold); must not FileNotFoundError."""
+    guitar = tmp_path / "guitar.wav"
+    other = tmp_path / "other.wav"
+    sf.write(str(guitar), np.ones((256, 2), dtype=np.float32) * 0.1, 44100)
+    sf.write(str(other), np.ones((256, 2), dtype=np.float32) * 0.2, 44100)
+    artifacts = {"guitar": guitar, "other": other}
+    real_is_file = Path.is_file
+
+    def is_file_then_drop_other(self: Path) -> bool:
+        present = real_is_file(self)
+        if present and self.name == "other.wav":
+            self.unlink(missing_ok=True)
+        return present
+
+    monkeypatch.setattr(Path, "is_file", is_file_then_drop_other)
+    artifacts, diag = apply_fold_other_into_guitar(artifacts, mode="band_limited")
+    assert diag.folded is False
+    assert "not a file" in diag.reason
 
 
 def test_apply_emit_stems_drops_unlisted_wavs_keeps_diagnostics(tmp_path: Path):

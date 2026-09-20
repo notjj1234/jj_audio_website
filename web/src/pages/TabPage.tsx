@@ -22,6 +22,10 @@ export function TabPage() {
       setError("Choose an audio file");
       return;
     }
+    if (job && !["succeeded", "failed", "cancelled"].includes(job.status)) {
+      setError("A tab job is already running. Wait for it to finish or cancel it.");
+      return;
+    }
     setBusy(true);
     setError(null);
     stopWatch?.();
@@ -47,7 +51,7 @@ export function TabPage() {
     }
   }
 
-  const formBusy =
+  const tabJobRunning =
     busy || job?.status === "pending" || job?.status === "running";
 
   return (
@@ -59,10 +63,7 @@ export function TabPage() {
         isolate guitar first on Isolate.
       </p>
       <p className="lede">{HOSTED_FILE_ONLY_NOTE}</p>
-      <form
-        className={`stack${formBusy ? " stack-secondary" : ""}`}
-        onSubmit={onSubmit}
-      >
+      <form className="stack" onSubmit={onSubmit}>
         <label className="field">
           Audio file
           <input
@@ -113,8 +114,8 @@ export function TabPage() {
           Subtractive bass de-bleed (opt-in)
         </label>
         {error && <p className="error">{error}</p>}
-        <button type="submit" disabled={busy}>
-          {busy ? "Starting…" : "Create tab job"}
+        <button type="submit" disabled={tabJobRunning}>
+          {busy ? "Starting…" : tabJobRunning ? "Job running…" : "Create tab job"}
         </button>
       </form>
 

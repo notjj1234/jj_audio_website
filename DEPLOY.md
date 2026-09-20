@@ -4,6 +4,8 @@ Single-host stack: **Caddy (TLS) → SPA + FastAPI → Postgres + Redis + MinIO 
 
 Streamlit (`make ui`) is **local demo only** and is not part of this compose file.
 
+The hosted Isolate page includes the same Web Audio **stem mixer** as desktop (Play keeps going across window focus loss; metronome stem when the job attaches one). Product overview: [`README.md`](README.md).
+
 ## Prerequisites
 
 - Docker + Docker Compose

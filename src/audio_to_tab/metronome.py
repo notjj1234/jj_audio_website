@@ -34,6 +34,15 @@ _METER_CANDIDATES = (3, 4)
 _METER_MIN_MEASURES = 3
 _METER_MIN_CONTRAST = 1.15
 _METER_WIN_MARGIN = 1.05
+_HOP_LENGTH = 512
+_TEMPO_SMOOTH_SEC = 6.0
+_CURVE_JSON_HZ = 4.0
+_LOCAL_CONF_FLOOR = 0.35
+_CURVE_IQR_HIGH_BPM = 8.0
+_OCTAVE_FACTORS = (0.25, 0.5, 1.0, 2.0, 4.0)
+_IMPULSE_INNER_SEC = 0.08
+_IMPULSE_OUTER_SEC = 0.35
+_IMPULSE_RATIO = 6.0
 
 METRONOME_RATE_CHOICES: tuple[float, ...] = (0.5, 1.0, 2.0)
 METRONOME_SOUND_IDS: tuple[str, ...] = ("classic", "soft", "wood", "hi_tick")
@@ -142,6 +151,8 @@ class MetronomeResult:
     click_times_1x: tuple[float, ...] = ()
     beats_per_measure: int = 4
     render: MetronomeRenderOptions = MetronomeRenderOptions()
+    bpm_curve_t: tuple[float, ...] = ()
+    bpm_curve_bpm: tuple[float, ...] = ()
 
     def slim_meta(self) -> dict[str, Any]:
         return {
@@ -187,6 +198,240 @@ def pick_metronome_source(
     """
     candidates = _metronome_source_candidates(artifacts, fallback=fallback)
     return candidates[0] if candidates else None
+
+
+def _onset_envelope(
+    mono: np.ndarray,
+    sr: int,
+    hop_length: int = _HOP_LENGTH,
+) -> np.ndarray:
+    import librosa
+
+    return np.asarray(
+        librosa.onset.onset_strength(
+            y=mono, sr=sr, hop_length=hop_length, aggregate=np.median
+        ),
+        dtype=np.float64,
+    ).reshape(-1)
+
+
+def tempo_curve_from_onset(
+    onset_env: np.ndarray,
+    *,
+    sr: int | float,
+    hop_length: int = _HOP_LENGTH,
+) -> np.ndarray:
+    """Per-frame tempo from a precomputed onset envelope (``aggregate=None``)."""
+    onset = np.asarray(onset_env, dtype=np.float64).reshape(-1)
+    if onset.size == 0 or not np.any(onset):
+        return np.zeros(0, dtype=np.float64)
+    import librosa
+
+    raw = librosa.feature.rhythm.tempo(
+        onset_envelope=onset,
+        sr=float(sr),
+        hop_length=int(hop_length),
+        aggregate=None,
+        max_tempo=320.0,
+    )
+    return np.asarray(raw, dtype=np.float64).reshape(-1)
+
+
+def octave_snap_bpm(bpm: float, anchor_bpm: float) -> float:
+    """Snap ``bpm`` to the nearest half/double of ``anchor_bpm`` in log space."""
+    value = float(bpm)
+    anchor = float(anchor_bpm)
+    if not np.isfinite(anchor) or anchor <= 0:
+        if not np.isfinite(value) or value <= 0:
+            return MIN_PLAUSIBLE_BPM
+        return float(np.clip(value, MIN_PLAUSIBLE_BPM, MAX_PLAUSIBLE_BPM))
+    if not np.isfinite(value) or value <= 0:
+        return float(np.clip(anchor, MIN_PLAUSIBLE_BPM, MAX_PLAUSIBLE_BPM))
+    candidates = [
+        factor * anchor
+        for factor in _OCTAVE_FACTORS
+        if MIN_PLAUSIBLE_BPM <= factor * anchor <= MAX_PLAUSIBLE_BPM
+    ]
+    if not candidates:
+        return float(np.clip(value, MIN_PLAUSIBLE_BPM, MAX_PLAUSIBLE_BPM))
+    log_v = float(np.log2(value))
+    return float(min(candidates, key=lambda c: abs(float(np.log2(c)) - log_v)))
+
+
+def _odd_window(n: int) -> int:
+    win = max(1, int(n))
+    if win % 2 == 0:
+        win += 1
+    return win
+
+
+def _median_filter_1d(values: np.ndarray, win: int) -> np.ndarray:
+    raw = np.asarray(values, dtype=np.float64).reshape(-1)
+    width = _odd_window(win)
+    if raw.size == 0 or width <= 1 or raw.size < 3:
+        return raw.copy()
+    pad = width // 2
+    padded = np.pad(raw, pad, mode="edge")
+    out = np.empty_like(raw)
+    for i in range(raw.size):
+        out[i] = float(np.median(padded[i : i + width]))
+    return out
+
+
+def stabilize_tempo_curve(
+    curve: np.ndarray,
+    *,
+    sr: int | float,
+    hop_length: int = _HOP_LENGTH,
+    global_bpm: float,
+) -> np.ndarray:
+    """Median-smooth, octave-snap to ``global_bpm``, and clamp to a plausible range."""
+    anchor = float(np.clip(global_bpm, MIN_PLAUSIBLE_BPM, MAX_PLAUSIBLE_BPM))
+    raw = np.asarray(curve, dtype=np.float64).reshape(-1)
+    if raw.size == 0:
+        return np.asarray([anchor], dtype=np.float64)
+    hop = max(1, int(hop_length))
+    win = _odd_window(round(_TEMPO_SMOOTH_SEC * float(sr) / float(hop)))
+    smoothed = _median_filter_1d(raw, win)
+    snapped = np.empty_like(smoothed)
+    for i, value in enumerate(smoothed):
+        snapped[i] = octave_snap_bpm(float(value), anchor)
+    return np.clip(snapped, MIN_PLAUSIBLE_BPM, MAX_PLAUSIBLE_BPM)
+
+
+def curve_confidence(
+    onset_env: np.ndarray,
+    curve: np.ndarray,
+    *,
+    global_bpm: float,
+    sr: int | float = 22050,
+    hop_length: int = _HOP_LENGTH,
+) -> np.ndarray:
+    """Per-frame 0–1 confidence: onset energy × local tempo stability."""
+    del global_bpm  # reserved: reporting uses the same curve vs the global anchor
+    onset = np.asarray(onset_env, dtype=np.float64).reshape(-1)
+    curv = np.asarray(curve, dtype=np.float64).reshape(-1)
+    n = min(onset.size, curv.size)
+    if n == 0:
+        return np.zeros(0, dtype=np.float64)
+    onset = onset[:n]
+    curv = curv[:n]
+    med_on = float(np.median(onset)) if onset.size else 0.0
+    energy = np.clip(onset / max(med_on, 1e-8), 0.0, 2.0) / 2.0
+    hop = max(1, int(hop_length))
+    win = _odd_window(round(_TEMPO_SMOOTH_SEC * float(sr) / float(hop)))
+    local_med = _median_filter_1d(curv, win)
+    rel = np.abs(curv - local_med) / np.maximum(local_med, 1.0)
+    stab = np.clip(1.0 - rel / 0.15, 0.0, 1.0)
+    return np.clip(0.5 * energy + 0.5 * stab, 0.0, 1.0)
+
+
+def _sample_series(
+    t: float,
+    times: np.ndarray,
+    values: np.ndarray,
+    default: float,
+) -> float:
+    ts = np.asarray(times, dtype=np.float64).reshape(-1)
+    vs = np.asarray(values, dtype=np.float64).reshape(-1)
+    if ts.size == 0 or vs.size == 0:
+        return float(default)
+    idx = int(np.argmin(np.abs(ts - float(t))))
+    return float(vs[min(idx, vs.size - 1)])
+
+
+def local_period_at(
+    t: float,
+    curve_times: np.ndarray,
+    curve_bpm: np.ndarray,
+    fallback_bpm: float,
+) -> float:
+    fallback = 60.0 / float(fallback_bpm) if fallback_bpm and fallback_bpm > 0 else 0.5
+    bpm = _sample_series(t, curve_times, curve_bpm, fallback_bpm if fallback_bpm > 0 else 120.0)
+    if not np.isfinite(bpm) or bpm <= 0:
+        return fallback
+    return 60.0 / float(bpm)
+
+
+def integrate_tempo_curve(
+    t0: float,
+    t1: float,
+    *,
+    curve_times: np.ndarray,
+    curve_bpm: np.ndarray,
+    fallback_bpm: float,
+    include_start: bool = False,
+) -> np.ndarray:
+    """Walk ``t += 60/local_bpm(t)`` from ``t0`` until ``t1`` (lead/tail/hole fill)."""
+    start = float(t0)
+    end = float(t1)
+    if end <= start:
+        return np.zeros(0, dtype=np.float64)
+    times: list[float] = []
+    t = start
+    if include_start:
+        times.append(t)
+        step = local_period_at(t, curve_times, curve_bpm, fallback_bpm)
+        if step <= 1e-6:
+            return np.asarray(times, dtype=np.float64)
+        t += step
+    guard = 0
+    while t < end - 1e-9 and guard < 100_000:
+        times.append(t)
+        step = local_period_at(t, curve_times, curve_bpm, fallback_bpm)
+        if step <= 1e-6:
+            break
+        t += step
+        guard += 1
+    return np.asarray(times, dtype=np.float64)
+
+
+def _downsample_bpm_curve(
+    curve_times: np.ndarray,
+    curve_bpm: np.ndarray,
+    duration_sec: float,
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    ts = np.asarray(curve_times, dtype=np.float64).reshape(-1)
+    bp = np.asarray(curve_bpm, dtype=np.float64).reshape(-1)
+    if ts.size == 0 or bp.size == 0 or duration_sec <= 0:
+        return (), ()
+    step = 1.0 / float(_CURVE_JSON_HZ)
+    targets = np.arange(0.0, float(duration_sec) + 0.5 * step, step, dtype=np.float64)
+    out_t: list[float] = []
+    out_b: list[float] = []
+    n = min(ts.size, bp.size)
+    ts = ts[:n]
+    bp = bp[:n]
+    for t in targets:
+        if t > duration_sec + 1e-9:
+            break
+        idx = int(np.argmin(np.abs(ts - float(t))))
+        out_t.append(float(t))
+        out_b.append(float(bp[idx]))
+    return tuple(out_t), tuple(out_b)
+
+
+def _bpm_curve_from_payload(raw: Any) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    if not isinstance(raw, dict):
+        return (), ()
+    t_raw = raw.get("t")
+    b_raw = raw.get("bpm")
+    if not isinstance(t_raw, list) or not isinstance(b_raw, list):
+        return (), ()
+    times: list[float] = []
+    bpms: list[float] = []
+    for item in t_raw:
+        try:
+            times.append(float(item))
+        except (TypeError, ValueError):
+            continue
+    for item in b_raw:
+        try:
+            bpms.append(float(item))
+        except (TypeError, ValueError):
+            continue
+    n = min(len(times), len(bpms))
+    return tuple(times[:n]), tuple(bpms[:n])
 
 
 def _wrapped_residuals(times: np.ndarray, phase: float, period: float) -> np.ndarray:
@@ -278,6 +523,10 @@ def build_click_times(
     *,
     duration_sec: float,
     bpm: float,
+    tempo_curve: np.ndarray | None = None,
+    curve_times: np.ndarray | None = None,
+    curve_conf: np.ndarray | None = None,
+    conf_floor: float = _LOCAL_CONF_FLOOR,
 ) -> np.ndarray:
     """Hybrid click times: detected beats in the body, extrapolated across gaps.
 
@@ -286,6 +535,9 @@ def build_click_times(
     (and optionally forward past the last) still fills lead-in / trailing gaps.
     Holes inside the body — sections where the analysis source went quiet — are
     subdivided so the click keeps going instead of dropping out mid-song.
+
+    When a confident local tempo curve is provided, lead/tail/holes step at the
+    local period instead of the global BPM.
     """
     if duration_sec <= 0 or bpm <= 0:
         return np.zeros(0, dtype=np.float64)
@@ -299,31 +551,90 @@ def build_click_times(
     if body.size == 0:
         return np.zeros(0, dtype=np.float64)
 
+    hop_t = (
+        np.asarray(curve_times, dtype=np.float64).reshape(-1)
+        if curve_times is not None
+        else np.zeros(0, dtype=np.float64)
+    )
+    hop_b = (
+        np.asarray(tempo_curve, dtype=np.float64).reshape(-1)
+        if tempo_curve is not None
+        else np.zeros(0, dtype=np.float64)
+    )
+    hop_c = (
+        np.asarray(curve_conf, dtype=np.float64).reshape(-1)
+        if curve_conf is not None
+        else np.zeros(0, dtype=np.float64)
+    )
+    use_curve = hop_t.size > 0 and hop_b.size > 0
+
+    def _period_at(t: float) -> float:
+        if not use_curve:
+            return period
+        conf = _sample_series(t, hop_t, hop_c, 0.0) if hop_c.size else 1.0
+        if conf < float(conf_floor):
+            return period
+        return local_period_at(t, hop_t, hop_b, bpm)
+
+    def _conf_at(t: float) -> float:
+        if hop_c.size == 0:
+            return 1.0 if use_curve else 0.0
+        return _sample_series(t, hop_t, hop_c, 0.0)
+
     lead: list[float] = []
-    t = float(body[0]) - period
-    while t >= 0.0:
+    t = float(body[0])
+    guard = 0
+    while guard < 100_000:
+        t -= _period_at(t)
+        if t < 0.0:
+            break
         lead.append(t)
-        t -= period
+        guard += 1
     lead.reverse()
 
     tail: list[float] = []
     last = float(body[-1])
     if duration_sec - last > 1.5 * period:
-        t = last + period
-        while t < duration_sec:
+        t = last
+        guard = 0
+        while guard < 100_000:
+            t += _period_at(t)
+            if t >= duration_sec:
+                break
             tail.append(t)
-            t += period
+            guard += 1
 
-    # Subdivide each internal hole evenly so the fill stays phase-locked to the
-    # detected beats on both sides (a one-sided march would collide with the
-    # beat that ends the gap).
     infill: list[float] = []
     if body.size > 1:
         for t0, t1 in itertools.pairwise(body):
             gap = float(t1) - float(t0)
-            if gap <= 1.5 * period:
+            mid = 0.5 * (float(t0) + float(t1))
+            local = _period_at(mid)
+            if gap <= 1.5 * local:
                 continue
-            steps = max(2, round(gap / period))
+            if use_curve and _conf_at(mid) >= float(conf_floor):
+                raw = integrate_tempo_curve(
+                    float(t0),
+                    float(t1),
+                    curve_times=hop_t,
+                    curve_bpm=hop_b,
+                    fallback_bpm=bpm,
+                    include_start=False,
+                )
+                if raw.size:
+                    last_raw = float(raw[-1])
+                    t_end = last_raw + local_period_at(last_raw, hop_t, hop_b, bpm)
+                    span = t_end - float(t0)
+                    if span > 1e-9:
+                        scale = gap / span
+                        warped = float(t0) + (raw - float(t0)) * scale
+                        infill.extend(
+                            float(x)
+                            for x in warped
+                            if float(t0) + 1e-4 < float(x) < float(t1) - 1e-4
+                        )
+                    continue
+            steps = max(2, round(gap / local))
             step = gap / steps
             infill.extend(float(t0) + i * step for i in range(1, steps))
 
@@ -363,21 +674,75 @@ def _beat_local_rms(
     return out
 
 
+def _beat_impulse_ratios(
+    detected: np.ndarray,
+    mono: np.ndarray,
+    sr: int,
+    *,
+    inner_sec: float = _IMPULSE_INNER_SEC,
+    outer_sec: float = _IMPULSE_OUTER_SEC,
+) -> np.ndarray:
+    """Peak in a short window vs RMS of the surrounding audio (impulse vs noise)."""
+    times = np.asarray(detected, dtype=np.float64).reshape(-1)
+    out = np.zeros(times.size, dtype=np.float64)
+    if sr <= 0 or len(mono) == 0:
+        return out
+    inner = max(1, int(inner_sec * sr))
+    outer = max(inner + 1, int(outer_sec * sr))
+    n = len(mono)
+    samples = np.asarray(mono, dtype=np.float64).reshape(-1)
+    for i, t in enumerate(times):
+        center = round(float(t) * sr)
+        lo_i = max(0, center - inner)
+        hi_i = min(n, center + inner)
+        lo_o = max(0, center - outer)
+        hi_o = min(n, center + outer)
+        peak = float(np.max(np.abs(samples[lo_i:hi_i]))) if hi_i > lo_i else 0.0
+        left = samples[lo_o:lo_i]
+        right = samples[hi_i:hi_o]
+        if left.size + right.size:
+            outer_seg = np.concatenate([left, right])
+            rms = float(np.sqrt(np.mean(outer_seg * outer_seg)))
+        else:
+            rms = 0.0
+        out[i] = peak / max(rms, 1e-5)
+    return out
+
+
 def _first_stable_run_index(
     detected: np.ndarray,
     period: float,
     *,
     min_beats: int = _STABLE_MIN_BEATS,
+    local_periods: np.ndarray | None = None,
+    trust: np.ndarray | None = None,
 ) -> int:
+    """Index of the first locally-stable run, or -1 if none is long enough."""
     if detected.size < min_beats or period <= 0:
-        return 0
+        return -1
     need = min_beats - 1
     intervals = np.diff(detected)
-    ok = np.abs(intervals - period) <= (_STABLE_IOI_REL * period)
+    if (
+        local_periods is not None
+        and np.asarray(local_periods).size == detected.size
+    ):
+        refs = np.asarray(local_periods, dtype=np.float64).reshape(-1)[:-1]
+        refs = np.where(refs > 0, refs, period)
+    else:
+        refs = np.full(intervals.size, period, dtype=np.float64)
+    ok = np.abs(intervals - refs) <= (_STABLE_IOI_REL * np.maximum(refs, 1e-9))
+    trusted = (
+        np.asarray(trust, dtype=bool).reshape(-1)
+        if trust is not None and np.asarray(trust).size == detected.size
+        else None
+    )
     for i in range(ok.size - need + 1):
-        if bool(np.all(ok[i : i + need])):
-            return i
-    return 0
+        if not bool(np.all(ok[i : i + need])):
+            continue
+        if trusted is not None and not bool(np.all(trusted[i : i + min_beats])):
+            continue
+        return i
+    return -1
 
 
 def gate_unreliable_intro_beats(
@@ -385,10 +750,15 @@ def gate_unreliable_intro_beats(
     mono: np.ndarray,
     sr: int,
     period: float,
+    *,
+    local_periods: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float]:
     """Drop weak/irregular intro onsets; keep a trusted body start.
 
-    Lead-in clicks are still filled from this origin back to t=0.
+    A locally stable pulse (sung intro) is kept even when quieter than drums,
+    as long as those beats look like impulses rather than noise. Speech/noise
+    intros still get gated. ``body_start`` is the first *loud* stable beat
+    (drum entry) and may be later than the first gated time.
     """
     times = np.asarray(detected, dtype=np.float64).reshape(-1)
     times = times[np.isfinite(times)]
@@ -403,10 +773,20 @@ def gate_unreliable_intro_beats(
     body_energy = float(np.median(energies[split:]))
     floor = max(body_energy * _INTRO_ENERGY_RATIO, 1e-5)
     loud = energies >= floor
+    impulse = _beat_impulse_ratios(times, mono, sr) >= _IMPULSE_RATIO
+    trust = loud | impulse
     loud_idx = int(np.argmax(loud)) if np.any(loud) else 0
-    stable_idx = _first_stable_run_index(times, period)
-    start_idx = max(loud_idx, stable_idx)
-    body_start = float(times[start_idx])
+    stable_idx = _first_stable_run_index(
+        times, period, local_periods=local_periods, trust=trust
+    )
+    start_idx = stable_idx if stable_idx >= 0 else loud_idx
+    start_idx = min(start_idx, times.size - 1)
+    body_idx = start_idx
+    for i in range(start_idx, times.size):
+        if bool(loud[i]):
+            body_idx = i
+            break
+    body_start = float(times[body_idx])
     gated = times[start_idx:]
     if gated.size < _MIN_BEATS:
         return times, float(times[0])
@@ -636,6 +1016,9 @@ def generate_metronome_stem(
 
     ``beats_per_measure`` left at the default is detected from the audio; any
     other value is treated as an explicit override.
+
+    Accent phase uses ``body_start_sec`` (loud groove), which may be later than
+    ``first_detected_sec`` when a quieter locally-stable intro pulse is kept.
     """
     try:
         import librosa
@@ -668,8 +1051,13 @@ def generate_metronome_stem(
 
     duration_sec = len(mono) / float(native_sr)
     try:
+        onset = _onset_envelope(mono, native_sr, hop_length=_HOP_LENGTH)
         tempo, beats = librosa.beat.beat_track(
-            y=mono, sr=native_sr, units="time", trim=False
+            onset_envelope=onset,
+            sr=native_sr,
+            hop_length=_HOP_LENGTH,
+            units="time",
+            trim=False,
         )
     except Exception as exc:
         logger.debug("metronome: beat_track failed: %s", exc)
@@ -683,24 +1071,91 @@ def generate_metronome_stem(
         return None
 
     bpm, _phase = refine_tempo_phase(detected, bpm_hint)
+    hop_times = librosa.times_like(onset, sr=native_sr, hop_length=_HOP_LENGTH)
+    hop_times = np.asarray(hop_times, dtype=np.float64).reshape(-1)
+    try:
+        raw_curve = tempo_curve_from_onset(
+            onset, sr=native_sr, hop_length=_HOP_LENGTH
+        )
+    except Exception as exc:
+        logger.debug("metronome: tempo curve failed: %s", exc)
+        raw_curve = np.zeros(0, dtype=np.float64)
+    if raw_curve.size != onset.size:
+        raw_curve = np.full(max(onset.size, 1), bpm, dtype=np.float64)
+    curve = stabilize_tempo_curve(
+        raw_curve, sr=native_sr, hop_length=_HOP_LENGTH, global_bpm=bpm
+    )
+    if curve.size != hop_times.size:
+        hop_times = librosa.times_like(curve, sr=native_sr, hop_length=_HOP_LENGTH)
+        hop_times = np.asarray(hop_times, dtype=np.float64).reshape(-1)
+    conf = curve_confidence(
+        onset[: curve.size],
+        curve,
+        global_bpm=bpm,
+        sr=native_sr,
+        hop_length=_HOP_LENGTH,
+    )
+    local_beats = detected
+    try:
+        _tempo_local, tracked = librosa.beat.beat_track(
+            onset_envelope=onset,
+            sr=native_sr,
+            hop_length=_HOP_LENGTH,
+            bpm=curve if curve.size == onset.size else None,
+            units="time",
+            trim=False,
+        )
+        tracked = np.asarray(tracked, dtype=np.float64).reshape(-1)
+        tracked = tracked[np.isfinite(tracked)]
+        tracked = tracked[(tracked >= 0.0) & (tracked < duration_sec)]
+        if tracked.size >= _MIN_BEATS:
+            local_beats = tracked
+    except Exception as exc:
+        logger.debug("metronome: local beat_track failed: %s", exc)
+
     period = 60.0 / bpm if bpm > 0 else 0.0
-    gated, body_start = gate_unreliable_intro_beats(detected, mono, native_sr, period)
-    if gated.size >= 3:
-        bpm, _phase = refine_tempo_phase(gated, bpm)
+    local_periods = np.asarray(
+        [local_period_at(float(t), hop_times, curve, bpm) for t in local_beats],
+        dtype=np.float64,
+    )
+    gated, body_start = gate_unreliable_intro_beats(
+        local_beats, mono, native_sr, period, local_periods=local_periods
+    )
+    if gated.size < _MIN_BEATS:
+        gated, body_start = gate_unreliable_intro_beats(
+            detected, mono, native_sr, period
+        )
     if gated.size < _MIN_BEATS:
         gated = detected
         body_start = float(detected[0])
 
-    times = build_click_times(gated, duration_sec=duration_sec, bpm=bpm)
+    body_beats = gated[gated >= float(body_start) - 1e-9]
+    if body_beats.size >= 3:
+        bpm, _phase = refine_tempo_phase(body_beats, bpm)
+    high = conf >= _LOCAL_CONF_FLOOR if conf.size else np.zeros(0, dtype=bool)
+    if high.size and np.any(high):
+        reported = float(np.median(curve[: high.size][high[: curve.size]]))
+        if np.isfinite(reported) and reported > 0:
+            bpm = float(np.clip(reported, MIN_PLAUSIBLE_BPM, MAX_PLAUSIBLE_BPM))
+
+    times = build_click_times(
+        gated,
+        duration_sec=duration_sec,
+        bpm=bpm,
+        tempo_curve=curve,
+        curve_times=hop_times,
+        curve_conf=conf,
+    )
     if times.size < _MIN_BEATS:
         return None
 
     measure = max(1, int(beats_per_measure))
+    meter_beats = body_beats if body_beats.size >= _MIN_BEATS else gated
     if measure == _DEFAULT_BEATS_PER_MEASURE:
-        measure = detect_beats_per_measure(gated, mono, native_sr, bpm)
+        measure = detect_beats_per_measure(meter_beats, mono, native_sr, bpm)
 
     n = len(mono)
-    ref_sec = float(gated[0])
+    ref_sec = float(body_start)
     if not render_metronome_wav(
         times,
         dest,
@@ -712,11 +1167,20 @@ def generate_metronome_stem(
     ):
         return None
 
+    body_n = int(body_beats.size)
+    if high.size and np.any(high):
+        selected = curve[: high.size][high[: curve.size]]
+        iqr = float(np.subtract(*np.percentile(selected, [75, 25]))) if selected.size else 0.0
+    else:
+        iqr = 0.0
     confidence = (
         "high"
-        if gated.size >= 8 and MIN_PLAUSIBLE_BPM <= bpm <= MAX_PLAUSIBLE_BPM
+        if body_n >= 8
+        and iqr <= _CURVE_IQR_HIGH_BPM
+        and MIN_PLAUSIBLE_BPM <= bpm <= MAX_PLAUSIBLE_BPM
         else "low"
     )
+    curve_t, curve_b = _downsample_bpm_curve(hop_times, curve, duration_sec)
     return MetronomeResult(
         path=dest,
         bpm=bpm,
@@ -726,11 +1190,13 @@ def generate_metronome_stem(
         sr=native_sr,
         duration_sec=float(duration_sec),
         body_start_sec=float(body_start),
-        first_detected_sec=ref_sec,
+        first_detected_sec=float(gated[0]),
         detected_times=tuple(float(t) for t in gated),
         click_times_1x=tuple(float(t) for t in times),
         beats_per_measure=measure,
         render=opts,
+        bpm_curve_t=curve_t,
+        bpm_curve_bpm=curve_b,
     )
 
 
@@ -750,6 +1216,11 @@ def write_metronome_diagnostics(path: Path, result: MetronomeResult) -> Path:
         "beats_per_measure": result.beats_per_measure,
         "render": result.render.to_dict(),
     }
+    if result.bpm_curve_t and result.bpm_curve_bpm:
+        payload["bpm_curve"] = {
+            "t": list(result.bpm_curve_t),
+            "bpm": list(result.bpm_curve_bpm),
+        }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path
 
@@ -813,6 +1284,7 @@ def _result_from_payload(
     confidence = str(payload.get("confidence") or "low")
     source = str(payload.get("source") or "source")
     measure = max(1, int(payload.get("beats_per_measure") or 4))
+    curve_t, curve_b = _bpm_curve_from_payload(payload.get("bpm_curve"))
     return MetronomeResult(
         path=dest,
         bpm=bpm,
@@ -827,6 +1299,8 @@ def _result_from_payload(
         click_times_1x=tuple(float(t) for t in times_1x),
         beats_per_measure=measure,
         render=options,
+        bpm_curve_t=curve_t,
+        bpm_curve_bpm=curve_b,
     )
 
 
@@ -862,7 +1336,13 @@ def rebake_metronome_artifact(
     duration = float(payload.get("duration_sec") or 0.0)
     if n_samples <= 0 and sr > 0 and duration > 0:
         n_samples = round(duration * sr)
-    ref_sec = float(payload.get("first_detected_sec") or (detected[0] if detected.size else 0.0))
+    if "body_start_sec" in payload:
+        ref_sec = float(payload.get("body_start_sec") or 0.0)
+    else:
+        ref_sec = float(
+            payload.get("first_detected_sec")
+            or (detected[0] if detected.size else 0.0)
+        )
     measure = max(1, int(payload.get("beats_per_measure") or 4))
 
     if times_1x.size >= _MIN_BEATS and sr > 0 and n_samples > 0:

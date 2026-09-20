@@ -594,121 +594,133 @@ def apply_fold_other_into_guitar(
     other = artifacts.get("other")
     guitar = artifacts.get("guitar")
     resolved_mode = mode if mode in FOLD_OTHER_MODES else "full"
+    missing = FoldOtherDiagnostics(
+        attempted=False,
+        folded=False,
+        mode=resolved_mode,
+        reason="other or guitar stem missing",
+    )
+    not_a_file = FoldOtherDiagnostics(
+        attempted=False,
+        folded=False,
+        mode=resolved_mode,
+        reason="other or guitar stem is not a file",
+    )
     if other is None or guitar is None:
-        return artifacts, FoldOtherDiagnostics(
-            attempted=False,
-            folded=False,
-            mode=resolved_mode,
-            reason="other or guitar stem missing",
-        )
-    if not other.is_file() or not guitar.is_file():
-        return artifacts, FoldOtherDiagnostics(
-            attempted=False,
-            folded=False,
-            mode=resolved_mode,
-            reason="other or guitar stem is not a file",
-        )
-
-    piano_overlap: float | None = None
-    skip_reason: str | None = None
-    if resolved_mode == "best_effort":
-        other_rms = _stem_rms(other)
-        if other_rms < _STEM_PRESENCE_MIN_RMS * 10:
-            skip_reason = "other stem is near-silent; skip mix"
-        else:
-            piano = artifacts.get("piano")
-            if piano is not None and Path(piano).is_file():
-                try:
-                    import soundfile as sf
-
-                    other_data, other_sr = sf.read(str(other), always_2d=True)
-                    piano_data, piano_sr = sf.read(str(piano), always_2d=True)
-                    if other_sr == piano_sr and other_data.size and piano_data.size:
-                        piano_overlap = _spectral_overlap(
-                            _to_mono(other_data), _to_mono(piano_data)
-                        )
-                        if piano_overlap >= FOLD_SKIP_PIANO_OVERLAP:
-                            skip_reason = (
-                                f"other overlaps piano stem ({piano_overlap:.2f} "
-                                f">= {FOLD_SKIP_PIANO_OVERLAP:.2f}); skip mix to "
-                                "avoid keys bleed"
-                            )
-                except Exception as exc:
-                    logger.warning("Piano overlap check failed; defaulting to fold: %s", exc)
-                    piano_overlap = None
-
-    if skip_reason:
-        _drop_other_stem(artifacts)
-        return artifacts, FoldOtherDiagnostics(
-            attempted=True,
-            folded=False,
-            mode=resolved_mode,
-            reason=skip_reason,
-            piano_overlap=piano_overlap,
-        )
-
-    mix_src = other
-    tmp_band: Path | None = None
-    resolved_gain = FOLD_OTHER_MIX_GAIN if gain is None else float(gain)
-    if resolved_mode in ("best_effort", "band_limited"):
-        tmp_band = other.parent / f"{other.stem}_guitar_band.wav"
-        if other.stat().st_size > 500 * 1024 * 1024:
-            logger.warning(
-                "Band-limited other fold on a large file (%s MB); may cause memory pressure",
-                other.stat().st_size // (1024 * 1024),
-            )
-        try:
-            mix_src = _write_band_limited_other(other, tmp_band)
-        except Exception as exc:
-            logger.warning("band-limited other fold failed; using full other: %s", exc)
-            mix_src = other
-            resolved_mode = "full"
-            tmp_band = None
-
+        return artifacts, missing
     try:
-        scoring_competitors = {
-            name: artifacts[name]
-            for name in ("bass", "drums")
-            if name in artifacts and artifacts[name] is not None
-        }
-        search = apply_fold_other_gain_search(
-            guitar,
-            mix_src,
-            competitors=scoring_competitors,
-            mode=resolved_mode,
-            adaptive=adaptive_gain,
-            fixed_gain=resolved_gain,
+        if not other.is_file() or not guitar.is_file():
+            return artifacts, not_a_file
+
+        piano_overlap: float | None = None
+        skip_reason: str | None = None
+        if resolved_mode == "best_effort":
+            other_rms = _stem_rms(other)
+            if other_rms < _STEM_PRESENCE_MIN_RMS * 10:
+                skip_reason = "other stem is near-silent; skip mix"
+            else:
+                piano = artifacts.get("piano")
+                if piano is not None and Path(piano).is_file():
+                    try:
+                        import soundfile as sf
+
+                        other_data, other_sr = sf.read(str(other), always_2d=True)
+                        piano_data, piano_sr = sf.read(str(piano), always_2d=True)
+                        if other_sr == piano_sr and other_data.size and piano_data.size:
+                            piano_overlap = _spectral_overlap(
+                                _to_mono(other_data), _to_mono(piano_data)
+                            )
+                            if piano_overlap >= FOLD_SKIP_PIANO_OVERLAP:
+                                skip_reason = (
+                                    f"other overlaps piano stem ({piano_overlap:.2f} "
+                                    f">= {FOLD_SKIP_PIANO_OVERLAP:.2f}); skip mix to "
+                                    "avoid keys bleed"
+                                )
+                    except FileNotFoundError:
+                        raise
+                    except Exception as exc:
+                        logger.warning(
+                            "Piano overlap check failed; defaulting to fold: %s", exc
+                        )
+                        piano_overlap = None
+
+        if skip_reason:
+            _drop_other_stem(artifacts)
+            return artifacts, FoldOtherDiagnostics(
+                attempted=True,
+                folded=False,
+                mode=resolved_mode,
+                reason=skip_reason,
+                piano_overlap=piano_overlap,
+            )
+
+        mix_src = other
+        tmp_band: Path | None = None
+        resolved_gain = FOLD_OTHER_MIX_GAIN if gain is None else float(gain)
+        if resolved_mode in ("best_effort", "band_limited"):
+            tmp_band = other.parent / f"{other.stem}_guitar_band.wav"
+            other_size = other.stat().st_size
+            if other_size > 500 * 1024 * 1024:
+                logger.warning(
+                    "Band-limited other fold on a large file (%s MB); may cause memory pressure",
+                    other_size // (1024 * 1024),
+                )
+            try:
+                mix_src = _write_band_limited_other(other, tmp_band)
+            except FileNotFoundError:
+                raise
+            except Exception as exc:
+                logger.warning("band-limited other fold failed; using full other: %s", exc)
+                mix_src = other
+                resolved_mode = "full"
+                tmp_band = None
+
+        try:
+            scoring_competitors = {
+                name: artifacts[name]
+                for name in ("bass", "drums")
+                if name in artifacts and artifacts[name] is not None
+            }
+            search = apply_fold_other_gain_search(
+                guitar,
+                mix_src,
+                competitors=scoring_competitors,
+                mode=resolved_mode,
+                adaptive=adaptive_gain,
+                fixed_gain=resolved_gain,
+            )
+            if search.attempted:
+                search_path = Path(guitar).parent / "adaptive_fold_gain_diagnostics.json"
+                search_path = search.write_json(search_path)
+                artifacts["adaptive_fold_gain_diagnostics"] = search_path
+
+            mix_stems_to_wav(
+                {"guitar": guitar, "other": mix_src},
+                output_path=guitar,
+                gains={"guitar": 1.0, "other": search.chosen_gain},
+            )
+        finally:
+            if tmp_band is not None:
+                with suppress(OSError):
+                    tmp_band.unlink(missing_ok=True)
+        _drop_other_stem(artifacts)
+        band_note = (
+            f"mixed guitar-band other ({FOLD_GUITAR_BAND_LOW_HZ:.0f}–"
+            f"{FOLD_GUITAR_BAND_HIGH_HZ:.0f} Hz)"
+            if mix_src != other
+            else "mixed full other into guitar"
         )
         if search.attempted:
-            search_path = Path(guitar).parent / "adaptive_fold_gain_diagnostics.json"
-            search_path = search.write_json(search_path)
-            artifacts["adaptive_fold_gain_diagnostics"] = search_path
-
-        mix_stems_to_wav(
-            {"guitar": guitar, "other": mix_src},
-            output_path=guitar,
-            gains={"guitar": 1.0, "other": search.chosen_gain},
+            band_note += f" @ {search.chosen_gain:.2f} gain (adaptive)"
+        return artifacts, FoldOtherDiagnostics(
+            attempted=True,
+            folded=True,
+            mode=resolved_mode,
+            reason=band_note,
+            piano_overlap=piano_overlap,
         )
-    finally:
-        if tmp_band is not None:
-            with suppress(OSError):
-                tmp_band.unlink(missing_ok=True)
-    _drop_other_stem(artifacts)
-    band_note = (
-        f"mixed guitar-band other ({FOLD_GUITAR_BAND_LOW_HZ:.0f}–"
-        f"{FOLD_GUITAR_BAND_HIGH_HZ:.0f} Hz)"
-        if mix_src != other
-        else "mixed full other into guitar"
-    )
-    if search.attempted:
-        band_note += f" @ {search.chosen_gain:.2f} gain (adaptive)"
-    return artifacts, FoldOtherDiagnostics(
-        attempted=True,
-        folded=True,
-        mode=resolved_mode,
-        reason=band_note,
-        piano_overlap=piano_overlap,
-    )
+    except FileNotFoundError:
+        return artifacts, not_a_file
 
 
 def apply_fold_other_gain_search(

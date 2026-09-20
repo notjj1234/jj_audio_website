@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "audio-to-tab-pdf"
-version = "0.1.3"
+version = "0.1.4"
 description = "Convert audio to guitar tab PDF using free/open-source tools"
 readme = "README.md"
 license = { text = "MIT" }

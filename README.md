@@ -1,6 +1,31 @@
 # Audio Tools
 
-Audio splitter app (for now) made with Demucs. More stuff will be added later.
+Local desktop and hosted website for **audio isolation** (split a song into stems), a **live mixer** with an optional **metronome click track**, **YouTube audio save** (desktop), and a **Tab PDF** demo. Both products share the `src/audio_to_tab/` engine (Demucs / RoFormer / SCNet, mixer math, ingest, tab pipeline).
+
+| Product | Stack | Runbook |
+|---------|--------|---------|
+| **Desktop** | Streamlit `ui/` + `packaging/launcher.py` (native window) | [`DESKTOP.md`](DESKTOP.md) |
+| **Website** | FastAPI `backend/` + React `web/` + Caddy | [`DEPLOY.md`](DEPLOY.md) |
+
+Agents / contributors: start at [`PROJECT_TREE.md`](PROJECT_TREE.md) and [`AGENTS.md`](AGENTS.md). Design history: [`docs/issues.md`](docs/issues.md), [`docs/ui-issues.md`](docs/ui-issues.md).
+
+### Desktop (local)
+
+- **Audio Isolation** — separate/mix stems; Lite auto-profiles speed/device from RAM/GPU; Pro exposes every control. Sticky **Home | mix | +** strip; mix tab is the live Web Audio mixer.
+- **Metronome** — adaptive (“floating”) click track follows local pulse (e.g. sung intros) via a librosa tempo curve; Mixer Accent / rate / sound hot-swap without reloading stems. Rebake uses stored `click_times_1x`.
+- **Mixer playback** — keeps playing when you switch to another app/window (does not soft-pause on document hide). Sleep / dead `AudioContext` still recovers without auto-resuming if you had paused.
+- **YouTube Audio** — save a public link to a folder (MP3 default); not separate/mix. Ignores Lite/Pro.
+- **Tab PDF** — unfinished demo; Pro gates engine/advanced options.
+
+### Website (hosted)
+
+- File-upload Isolate + Tab PDF (no YouTube on the public stack by default).
+- Same mixer engine policy: background playback across focus loss; metronome stem when the job attaches one.
+- Processing modes Auto / Low RAM / etc. live in `backend/capabilities.py` (not the same as desktop Interface Lite).
+
+License: [MIT](LICENSE)
+
+---
 
 ## Tester
 
@@ -30,7 +55,7 @@ pip install -e ".[demucs,desktop,roformer,separator]"
 .venv-desktop/bin/python packaging/launcher.py
 ```
 
-## Build installers (0.1.3)
+## Build installers (0.1.4)
 
 ### Windows CPU
 
@@ -49,7 +74,7 @@ $env:AUDIO_TOOLS_EDITION = "cpu"
 pyinstaller packaging/audio_tools.spec --noconfirm --clean
 powershell -ExecutionPolicy Bypass -File packaging/make_windows_installer.ps1 -Flavor cpu -CopyToDownloads
 ```
-→ `%USERPROFILE%\Downloads\AudioTools-0.1.3-windows-x64-cpu-setup.exe`
+→ `%USERPROFILE%\Downloads\AudioTools-0.1.4-windows-x64-cpu-setup.exe`
 
 ### Windows combined (CPU + NVIDIA GPU)
 
@@ -69,7 +94,7 @@ $env:AUDIO_TOOLS_EDITION = "both"
 pyinstaller packaging/audio_tools.spec --noconfirm --clean
 powershell -ExecutionPolicy Bypass -File packaging/make_windows_installer.ps1 -Flavor both -CopyToDownloads
 ```
-→ `%USERPROFILE%\Downloads\AudioTools-0.1.3-windows-x64-both-setup.exe`
+→ `%USERPROFILE%\Downloads\AudioTools-0.1.4-windows-x64-both-setup.exe`
 
 ### Windows GPU (CUDA) only
 
@@ -84,7 +109,7 @@ $env:AUDIO_TOOLS_EDITION = "cuda"
 pyinstaller packaging/audio_tools.spec --noconfirm --clean
 powershell -ExecutionPolicy Bypass -File packaging/make_windows_installer.ps1 -Flavor cuda -CopyToDownloads
 ```
-→ `%USERPROFILE%\Downloads\AudioTools-0.1.3-windows-x64-cuda-setup.exe`
+→ `%USERPROFILE%\Downloads\AudioTools-0.1.4-windows-x64-cuda-setup.exe`
 
 ### macOS Apple Silicon (M1–M4)
 
@@ -107,9 +132,9 @@ make desktop-build
 make desktop-pkg
 ```
 
-→ `~/Downloads/AudioTools-0.1.3-macos-arm64-silicon.pkg`
+→ `~/Downloads/AudioTools-0.1.4-macos-arm64-silicon.pkg`
 
-Optional: bump version in the filename — `AUDIO_TOOLS_VERSION=0.1.3 make desktop-pkg`
+Optional: bump version in the filename — `AUDIO_TOOLS_VERSION=0.1.4 make desktop-pkg`
 
 ### macOS Intel (x64)
 
@@ -134,10 +159,8 @@ make mixer-build
 ./packaging/make_pkg.sh
 ```
 
-→ `~/Downloads/AudioTools-0.1.3-macos-x64-intel.pkg`
+→ `~/Downloads/AudioTools-0.1.4-macos-x64-intel.pkg`
 
 No Intel Mac or Rosetta venv? Trigger the **desktop-release** GitHub Action (`workflow_dispatch`) — it builds the Intel pkg on `macos-15-intel`.
 
 Unsigned pkg unless you have Developer ID certs (see DESKTOP.md). Gatekeeper will complain — right-click → Open, or `xattr -cr` + `sudo installer`.
-
-License: [MIT](LICENSE)

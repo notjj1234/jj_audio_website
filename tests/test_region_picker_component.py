@@ -99,6 +99,7 @@ def test_mixer_waveform_uses_bar_rects():
     assert "installWakeHooks" in main
     assert "handleWake" in main
     assert "Tap Play to resume after sleep" in main
+    assert "clearSleepResumeHint" in main
     isolate = (
         Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
     ).read_text(encoding="utf-8")

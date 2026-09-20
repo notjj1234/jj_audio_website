@@ -12,7 +12,7 @@ For the website stack (FastAPI + React + Caddy), see [`DEPLOY.md`](DEPLOY.md) �
 | Item | Notes |
 |------|--------|
 | RAM | **16 GB preferred**. **8 GB minimum** — use short clips (≤90 s) and speed **Balanced** or **Faster**. |
-| GPU | Optional **NVIDIA CUDA** on Windows. Download the **NVIDIA** Setup only if you have an NVIDIA GPU. Mac isolation is CPU-only. |
+| GPU | **Windows:** optional **NVIDIA CUDA** (download the NVIDIA/combined Setup). **Mac:** Apple GPU (MPS) is the default on Apple Silicon with ≥12 GB RAM; 8 GB Macs stay on CPU. |
 | Python | **3.10–3.12 only** (3.11 recommended). Not 3.13. |
 | ffmpeg | Full/shared build on PATH (Homebrew, apt, or Windows Gyan.FFmpeg — not essentials-only). Installer builds bundle ffmpeg. |
 | Disk | ~5 GB free for venv + PyTorch; more for Demucs weights on first run. |
@@ -55,11 +55,17 @@ Contributor install (tests/eval extras): `make install` / `./scripts/dev.sh inst
 
 1. **pip / PyTorch** — first install can download ~2 GB (CPU wheels on Windows/Linux).
 2. **Demucs weights** — `tester` prewarms `htdemucs_6s` (default 6-stem model). Extra models download if you pick other track presets. Optional **guitar-ft** weights (~330 MB) download on first use when that Advanced checkbox is on; they cache as `$TORCH_HOME/checkpoints/guitar_htdemucs_6s.pt`. Meta’s pretrained Demucs weights are provided for scientific/research use (code is MIT; see facebookresearch/demucs#327).
-3. Open **Audio Isolation**, upload a **≤90 s** clip first, leave speed on **Balanced**, click **Separate tracks**. Full band emits 4 tracks (Vocals, Drums, Bass, Guitar). Piano and Other are available under Custom.
+3. Open **Audio Isolation**, upload a **≤90 s** clip first, leave speed on **Balanced**, click **Separate tracks**. Full band emits 4 tracks (Vocals, Drums, Bass, Guitar). Piano and Other are available under Custom. A **Metronome** click track is attached when beat-tracking succeeds (starts muted).
 4. Use the sticky **Home | mix | +** strip: open a mix tab for the live mixer; download stems or a mix from **Downloads** (export builds on Save).
 5. Optional: open **YouTube Audio** in the sidebar to download a public link to a folder (MP3 by default) without separating stems.
 
 CPU separation often takes about as long as the song (or longer). Streamlit **Stop** may abort the page run, but a heavy Demucs child process can keep running until it finishes.
+
+### Mixer and metronome (what to expect)
+
+- **Play keeps going** if you switch to another app or window. Explicit **Pause** still stops. After sleep / a dead audio engine, the mixer recovers without forcing play if you had paused. Some browsers may still mute Web Audio when a *tab* is fully backgrounded — that is an OS/browser limit, not the mute button.
+- **Metronome** follows a local pulse when possible (quiet sung intros stay on that groove; accents lock to the loud body / drums). Unmute the Metronome row; Accent / 1×·½×·2× / sound change live without reloading stems.
+- Steady 4/4 drum songs should still feel like a normal click; talking/noise intros stay gated so clicks do not lock onto speech.
 
 ## YouTube downloads
 
@@ -87,10 +93,10 @@ These are **four separate builds**. Send testers only the file that matches thei
 |----------------|------|--------|
 | Apple Silicon Mac (M1–M4) | `AudioTools-macos-arm64-silicon.pkg` | macOS **12+**. Double-click → **Install**. The app launches when install finishes. If Finder blocks: Terminal `xattr -cr` + `sudo installer`, or **System Settings → Privacy & Security → Open Anyway**. |
 | Intel Mac | `AudioTools-macos-x64-intel.pkg` | Same install steps. An arm64 pkg will not launch here. |
-| Windows 10 or 11 (x64), no NVIDIA GPU | `AudioTools-0.1.3-windows-x64-cpu-setup.exe` | **64-bit only.** Small Setup. Start Menu: **Audio Tools (CPU)**. Needs [WebView2](https://go.microsoft.com/fwlink/p/?LinkId=2124703). |
-| Windows 10 or 11 (x64) with NVIDIA GPU | `AudioTools-0.1.3-windows-x64-cuda-setup.exe` | **64-bit only.** Large Setup. Start Menu: **Audio Tools (NVIDIA)**. Isolation is faster on NVIDIA + drivers. Can be installed next to the CPU edition. |
+| Windows 10 or 11 (x64), no NVIDIA GPU | `AudioTools-0.1.4-windows-x64-cpu-setup.exe` | **64-bit only.** Small Setup. Start Menu: **Audio Tools (CPU)**. Needs [WebView2](https://go.microsoft.com/fwlink/p/?LinkId=2124703). |
+| Windows 10 or 11 (x64) with NVIDIA GPU | `AudioTools-0.1.4-windows-x64-cuda-setup.exe` | **64-bit only.** Large Setup. Start Menu: **Audio Tools (NVIDIA)**. Isolation is faster on NVIDIA + drivers. Can be installed next to the CPU edition. |
 
-This is a **0.1.3 demo**. macOS builds are signed and notarized when Developer ID certificates are available on the build Mac. Windows SmartScreen will warn. The PyInstaller onedir is not obfuscated (Python is extractable); the freeze ships **no** hosted-site code, `.env`, or cloud credentials. No 32-bit Windows 10 build. No native Windows ARM build. No App Store.
+This is a **0.1.4 demo**. macOS builds are signed and notarized when Developer ID certificates are available on the build Mac. Windows SmartScreen will warn. The PyInstaller onedir is not obfuscated (Python is extractable); the freeze ships **no** hosted-site code, `.env`, or cloud credentials. No 32-bit Windows 10 build. No native Windows ARM build. No App Store.
 
 The previous unlabeled `AudioTools-0.1.0-windows-x64-setup.exe` (all-in-one CUDA) used the CPU AppId and `C:\Program Files\AudioTools`. Installing the new **CPU** Setup **replaces** that tree. Uninstall it first if you want a clean split, then install CPU and/or NVIDIA.
 
@@ -98,7 +104,7 @@ Published under a `desktop-v*` GitHub Release (draft until a maintainer publishe
 
 ## Download & install (terminal)
 
-Use the file that matches your OS. Windows has two 0.1.3 Setups: **`AudioTools-0.1.3-windows-x64-cpu-setup.exe`** (default) and **`AudioTools-0.1.3-windows-x64-cuda-setup.exe`** (NVIDIA). GitHub Release assets use the unversioned names `AudioTools-windows-x64-cpu-setup.exe` and `AudioTools-windows-x64-cuda-setup.exe`.
+Use the file that matches your OS. Windows has two 0.1.4 Setups: **`AudioTools-0.1.4-windows-x64-cpu-setup.exe`** (default) and **`AudioTools-0.1.4-windows-x64-cuda-setup.exe`** (NVIDIA). GitHub Release assets use the unversioned names `AudioTools-windows-x64-cpu-setup.exe` and `AudioTools-windows-x64-cuda-setup.exe`.
 
 ### Apple Silicon Mac (M1–M4)
 
@@ -129,24 +135,24 @@ open /Applications/AudioTools.app
 ### Windows 10 / 11 CPU (PowerShell)
 
 ```powershell
-curl.exe -fL -o "$env:USERPROFILE\Downloads\AudioTools-0.1.3-windows-x64-cpu-setup.exe" `
+curl.exe -fL -o "$env:USERPROFILE\Downloads\AudioTools-0.1.4-windows-x64-cpu-setup.exe" `
   "https://github.com/notjj1234/jj_audio_website/releases/latest/download/AudioTools-windows-x64-cpu-setup.exe"
 
-Start-Process "$env:USERPROFILE\Downloads\AudioTools-0.1.3-windows-x64-cpu-setup.exe"
+Start-Process "$env:USERPROFILE\Downloads\AudioTools-0.1.4-windows-x64-cpu-setup.exe"
 ```
 
 ### Windows 10 / 11 NVIDIA CUDA (PowerShell)
 
 ```powershell
-curl.exe -fL -o "$env:USERPROFILE\Downloads\AudioTools-0.1.3-windows-x64-cuda-setup.exe" `
+curl.exe -fL -o "$env:USERPROFILE\Downloads\AudioTools-0.1.4-windows-x64-cuda-setup.exe" `
   "https://github.com/notjj1234/jj_audio_website/releases/latest/download/AudioTools-windows-x64-cuda-setup.exe"
 
-Start-Process "$env:USERPROFILE\Downloads\AudioTools-0.1.3-windows-x64-cuda-setup.exe"
+Start-Process "$env:USERPROFILE\Downloads\AudioTools-0.1.4-windows-x64-cuda-setup.exe"
 ```
 
 **Windows 10 and 11 (x64):** `MinVersion` is 10.0. Not 32-bit, not native ARM. **WebView2** is required (built into Windows 11 and recent 10; older 10 must install Evergreen). CPU Setup is the small default. NVIDIA Setup is large and only speeds isolation on an NVIDIA GPU + drivers; the wizard warns if no NVIDIA adapter is seen (install still allowed).
 
-SmartScreen: **More info → Run anyway**. Finish the wizard, then launch **Audio Tools (CPU)** or **Audio Tools (NVIDIA)** from the Start Menu. Native Edge WebView2 window, not a browser tab. Apps & Features shows **0.1.3**. Both editions may be installed at once.
+SmartScreen: **More info → Run anyway**. Finish the wizard, then launch **Audio Tools (CPU)** or **Audio Tools (NVIDIA)** from the Start Menu. Native Edge WebView2 window, not a browser tab. Apps & Features shows **0.1.4**. Both editions may be installed at once.
 
 Missing window? Install [WebView2](https://go.microsoft.com/fwlink/p/?LinkId=2124703), then check `%LOCALAPPDATA%\AudioTools\logs\launcher.log` (CPU) or `%LOCALAPPDATA%\AudioToolsNVIDIA\logs\launcher.log` (NVIDIA) — a healthy launch logs `Native window shown (hwnds=[...])`.
 
@@ -154,10 +160,10 @@ Missing window? Install [WebView2](https://go.microsoft.com/fwlink/p/?LinkId=212
 
 1. First launch needs internet once to download Demucs weights (several minutes). Later runs reuse the cache.
 2. Open **Audio Isolation**, upload a **≤90 s** clip, leave speed on **Balanced**, click **Separate tracks**.
-3. Use the sticky **Home | mix | +** strip: open a mix tab; confirm mute/solo does not rebuild export until **Save**; try **Custom** under “What to separate”; download a stem or mix from **Downloads**.
+3. Use the sticky **Home | mix | +** strip: open a mix tab; confirm mute/solo does not rebuild export until **Save**; unmute **Metronome** if present; Play, switch to another app briefly (audio should continue), then Pause; try **Custom** under “What to separate”; download a stem or mix from **Downloads**.
 4. Optional: sidebar **YouTube Audio** — paste or search a public URL, leave format on **MP3**, **Save audio to folder**, confirm Explorer/Finder opens (if the picker is missing, Alt+Tab).
 
-CPU separation often takes about as long as the song (or longer). The **NVIDIA** Windows edition is typically faster on a compatible GPU.
+CPU separation often takes about as long as the song (or longer). The **NVIDIA** Windows edition and **Apple GPU (MPS)** on eligible Macs are the default when available and are typically much faster.
 
 Installer data dirs (not the same as `make tester`):
 
@@ -171,13 +177,13 @@ Installer data dirs (not the same as `make tester`):
 
 | Platform | Build | Must pass |
 |----------|-------|-----------|
-| M-series Mac | arm64 pkg | Native window opens; upload ≤90 s; Separate tracks; Home\|mix\|+; mixer stays open; Custom preset; Downloads; YouTube Audio save-to-folder |
+| M-series Mac | arm64 pkg | Native window opens; upload ≤90 s; Separate tracks; Home\|mix\|+; mixer stays open across app switch; metronome unmute + Accent; Custom preset; Downloads; YouTube Audio save-to-folder |
 | Intel Mac | x64 pkg | Same as above |
 | Win10 x64 | cpu-setup.exe | Native window **Audio Tools (CPU)**; default speed is Balanced/CPU; SmartScreen; WebView2; YouTube Audio folder picker |
 | Win10 x64 NVIDIA | cuda-setup.exe | Native window **Audio Tools (NVIDIA)**; Balanced can use CUDA; wizard may warn if no NVIDIA adapter |
 | Win11 x64 | cpu-setup.exe and/or cuda-setup.exe | Same as Win10 rows |
 
-Known limitations to tell testers: macOS Gatekeeper blocks a downloaded `.pkg` unless it was Developer ID signed and notarized; first-run model download; **16 GB RAM preferred** (8 GB: short clips + Balanced/Faster). GPU acceleration is **NVIDIA-only** (Windows).
+Known limitations to tell testers: macOS Gatekeeper blocks a downloaded `.pkg` unless it was Developer ID signed and notarized; first-run model download; **16 GB RAM preferred** (8 GB: short clips + Balanced/Faster; Mac MPS needs ≥12 GB). GPU acceleration is **NVIDIA CUDA on Windows** and **Apple GPU (MPS) on capable Macs**.
 
 ## Model cache path (run from source)
 
@@ -222,7 +228,7 @@ make mixer-build          # if frontend/build is missing
 make desktop-bundle-ffmpeg
 make desktop-build
 make desktop-pkg          # writes ~/Downloads/AudioTools-*-macos-arm64-silicon.pkg or *-macos-x64-intel.pkg
-# Version in filename: AUDIO_TOOLS_VERSION=0.1.3 make desktop-pkg
+# Version in filename: AUDIO_TOOLS_VERSION=0.1.4 make desktop-pkg
 # Maintainer fallback disk image: make desktop-dmg
 ```
 
@@ -253,6 +259,6 @@ pyinstaller packaging/audio_tools.spec --noconfirm --clean
 powershell -ExecutionPolicy Bypass -File packaging/make_windows_installer.ps1 -Flavor cuda -CopyToDownloads
 ```
 
-Writes `%USERPROFILE%\Downloads\AudioTools-0.1.3-windows-x64-cpu-setup.exe` and `AudioTools-0.1.3-windows-x64-cuda-setup.exe`. Version is read from `audio_to_tab.__version__` unless you pass `-AppVersion`.
+Writes `%USERPROFILE%\Downloads\AudioTools-0.1.4-windows-x64-cpu-setup.exe` and `AudioTools-0.1.4-windows-x64-cuda-setup.exe`. Version is read from `audio_to_tab.__version__` unless you pass `-AppVersion`.
 
 CI: tag `desktop-v*` or run **desktop-release** via `workflow_dispatch`. Intel Mac job uses `macos-15-intel` (`macos-13` is retired).

@@ -51,6 +51,8 @@ def test_mix_tabs_source_has_moises_chrome():
     assert "mix-tab-bar" in main or "Home" in main
     assert "tab-progress" in main
     assert "aria-busy" in main
+    assert "M7 3h8l5 5v13" in main
+    assert "M8 12h8M12 8v8" not in main
     style = (
         Path(__file__).resolve().parents[1]
         / "ui"
@@ -67,14 +69,34 @@ def test_mix_tabs_strip_is_sticky_in_app_css():
     app = (
         Path(__file__).resolve().parents[1] / "ui" / "app.py"
     ).read_text(encoding="utf-8")
+    assert "isolate_sticky_chrome" in app
     assert "isolate_mix_tabs_strip" in app
     assert "position: sticky" in app
+    assert (
+        '[data-testid="stLayoutWrapper"]:has(.st-key-isolate_sticky_chrome)'
+        in app
+    )
+    assert (
+        '[data-testid="stElementContainer"]:has(.st-key-isolate_sticky_chrome)'
+        in app
+    )
+    assert (
+        '[data-testid="stVerticalBlockBorderWrapper"]:has(.st-key-isolate_sticky_chrome)'
+        in app
+    )
     assert ":not(:last-of-type)" in app
     assert "isolate_region_picker" in app
     page = (
         Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
     ).read_text(encoding="utf-8")
+    assert 'key="isolate_sticky_chrome"' in page
     assert 'key="isolate_mix_tabs_strip"' in page
     assert 'key="isolate_moises_tabs"' in page
     assert "_mix_tabs_nonce" not in page
     assert 'key="isolate_region_picker"' in page
+    main = page[page.find("def main") :]
+    chrome = main[main.find('key="isolate_sticky_chrome"') : main.find("_poll_running_jobs()")]
+    assert "_render_moises_tab_strip" in chrome
+    assert 'key="isolate_refresh"' in chrome
+    assert 'key="isolate_queue_toggle"' in chrome
+    assert main.find("_render_moises_tab_strip") < main.find("_poll_running_jobs()")

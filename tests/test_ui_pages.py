@@ -48,6 +48,17 @@ def test_isolate_page_imports_without_running_main(isolate_page) -> None:
     assert callable(isolate_page.main)
 
 
+def test_isolate_queue_float_helpers_are_wired(isolate_page) -> None:
+    assert isolate_page.ISOLATE_QUEUE_PANEL_OPEN_KEY == "isolate_queue_panel_open"
+    assert callable(isolate_page._toggle_queue_panel)
+    assert callable(isolate_page._render_queue_float_panel)
+    assert callable(isolate_page._queue_tab_fragment)
+    assert callable(isolate_page._render_job_queue_panel)
+    assert callable(isolate_page._render_queue_job_row)
+    assert callable(isolate_page._render_compact_running_hint)
+    assert callable(isolate_page._retry_failed_job)
+
+
 def test_tab_pdf_page_imports_without_running_main(tab_pdf_page) -> None:
     assert callable(tab_pdf_page.main)
 
@@ -244,3 +255,29 @@ def test_stem_hints_cover_key_stems(isolate_page) -> None:
     assert "default_muted_for" in (
         Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
     ).read_text(encoding="utf-8")
+
+
+def test_hosted_isolate_blocks_over_cap_and_section_until_duration() -> None:
+    src = (
+        Path(__file__).resolve().parents[1] / "web" / "src" / "pages" / "IsolatePage.tsx"
+    ).read_text(encoding="utf-8")
+    assert "if (regionOverCap)" in src
+    assert "disabled={!sectionReady}" in src
+    assert "startBlocked" in src
+    assert "stack-secondary" not in src
+    tab = (
+        Path(__file__).resolve().parents[1] / "web" / "src" / "pages" / "TabPage.tsx"
+    ).read_text(encoding="utf-8")
+    assert "A tab job is already running" in tab
+    assert "disabled={tabJobRunning}" in tab
+    assert "stack-secondary" not in tab
+    mixer = (
+        Path(__file__).resolve().parents[1]
+        / "web"
+        / "src"
+        / "components"
+        / "StemMixer.tsx"
+    ).read_text(encoding="utf-8")
+    assert "SLEEP_RESUME_HINT" in mixer
+    assert 'className="primary"' in mixer
+    assert 'prev === SLEEP_RESUME_HINT' in mixer

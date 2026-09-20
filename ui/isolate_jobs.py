@@ -202,8 +202,14 @@ def jobs_status_signature(jobs: list[dict[str, Any]]) -> tuple[tuple[str, str], 
     return tuple((str(job.get("id") or ""), str(job.get("status") or "")) for job in jobs)
 
 
+# Quoted first so macOS "Application Support" (and similar) is not chopped at a space.
+_QUOTED_ABS_PATH_RE = re.compile(r"""['"](?:[A-Za-z]:\\|/[^'"]+)['"]""")
 _ABS_PATH_RE = re.compile(
     r"(?:[A-Za-z]:\\|/(?:Users|home|Applications|opt|usr|Library|private)/)\S+"
+)
+_MISSING_FILE_RE = re.compile(
+    r"(?:Errno\s*2|No such file or directory|ENOENT)",
+    re.IGNORECASE,
 )
 _ERROR_MAX_CHARS = 160
 
@@ -222,6 +228,9 @@ def format_job_error(error: str | None) -> str:
             continue
         cleaned_lines.append(line)
     cleaned = " ".join(cleaned_lines).strip() or text
+    if _MISSING_FILE_RE.search(cleaned):
+        return "Missing stem file"
+    cleaned = _QUOTED_ABS_PATH_RE.sub("", cleaned)
     cleaned = _ABS_PATH_RE.sub("", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" :;-")
     if len(cleaned) > _ERROR_MAX_CHARS:
@@ -412,6 +421,7 @@ def _finalize_job_after_process(job_id: str) -> None:
                 source_kind=spec.source_kind if spec else None,
                 source_audio_path=spec.audio_path if spec else None,
                 error=None,
+                traceback=None,
             )
             return
         write_status(
@@ -779,6 +789,8 @@ def _run_one_job(job_id: str) -> None:
         started_at=started,
         title=spec.title,
         stage_started_at=started,
+        error=None,
+        traceback=None,
         **eta_fields,
     )
 
@@ -912,6 +924,8 @@ def _run_one_job(job_id: str) -> None:
             clip_length=spec.max_duration_sec,
             reseparate_from=spec.reseparate_from,
             parent_run_dir=spec.parent_run_dir,
+            error=None,
+            traceback=None,
             **eta_fields,
         )
     except JobAborted:

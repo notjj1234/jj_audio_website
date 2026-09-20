@@ -11,7 +11,7 @@ Visual and interaction register for desktop Streamlit (`ui/`) and the hosted Rea
 | implemented-in-code | Gap closed in code; remaining text is history. |
 | unknown | Not verified here. |
 
-Do **not** reuse I-072, I-098, I-104, I-200–I-252, or I-500–I-509.
+Do **not** reuse I-072, I-098, I-104, I-200–I-252, I-500–I-510, or I-600–I-623.
 
 Desktop **Interface Lite** (sidebar radio) is not hosted processing mode `lite`. Streamlit’s file watcher being off is a tester restart, not a product bug.
 
@@ -39,6 +39,7 @@ Desktop **Interface Lite** (sidebar radio) is not hosted processing mode `lite`.
 | I-615 | Med | Lite vs Pro chrome | desktop | `ui/pages/tab_pdf.py:main` | Tab PDF ignores Interface Lite/Pro. Lite still gets guitar-engine radios, low-end restore, de-bleed, ensemble, Advanced transcription. Isolate Lite hides Engine. | No `is_pro_mode` import/use. Conversion settings expander always includes those widgets when stems are on. | Desktop Lite users who open Tab PDF (demo). | implemented-in-code | Hide engine/advanced behind Pro, or one “simple” convert path in Lite. |
 | I-616 | Low | Mixer | desktop | `ui/pages/isolate.py:_render_mixer_workspace`; `_render_guitar_fixup_panel` | Lite Mixer wraps guitar repair in **Fix the guitar track**, then the panel is another expander (**Guitar fix-up…**) that auto-opens when bleed is flagged. Two nested disclosures for one action. | Lite: `_stateful_expander("Fix the guitar track")` wrapping `_render_guitar_fixup_panel`. Panel: `st.expander(..., expanded=flagged or …)`. | Lite users with flagged bass bleed. | implemented-in-code | One expander in Lite; keep the inner expander only in Pro. |
 | I-617 | Med | disk / ingest | desktop | `ui/isolate_state.py:discard_youtube_staging`; `ui/pages/isolate.py:_enqueue_confirmed_job` | YouTube Search/Download writes under `DATA_DIR/<uuid>/` and never cleaned when New is reset or a job is queued, so staging WAVs pile up. | `_stage_youtube_audio` → `run_output_dir()`; `reset_new_tab_source` cleared session only. Job kept `audio_path` on the staging file. | Desktop users who search/download often. | implemented-in-code | Copy into the job run dir at enqueue, then auto-delete YouTube staging on replace/clear. |
+| I-618 | Med | Mixer playback | desktop + web | `ui/stem_mixer_component/frontend/src/main.ts:installWakeHooks`; `web/src/mixer/engine.ts:installWakeHooks` | Leaving the app/tab soft-paused the mixer (`visibilitychange` → `softPauseFromInterrupt`), so practice/mix stopped when switching windows. | Both engines soft-paused on hide; `handleWake` also soft-paused if still “playing”. | Anyone mixing then Alt-Tab / app switch. | implemented-in-code | Do not soft-pause on hide; wake only repairs closed/zombie contexts. Keep soft-pause on interrupted/closed/suspended `AudioContext`. Some browsers still suspend Web Audio in a fully backgrounded *tab*. |
 
 ### Not filing (already shipped or out of scope)
 
@@ -50,7 +51,7 @@ Session-shipped (do not re-open as gaps):
 - Separate tracks → Queue scrolls the main pane: `_scroll_main_to_top` + `_isolate_scroll_top`.
 - Tab PDF listed for Lite and Pro: `ui/app.py` `st.navigation` always includes `tab_pdf.py`.
 
-Engine / policy (see `docs/issues.md`, not this file): I-500–I-509 (Lite 90 s clamp, RoFormer duration gate, CPU threads, hosted Auto/MPS, honesty copy, Drop C HPF, piano/shifts/lead-rhythm). Stem presence labels that do not change Demucs compute. Streamlit desktop file watcher off (`packaging/launcher.py` restart). Enabling MPS on 8 GB.
+Engine / policy (see `docs/issues.md`, not this file): I-500–I-510 (Lite 90 s clamp, RoFormer duration gate, CPU threads, hosted Auto/MPS, honesty copy, Drop C HPF, piano/shifts/lead-rhythm, adaptive metronome). Stem presence labels that do not change Demucs compute. Streamlit desktop file watcher off (`packaging/launcher.py` restart). Enabling MPS on 8 GB.
 
 Documented product split, not a forgotten widget: desktop New / Mixer / Queue tabs vs website single Isolate page (form + queue + mixer stacked). Website light-only CSS (`web/src/styles.css`, no `prefers-color-scheme`); desktop theme remains Streamlit’s settings menu (`ui/app.py`).
 
@@ -59,3 +60,16 @@ Documented product split, not a forgotten widget: desktop New / Mixer / Queue ta
 - I-502 / guitar honesty: desktop outcome `help=` and Isolate `TRACK_OPTIONS` already warn bleed. Do not demand a clean guitar stem in UI copy. Hosted Tab PDF warning is I-600 (implemented).
 - I-509: website processing-mode Auto default is implemented (`ProcessingModeSelect.tsx` orders Auto first; `IsolatePage.tsx` `useState("auto")`). Not re-filed.
 - I-500: Lite full-file default + warn / Safer 90 s (no silent clamp) in `SECTION_OPTIONAL_HELP` / region controls. Hosted mode label is I-609 (implemented: **Low RAM (60 s)**).
+- I-510: adaptive metronome in `src/audio_to_tab/metronome.py` (vocal intros / tempo curve). Not a UI chrome issue.
+- I-618: mixer keeps playing across app/window hide (desktop iframe + web engine).
+- I-619–I-623 (2026-09-20): overlay-on-Separate, Home compact running hint, Queue failed retry, hosted over-cap Start, mixer sleep caption. See table below.
+
+## UI/UX (2026-09-20)
+
+| ID | Severity | Area | Surface | File:symbol | Symptom | Evidence | Who hits it | Kind | Direction (research only) |
+|----|----------|------|---------|-------------|---------|----------|-------------|------|---------------------------|
+| I-619 | High | overlay | desktop | `ui/pages/isolate.py:_enqueue_confirmed_job`; `ui/common.py:should_show_global_loading` | Separate used to set `_nav_loading`, dimming Queue for one paint. | `_request_loading_overlay()` was called at enqueue even though the overlay gate is nav-only. | Anyone clicking Separate / Add to queue. | implemented-in-code | Keep overlay for `st.switch_page` only. |
+| I-620 | Med | Queue / progress | desktop | `ui/pages/isolate.py:_render_status_strip` | Closing Queue hid running % / ETA. | Running card lived only in `_render_queue_job_row`. | Anyone who closes Queue while a job runs. | implemented-in-code | Compact Home hint; detailed Pause/Stop stay in Queue. |
+| I-621 | Med | Queue | desktop | `ui/pages/isolate.py:_render_queue_job_row`; `_retry_failed_job` | Dismiss on the strip left Queue with Remove only — no retry. | Failed rows used the generic Remove branch. | Anyone who dismisses a failure then opens Queue. | implemented-in-code | Try again on failed Queue rows. |
+| I-622 | High | Section / submit | website | `web/src/pages/IsolatePage.tsx`; `web/src/pages/TabPage.tsx` | Start could submit an over-cap section; API clamped silently. Section checkbox worked before duration loaded. Tab submit replaced the watched job. | `onSubmit` had no `regionOverCap` guard; checkbox not disabled; Tab watched one `job`. | Hosted Isolate Low RAM (60 s); Tab PDF while a job runs. | implemented-in-code | Disable Start when over cap; disable section until duration; disable Tab submit while running. |
+| I-623 | Med | Mixer | desktop + web | `ui/stem_mixer_component/frontend/src/main.ts`; `web/src/components/StemMixer.tsx` | After OS suspend, Play/Pause and the sleep caption could desync; sleep text stuck after Play. | Soft-pause set the hint; Play did not clear it. | Anyone whose AudioContext was interrupted. | implemented-in-code | Clear the hint on successful Play; sync the button from engine state. |

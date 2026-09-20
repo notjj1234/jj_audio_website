@@ -307,6 +307,13 @@ def main() -> None:
         "Paste or search a public YouTube link, pick a format, then choose a folder. "
         "Save only — no stem separation. Processing stays on this computer."
     )
+    st.caption(
+        "The sidebar Interface Lite/Pro setting does not apply on this page."
+    )
+    st.caption(
+        "If the folder window is hidden, Alt+Tab. Saving overwrites a same-named file. "
+        "On Linux, a missing zenity picker is treated as cancel."
+    )
     st.caption(YOUTUBE_DISCLAIMER)
 
     _apply_pending_url()

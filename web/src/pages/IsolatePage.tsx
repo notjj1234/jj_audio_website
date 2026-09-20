@@ -262,6 +262,10 @@ export function IsolatePage() {
   const regionLabel =
     useRegion && duration !== null ? formatRegionLabel(regionStart, regionEnd) : null;
 
+  useEffect(() => {
+    if (duration === null && useRegion) setUseRegion(false);
+  }, [duration, useRegion]);
+
   function onAudioMeta() {
     const audio = audioRef.current;
     if (!audio) return;
@@ -322,6 +326,14 @@ export function IsolatePage() {
       }
       if (regionEnd > duration + 0.05) {
         setError("End time exceeds file length");
+        return;
+      }
+      if (regionOverCap) {
+        setError(
+          selectedMode
+            ? `${selectedMode.label} allows up to ${modeCap} s per job. Shorten the section or choose a different mode.`
+            : "Section is longer than this processing mode allows"
+        );
         return;
       }
     }
@@ -389,8 +401,9 @@ export function IsolatePage() {
     })),
   ];
 
-  const formBusy =
-    busy || job?.status === "pending" || job?.status === "running";
+  const sectionReady = duration !== null;
+  const startBlocked =
+    busy || Boolean(pickerError) || regionOverCap || (useRegion && !sectionReady);
 
   return (
     <div>
@@ -399,10 +412,7 @@ export function IsolatePage() {
         {HOSTED_FILE_ONLY_NOTE} Pick labeled tracks (Demucs or BS-RoFormer for guitar), an
         optional section, and a processing mode.
       </p>
-      <form
-        className={`stack${formBusy ? " stack-secondary" : ""}`}
-        onSubmit={onSubmit}
-      >
+      <form className="stack" onSubmit={onSubmit}>
         <label className="field">
           Audio file
           <input
@@ -468,12 +478,16 @@ export function IsolatePage() {
                   Length: {formatTime(duration)} ({duration.toFixed(1)} s)
                 </span>
               ) : (
-                <span className="hint">Length unknown. The full file will be processed.</span>
+                <span className="hint">
+                  Length unknown. Section mode is available after the file length is
+                  read. Until then the full file will be processed.
+                </span>
               )}
               <label className="field">
                 <input
                   type="checkbox"
                   checked={useRegion}
+                  disabled={!sectionReady}
                   onChange={(e) => setUseRegion(e.target.checked)}
                 />{" "}
                 Isolate only a section
@@ -574,7 +588,7 @@ export function IsolatePage() {
         <ProcessingModeSelect value={processingMode} onChange={setProcessingMode} />
 
         {error && <p className="error">{error}</p>}
-        <button type="submit" disabled={busy || Boolean(pickerError)}>
+        <button type="submit" disabled={startBlocked}>
           {busy ? "Starting…" : "Start isolation"}
         </button>
       </form>
