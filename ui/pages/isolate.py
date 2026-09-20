@@ -285,7 +285,7 @@ STEM_HINTS = {
 PAGE_TITLE_HELP = (
     "Split a song into separate tracks on this computer. "
     "Use Home to separate, open a mix tab to listen, and open Queue for jobs. "
-    "For download-only YouTube saves, use the YouTube Audio page."
+    "For download-only YouTube saves, use the YouTube to MP3 page."
 )
 SEPARATE_TRACKS_HELP = (
     "Pick what you want out. Lite auto-picks speed and device for this machine; "

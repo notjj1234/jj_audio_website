@@ -1,6 +1,6 @@
 # Desktop / local tester runbook
 
-Run **Audio Isolation**, **YouTube Audio**, and **Tab PDF** on your own computer at $0 hosting.
+Run **Audio Isolation**, **YouTube to MP3**, and **Tab PDF** on your own computer at $0 hosting.
 Processing uses your **CPU**, or **NVIDIA CUDA** on Windows when a compatible GPU and drivers are present (not AMD/Intel/Apple GPUs). No cloud VM, no Docker, no accounts.
 
 **Installer testers** (`.pkg` / Windows zip): skip the Python/ffmpeg table below — see [Which installer to download](#which-installer-to-download).
@@ -57,7 +57,7 @@ Contributor install (tests/eval extras): `make install` / `./scripts/dev.sh inst
 2. **Demucs weights** — `tester` prewarms `htdemucs_6s` (default 6-stem model). Extra models download if you pick other track presets. Optional **guitar-ft** weights (~330 MB) download on first use when that Advanced checkbox is on; they cache as `$TORCH_HOME/checkpoints/guitar_htdemucs_6s.pt`. Meta’s pretrained Demucs weights are provided for scientific/research use (code is MIT; see facebookresearch/demucs#327).
 3. Open **Audio Isolation**, upload a **≤90 s** clip first, leave speed on **Balanced**, click **Separate tracks**. Full band emits 4 tracks (Vocals, Drums, Bass, Guitar). Piano and Other are available under Custom. A **Metronome** click track is attached when beat-tracking succeeds (starts muted).
 4. Use the sticky **Home | mix | +** strip: open a mix tab for the live mixer; download stems or a mix from **Downloads** (export builds on Save).
-5. Optional: open **YouTube Audio** in the sidebar to download a public link to a folder (MP3 by default) without separating stems.
+5. Optional: open **YouTube to MP3** in the sidebar to download a public link to a folder (MP3 by default) without separating stems.
 
 CPU separation often takes about as long as the song (or longer). Streamlit **Stop** may abort the page run, but a heavy Demucs child process can keep running until it finishes.
 
@@ -75,13 +75,13 @@ Public YouTube URLs only (no login, no age-restricted / private / members-only).
 
 | Goal | Page |
 |------|------|
-| Download audio to a folder (MP3/WAV/…) | Sidebar **YouTube Audio** — paste or **Search songs**, pick format, **Save audio to folder** (native Explorer/Finder picker). |
+| Download audio to a folder (MP3/WAV/…) | Sidebar **YouTube to MP3** — paste or **Search songs**, pick format, **Save audio to folder** (native Explorer/Finder picker). |
 | Separate stems / mix | **Audio Isolation** — paste or search, then **Separate tracks**. |
 | Tab from YouTube | **Tab PDF (demo)** — paste a URL in Conversion settings. |
 
 Testers do **not** install extra tools for YouTube. The app uses bundled ffmpeg + yt-dlp with a retry ladder. If YouTube still rejects the URL, **upload the audio file** on Audio Isolation / Tab PDF instead.
 
-**YouTube Audio caveats:** folder picker may appear behind the app window (Alt+Tab / click the dialog); Linux needs `zenity` for the picker; saving again with the same title/format overwrites the file; success opens the destination folder once.
+**YouTube to MP3 caveats:** folder picker may appear behind the app window (Alt+Tab / click the dialog); Linux needs `zenity` for the picker; saving again with the same title/format overwrites the file; success opens the destination folder once.
 
 Maintainers: keep yt-dlp current (`.venv-desktop/bin/pip install -U yt-dlp`). Frozen testers need a rebuilt installer. The app retries after clearing yt-dlp’s player cache on 403.
 
@@ -161,7 +161,7 @@ Missing window? Install [WebView2](https://go.microsoft.com/fwlink/p/?LinkId=212
 1. First launch needs internet once to download Demucs weights (several minutes). Later runs reuse the cache.
 2. Open **Audio Isolation**, upload a **≤90 s** clip, leave speed on **Balanced**, click **Separate tracks**.
 3. Use the sticky **Home | mix | +** strip: open a mix tab; confirm mute/solo does not rebuild export until **Save**; unmute **Metronome** if present; Play, switch to another app briefly (audio should continue), then Pause; try **Custom** under “What to separate”; download a stem or mix from **Downloads**.
-4. Optional: sidebar **YouTube Audio** — paste or search a public URL, leave format on **MP3**, **Save audio to folder**, confirm Explorer/Finder opens (if the picker is missing, Alt+Tab).
+4. Optional: sidebar **YouTube to MP3** — paste or search a public URL, leave format on **MP3**, **Save audio to folder**, confirm Explorer/Finder opens (if the picker is missing, Alt+Tab).
 
 CPU separation often takes about as long as the song (or longer). The **NVIDIA** Windows edition and **Apple GPU (MPS)** on eligible Macs are the default when available and are typically much faster.
 
@@ -177,9 +177,9 @@ Installer data dirs (not the same as `make tester`):
 
 | Platform | Build | Must pass |
 |----------|-------|-----------|
-| M-series Mac | arm64 pkg | Native window opens; upload ≤90 s; Separate tracks; Home\|mix\|+; mixer stays open across app switch; metronome unmute + Accent; Custom preset; Downloads; YouTube Audio save-to-folder |
+| M-series Mac | arm64 pkg | Native window opens; upload ≤90 s; Separate tracks; Home\|mix\|+; mixer stays open across app switch; metronome unmute + Accent; Custom preset; Downloads; YouTube to MP3 save-to-folder |
 | Intel Mac | x64 pkg | Same as above |
-| Win10 x64 | cpu-setup.exe | Native window **Audio Tools (CPU)**; default speed is Balanced/CPU; SmartScreen; WebView2; YouTube Audio folder picker |
+| Win10 x64 | cpu-setup.exe | Native window **Audio Tools (CPU)**; default speed is Balanced/CPU; SmartScreen; WebView2; YouTube to MP3 folder picker |
 | Win10 x64 NVIDIA | cuda-setup.exe | Native window **Audio Tools (NVIDIA)**; Balanced can use CUDA; wizard may warn if no NVIDIA adapter |
 | Win11 x64 | cpu-setup.exe and/or cuda-setup.exe | Same as Win10 rows |
 

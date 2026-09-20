@@ -26,7 +26,7 @@ from audio_to_tab.transcribe import transcribe_audio
 logger = logging.getLogger(__name__)
 
 YOUTUBE_DISCLAIMER = (
-    "FYI: public YouTube links only. Use audio you’re allowed to save."
+    "FYI: public YouTube links only. No Private or Unlisted YouTube links"
 )
 
 DEMUCS_INSTALL_HINT = (

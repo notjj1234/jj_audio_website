@@ -2,7 +2,7 @@
 
 ## Two products, one shared engine
 
-- **Desktop** (local): Streamlit `ui/` (Audio Isolation = separate/mix; YouTube Audio = save file only; Tab PDF), frozen by `packaging/` (`launcher.py`, `audio_tools.spec`). Serial in-process isolate jobs. **Lite** auto-profiles speed/device/guitar from RAM/GPU (`audio_to_tab.hardware`; **GPU-first** when CUDA or eligible MPS is available); **Pro** exposes every control (Isolation/Tab PDF). YouTube Audio ignores Lite/Pro. Mixer iframe keeps playback across app/window focus loss (`installWakeHooks` does not soft-pause on hide).
+- **Desktop** (local): Streamlit `ui/` (Audio Isolation = separate/mix; YouTube to MP3 = save file only; Tab PDF), frozen by `packaging/` (`launcher.py`, `audio_tools.spec`). Serial in-process isolate jobs. **Lite** auto-profiles speed/device/guitar from RAM/GPU (`audio_to_tab.hardware`; **GPU-first** when CUDA or eligible MPS is available); **Pro** exposes every control (Isolation/Tab PDF). YouTube to MP3 ignores Lite/Pro. Mixer iframe keeps playback across app/window focus loss (`installWakeHooks` does not soft-pause on hide).
 - **Website** (hosted): FastAPI `backend/` + React SPA `web/` + Caddy; jobs via Postgres/Redis/MinIO + arq worker (`docker-compose.yml`). **Streamlit is NOT in the hosted stack.** Hosted Auto/`lite` processing modes live in `backend/capabilities.py`. Same mixer wake policy in `web/src/mixer/engine.ts`.
 - **Shared** engine: `src/audio_to_tab/` (isolate, mixer, ingest, tab-PDF pipeline, adaptive metronome). Import as `audio_to_tab`. Metronome: librosa tempo curve + second `beat_track`; mixer contract is `click_times_1x` (rebake does not re-track).
 

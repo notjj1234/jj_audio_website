@@ -1,4 +1,4 @@
-"""Streamlit page: YouTube Audio — download a public video’s audio to a folder."""
+"""Streamlit page: YouTube to MP3 — download a public video’s audio to a folder."""
 
 from __future__ import annotations
 
@@ -296,23 +296,14 @@ def _run_save_flow(url: str, fmt: str, *, already_staged: Path | None) -> None:
 
 def main() -> None:
     st.title(
-        "YouTube Audio",
+        "YouTube to MP3",
         anchor=False,
         help=(
-            "Download audio from a public YouTube link and save it to a folder. "
-            "This page does not separate stems — use Audio Isolation for that."
+            "Download audio from a public YouTube link and save it to a folder "
+            "(MP3 by default; WAV/FLAC/etc. also available). "
+            "This page does not separate stems — use Audio Isolation for that. "
+            "If the folder window is hidden, Alt+Tab. Saving overwrites a same-named file."
         ),
-    )
-    st.caption(
-        "Paste or search a public YouTube link, pick a format, then choose a folder. "
-        "Save only — no stem separation. Processing stays on this computer."
-    )
-    st.caption(
-        "The sidebar Interface Lite/Pro setting does not apply on this page."
-    )
-    st.caption(
-        "If the folder window is hidden, Alt+Tab. Saving overwrites a same-named file. "
-        "On Linux, a missing zenity picker is treated as cancel."
     )
     st.caption(YOUTUBE_DISCLAIMER)
 

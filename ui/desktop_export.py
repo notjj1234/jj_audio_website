@@ -1,6 +1,6 @@
 """Save desktop downloads to a chosen folder and reveal it in the OS file manager.
 
-Used by Isolate Downloads and the YouTube Audio page. No tkinter — the frozen
+Used by Isolate Downloads and the YouTube to MP3 page. No tkinter — the frozen
 app excludes it. Folder picking uses osascript / PowerShell / zenity.
 
 Caveats for callers/UX:
