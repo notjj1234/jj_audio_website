@@ -36,6 +36,8 @@ _METER_MIN_CONTRAST = 1.15
 _METER_WIN_MARGIN = 1.05
 _HOP_LENGTH = 512
 _TEMPO_SMOOTH_SEC = 6.0
+# Non-1x octave runs shorter than this are octave errors, not a new tempo.
+_OCTAVE_RUN_MIN_SEC = 8.0
 _CURVE_JSON_HZ = 4.0
 _LOCAL_CONF_FLOOR = 0.35
 _CURVE_IQR_HIGH_BPM = 8.0
@@ -85,17 +87,23 @@ _SOUND_PRESETS: dict[str, dict[str, float]] = {
 }
 
 
+METRONOME_FOLLOW_SMART = "smart"
+METRONOME_FOLLOW_STEADY = "steady"
+
+
 @dataclass(frozen=True)
 class MetronomeRenderOptions:
     accent: bool = True
     rate: float = 1.0
     sound: str = "classic"
+    follow: str = METRONOME_FOLLOW_SMART
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "accent": bool(self.accent),
             "rate": float(self.rate),
             "sound": str(self.sound),
+            "follow": str(self.follow),
         }
 
 
@@ -123,16 +131,25 @@ def coerce_metronome_sound(value: Any) -> str:
     return "classic"
 
 
+def coerce_metronome_follow(value: Any) -> str:
+    text = str(value or METRONOME_FOLLOW_SMART).strip().lower()
+    if text == METRONOME_FOLLOW_STEADY:
+        return METRONOME_FOLLOW_STEADY
+    return METRONOME_FOLLOW_SMART
+
+
 def coerce_metronome_render_options(
     *,
     accent: Any = True,
     rate: Any = 1.0,
     sound: Any = "classic",
+    follow: Any = METRONOME_FOLLOW_SMART,
 ) -> MetronomeRenderOptions:
     return MetronomeRenderOptions(
         accent=True if accent is None else bool(accent),
         rate=coerce_metronome_rate(rate),
         sound=coerce_metronome_sound(sound),
+        follow=coerce_metronome_follow(follow),
     )
 
 
@@ -297,6 +314,46 @@ def stabilize_tempo_curve(
     for i, value in enumerate(smoothed):
         snapped[i] = octave_snap_bpm(float(value), anchor)
     return np.clip(snapped, MIN_PLAUSIBLE_BPM, MAX_PLAUSIBLE_BPM)
+
+
+def collapse_brief_octave_runs(
+    curve: np.ndarray,
+    *,
+    sr: int | float,
+    hop_length: int = _HOP_LENGTH,
+    global_bpm: float,
+    min_run_sec: float = _OCTAVE_RUN_MIN_SEC,
+) -> np.ndarray:
+    """Put short half/double stretches back on ``global_bpm``.
+
+    Octave snap already quantizes each frame to 1x or 2x (when 2x is still a
+    plausible tempo). A few seconds of 2x is a false speed-up; a long run is
+    kept so a real double-time section still follows.
+    """
+    anchor = float(np.clip(global_bpm, MIN_PLAUSIBLE_BPM, MAX_PLAUSIBLE_BPM))
+    raw = np.asarray(curve, dtype=np.float64).reshape(-1)
+    if raw.size == 0 or anchor <= 0 or float(sr) <= 0:
+        return raw.copy()
+    hop_sec = float(max(1, int(hop_length))) / float(sr)
+    if hop_sec <= 0:
+        return raw.copy()
+    labels = np.array(
+        [round(octave_snap_bpm(float(value), anchor), 3) for value in raw],
+        dtype=np.float64,
+    )
+    anchor_label = round(anchor, 3)
+    out = labels.copy()
+    start = 0
+    n = int(labels.size)
+    while start < n:
+        end = start + 1
+        while end < n and labels[end] == labels[start]:
+            end += 1
+        duration = (end - start) * hop_sec
+        if labels[start] != anchor_label and duration < float(min_run_sec):
+            out[start:end] = anchor
+        start = end
+    return out
 
 
 def curve_confidence(
@@ -516,6 +573,42 @@ def metronome_grid_times(
     if times.size == 0:
         return np.asarray([phase if phase < duration_sec else 0.0], dtype=np.float64)
     return times
+
+
+def steady_click_times(
+    *,
+    duration_sec: float,
+    bpm: float,
+    body_start_sec: float,
+) -> np.ndarray:
+    """One BPM for the whole song, phased to the groove. Does not beat-track."""
+    return metronome_grid_times(
+        duration_sec=float(duration_sec),
+        bpm=float(bpm),
+        phase_sec=float(body_start_sec),
+    )
+
+
+def _render_times_for_follow(
+    smart_times: np.ndarray,
+    follow: str,
+    *,
+    duration_sec: float,
+    bpm: float,
+    body_start_sec: float,
+) -> np.ndarray:
+    """Smart playback uses the tracked grid. Steady renders a constant period."""
+    tracked = np.asarray(smart_times, dtype=np.float64).reshape(-1)
+    if coerce_metronome_follow(follow) != METRONOME_FOLLOW_STEADY:
+        return tracked
+    steady = steady_click_times(
+        duration_sec=duration_sec,
+        bpm=bpm,
+        body_start_sec=body_start_sec,
+    )
+    if steady.size < _MIN_BEATS:
+        return tracked
+    return steady
 
 
 def build_click_times(
@@ -953,7 +1046,10 @@ def render_metronome_wav(
     """Write a stereo click WAV from a stored 1x grid. Does not beat-track."""
     opts = options or MetronomeRenderOptions()
     opts = coerce_metronome_render_options(
-        accent=opts.accent, rate=opts.rate, sound=opts.sound
+        accent=opts.accent,
+        rate=opts.rate,
+        sound=opts.sound,
+        follow=opts.follow,
     )
     preset = _SOUND_PRESETS.get(opts.sound, _SOUND_PRESETS["classic"])
     times_1x = np.asarray(times_1x, dtype=np.float64).reshape(-1)
@@ -1030,6 +1126,7 @@ def generate_metronome_stem(
         accent=True if render is None else render.accent,
         rate=1.0 if render is None else render.rate,
         sound="classic" if render is None else render.sound,
+        follow=METRONOME_FOLLOW_SMART if render is None else render.follow,
     )
     src = Path(audio_path)
     dest = Path(output_path)
@@ -1084,6 +1181,9 @@ def generate_metronome_stem(
         raw_curve = np.full(max(onset.size, 1), bpm, dtype=np.float64)
     curve = stabilize_tempo_curve(
         raw_curve, sr=native_sr, hop_length=_HOP_LENGTH, global_bpm=bpm
+    )
+    curve = collapse_brief_octave_runs(
+        curve, sr=native_sr, hop_length=_HOP_LENGTH, global_bpm=bpm
     )
     if curve.size != hop_times.size:
         hop_times = librosa.times_like(curve, sr=native_sr, hop_length=_HOP_LENGTH)
@@ -1156,8 +1256,15 @@ def generate_metronome_stem(
 
     n = len(mono)
     ref_sec = float(body_start)
-    if not render_metronome_wav(
+    render_times = _render_times_for_follow(
         times,
+        opts.follow,
+        duration_sec=duration_sec,
+        bpm=bpm,
+        body_start_sec=float(body_start),
+    )
+    if not render_metronome_wav(
+        render_times,
         dest,
         sr=native_sr,
         n_samples=n,
@@ -1315,7 +1422,10 @@ def rebake_metronome_artifact(
     """Rewrite metronome.wav from a stored 1x grid (or re-track if needed)."""
     opts = options or MetronomeRenderOptions()
     opts = coerce_metronome_render_options(
-        accent=opts.accent, rate=opts.rate, sound=opts.sound
+        accent=opts.accent,
+        rate=opts.rate,
+        sound=opts.sound,
+        follow=opts.follow,
     )
     out_dir = Path(output_dir)
     diag_path = Path(diagnostics_path) if diagnostics_path else out_dir / METRONOME_DIAGNOSTICS_NAME
@@ -1344,10 +1454,20 @@ def rebake_metronome_artifact(
             or (detected[0] if detected.size else 0.0)
         )
     measure = max(1, int(payload.get("beats_per_measure") or 4))
+    grid_duration = duration if duration > 0 and sr > 0 else (
+        n_samples / float(sr) if sr > 0 and n_samples > 0 else 0.0
+    )
 
     if times_1x.size >= _MIN_BEATS and sr > 0 and n_samples > 0:
-        if render_metronome_wav(
+        render_times = _render_times_for_follow(
             times_1x,
+            opts.follow,
+            duration_sec=grid_duration,
+            bpm=float(payload.get("bpm") or 0.0),
+            body_start_sec=ref_sec,
+        )
+        if render_metronome_wav(
+            render_times,
             dest,
             sr=sr,
             n_samples=n_samples,

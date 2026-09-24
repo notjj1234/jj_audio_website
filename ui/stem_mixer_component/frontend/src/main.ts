@@ -11,9 +11,11 @@ import {
   MetronomeOptions,
   MetronomeSoundId,
   buildMetronomeAudioBuffer,
+  coerceMetronomeFollow,
   coerceMetronomeOptions,
   coerceMetronomeRate,
   coerceMetronomeSound,
+  metronomeClickTimes,
   metronomePeaksFromTimes,
 } from "./metronomeClicks";
 
@@ -525,6 +527,7 @@ let metroOptions: MetronomeOptions = coerceMetronomeOptions({
   accent: true,
   rate: 1,
   sound: "classic",
+  follow: "smart",
 });
 
 let wantPlaying = false;
@@ -1132,7 +1135,7 @@ function applyDecodedPeaks(): void {
   for (const stem of stemInfos) {
     if (stem.id === "metronome" && metroConfig) {
       stem.peaks = metronomePeaksFromTimes(
-        metroConfig.times1x,
+        metronomeClickTimes(metroConfig, metroOptions.follow),
         metroConfig.durationSec || engine.getDuration(),
         metroOptions,
         metroConfig.refSec
@@ -1162,6 +1165,10 @@ function metronomeToolbarHtml(): string {
   return `
     <div class="metro-toolbar" role="group" aria-label="Click track options">
       <div class="metro-rate-seg" role="group" aria-label="Click rate">${rateBtns}</div>
+      <div class="metro-rate-seg" role="group" aria-label="Metronome mode">
+        <button type="button" class="metro-follow-btn${metroOptions.follow === "smart" ? " active" : ""}" data-follow="smart" aria-pressed="${metroOptions.follow === "smart" ? "true" : "false"}">Smart</button>
+        <button type="button" class="metro-follow-btn${metroOptions.follow === "steady" ? " active" : ""}" data-follow="steady" aria-pressed="${metroOptions.follow === "steady" ? "true" : "false"}">Steady</button>
+      </div>
       <button type="button" class="metro-chip${metroOptions.accent ? " active" : ""}" id="metro-accent"
         aria-pressed="${metroOptions.accent ? "true" : "false"}">Accent</button>
       <label class="metro-sound-wrap">
@@ -1224,6 +1231,12 @@ function bindMetronomeOptionControls(): void {
     btn.onclick = (event) => {
       event.stopPropagation();
       apply({ rate: coerceMetronomeRate(btn.dataset.rate) });
+    };
+  });
+  document.querySelectorAll<HTMLButtonElement>(".metro-follow-btn").forEach((btn) => {
+    btn.onclick = (event) => {
+      event.stopPropagation();
+      apply({ follow: coerceMetronomeFollow(btn.dataset.follow) });
     };
   });
   const accent = document.getElementById("metro-accent") as HTMLButtonElement | null;
@@ -1327,6 +1340,10 @@ function parseMetronomeArg(raw: unknown): MetronomeConfig | null {
     ? timesRaw.map((t) => Number(t)).filter((t) => Number.isFinite(t))
     : [];
   if (times1x.length === 0) return null;
+  const steadyRaw = obj.steadyTimes1x ?? obj.steady_times_1x;
+  const steadyTimes1x = Array.isArray(steadyRaw)
+    ? steadyRaw.map((t) => Number(t)).filter((t) => Number.isFinite(t))
+    : [];
   const options = coerceMetronomeOptions(
     (obj.options as Partial<MetronomeOptions> | undefined) ?? {
       accent: obj.accent as boolean | undefined,
@@ -1336,7 +1353,8 @@ function parseMetronomeArg(raw: unknown): MetronomeConfig | null {
   );
   return {
     times1x,
-    refSec: Number(obj.refSec ?? obj.first_detected_sec ?? times1x[0] ?? 0) || 0,
+    steadyTimes1x,
+    refSec: Number(obj.refSec ?? obj.body_start_sec ?? obj.first_detected_sec ?? times1x[0] ?? 0) || 0,
     beatsPerMeasure: Math.max(1, Math.floor(Number(obj.beatsPerMeasure ?? obj.beats_per_measure ?? 4) || 4)),
     durationSec: Math.max(0.05, Number(obj.durationSec ?? obj.duration_sec ?? 0) || 0),
     options,
@@ -1410,7 +1428,7 @@ async function onRender(event: Event): Promise<void> {
   metroConfig = nextMetro;
   metroOptions = nextMetro
     ? coerceMetronomeOptions(nextMetro.options)
-    : coerceMetronomeOptions({ accent: true, rate: 1, sound: "classic" });
+    : coerceMetronomeOptions({ accent: true, rate: 1, sound: "classic", follow: "smart" });
   const masterInit = Number(args.initialMasterVolumeDb);
   const volumesIn = { ...(args.initialVolumesDb ?? {}) };
   for (const id of Object.keys(volumesIn)) {

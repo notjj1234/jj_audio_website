@@ -27,7 +27,9 @@ from audio_to_tab.metronome import (
     rebake_metronome_artifact,
     refine_tempo_phase,
     render_metronome_wav,
+    collapse_brief_octave_runs,
     stabilize_tempo_curve,
+    steady_click_times,
     write_metronome_diagnostics,
 )
 
@@ -399,6 +401,10 @@ def test_coerce_metronome_render_options_defaults():
     assert bad.accent is True
     assert bad.rate == 1.0
     assert bad.sound == "classic"
+    assert bad.follow == "smart"
+    steady = coerce_metronome_render_options(follow="steady")
+    assert steady.follow == "steady"
+    assert coerce_metronome_render_options(follow="regular").follow == "smart"
 
 
 def _click_peak_hz(clicks: np.ndarray, sr: int, t0: float, window: float = 0.04) -> float:
@@ -755,3 +761,136 @@ def test_generate_metronome_48000_sr_pulse_train(tmp_path: Path):
     assert any(abs(float(t) - 0.5) < 0.08 for t in clicks)
     assert any(abs(float(t) - 1.0) < 0.08 for t in clicks)
     assert any(abs(float(t) - 4.0) < 0.12 for t in clicks)
+
+
+def _hop_frames(seconds: float, *, sr: int = 22050, hop: int = 512) -> int:
+    return max(1, int(round(seconds / (hop / sr))))
+
+
+def test_collapse_brief_octave_run_returns_to_anchor():
+    sr, hop = 22050, 512
+    n = _hop_frames(20.0, sr=sr, hop=hop)
+    curve = np.full(n, 80.0)
+    start = _hop_frames(4.0, sr=sr, hop=hop)
+    end = start + _hop_frames(2.0, sr=sr, hop=hop)
+    curve[start:end] = 160.0
+    out = collapse_brief_octave_runs(curve, sr=sr, hop_length=hop, global_bpm=80.0)
+    assert np.allclose(out, 80.0)
+
+
+def test_collapse_keeps_long_octave_run():
+    sr, hop = 22050, 512
+    n = _hop_frames(24.0, sr=sr, hop=hop)
+    curve = np.full(n, 80.0)
+    start = _hop_frames(4.0, sr=sr, hop=hop)
+    end = start + _hop_frames(12.0, sr=sr, hop=hop)
+    curve[start:end] = 160.0
+    out = collapse_brief_octave_runs(curve, sr=sr, hop_length=hop, global_bpm=80.0)
+    assert np.allclose(out[start:end], 160.0)
+    assert np.allclose(out[:start], 80.0)
+    assert np.allclose(out[end:], 80.0)
+
+
+def test_build_click_times_skips_short_double_after_guard():
+    sr, hop = 22050, 512
+    duration = 16.0
+    bpm = 80.0
+    period = 60.0 / bpm
+    body = np.arange(0.0, duration, period)
+    hop_sec = hop / sr
+    n = int(round(duration / hop_sec)) + 1
+    curve_times = np.arange(n) * hop_sec
+    curve = np.full(n, bpm)
+    start = _hop_frames(4.0, sr=sr, hop=hop)
+    end = start + _hop_frames(2.0, sr=sr, hop=hop)
+    curve[start:end] = 160.0
+    guarded = collapse_brief_octave_runs(curve, sr=sr, hop_length=hop, global_bpm=bpm)
+    clicks = build_click_times(
+        body,
+        duration_sec=duration,
+        bpm=bpm,
+        tempo_curve=guarded,
+        curve_times=curve_times,
+        curve_conf=np.ones(n),
+    )
+    diffs = np.diff(clicks)
+    assert diffs.size >= 8
+    assert float(np.min(diffs)) > 0.6
+
+
+def test_build_click_times_keeps_long_double_body():
+    slow = 0.75
+    fast = 0.375
+    body = np.unique(
+        np.concatenate(
+            [
+                np.arange(0.0, 4.0, slow),
+                np.arange(4.0, 16.0, fast),
+                np.arange(16.0, 20.0, slow),
+            ]
+        )
+    )
+    clicks = build_click_times(body, duration_sec=20.0, bpm=80.0)
+    mid = np.diff(clicks[(clicks >= 5.0) & (clicks <= 15.0)])
+    edge = np.diff(clicks[(clicks >= 0.5) & (clicks <= 3.5)])
+    assert mid.size >= 4
+    assert edge.size >= 2
+    assert float(np.median(mid)) < 0.45
+    assert float(np.median(edge)) > 0.6
+
+
+def test_steady_grid_is_one_period():
+    times = steady_click_times(duration_sec=8.0, bpm=120.0, body_start_sec=0.25)
+    diffs = np.diff(times)
+    assert diffs.size >= 8
+    assert np.allclose(diffs, 0.5)
+    assert abs(float(times[0]) - 0.25) < 1e-9
+
+
+def test_rebake_steady_keeps_smart_times_and_skips_beat_track(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    sr = 22050
+    duration = 4.0
+    n = int(sr * duration)
+    sf.write(tmp_path / "metronome.wav", np.zeros((n, 2), dtype=np.float32), sr)
+    smart = [0.0, 0.4, 0.9, 1.5, 2.2, 2.8, 3.5]
+    diag = tmp_path / "metronome_diagnostics.json"
+    diag.write_text(
+        json.dumps(
+            {
+                "bpm": 120.0,
+                "sr": sr,
+                "duration_sec": duration,
+                "body_start_sec": 0.0,
+                "click_times_1x": smart,
+                "detected_times": [0.0, 0.5, 1.0, 1.5],
+                "beats_per_measure": 4,
+                "render": {"accent": True, "rate": 1.0, "sound": "classic"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("beat_track should not run during rebake")
+
+    monkeypatch.setattr("librosa.beat.beat_track", boom)
+    result = rebake_metronome_artifact(
+        tmp_path,
+        MetronomeRenderOptions(follow="steady"),
+    )
+    assert result is not None
+    assert result.render.follow == "steady"
+    assert list(result.click_times_1x) == pytest.approx(smart)
+    payload = load_metronome_diagnostics(diag)
+    assert payload is not None
+    assert payload["click_times_1x"] == pytest.approx(smart)
+    assert payload["render"]["follow"] == "steady"
+    clicks, click_sr = sf.read(tmp_path / "metronome.wav", always_2d=True)
+    peaks = _peak_times(clicks, click_sr)
+    expected = steady_click_times(duration_sec=duration, bpm=120.0, body_start_sec=0.0)
+    assert peaks.size >= 4
+    for t in expected:
+        if t < duration - 0.05:
+            assert any(abs(float(p) - float(t)) < 0.03 for p in peaks)

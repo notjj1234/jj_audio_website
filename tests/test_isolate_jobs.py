@@ -36,7 +36,6 @@ from ui.isolate_jobs import (
     remove_job,
     resume_job,
     separation_in_progress,
-    write_status,
 )
 from ui.isolate_state import (
     is_stopping_previous_job,
@@ -45,6 +44,14 @@ from ui.isolate_state import (
     status_strip_waiting_caption,
     stopping_previous_caption,
 )
+
+
+def write_status(job_id: str, **updates):
+    """Test seed: create the job folder, then write. Production writes do not."""
+    import ui.isolate_jobs as jobs
+
+    jobs._ensure_job_dir(job_id)
+    return jobs.write_status(job_id, **updates)
 
 
 @pytest.fixture()
@@ -1253,3 +1260,199 @@ def test_finalize_marks_failed_when_running_without_stems(jobs_dir: Path):
     assert status is not None
     assert status["status"] == "failed"
     assert "Process exited before completion" in str(status.get("error") or "")
+
+
+def test_finalize_fails_queued_job_when_child_exits(jobs_dir: Path):
+    """A child that dies before status leaves queued must not stay Waiting."""
+    import ui.isolate_jobs as jobs
+
+    audio = jobs_dir / "a.wav"
+    audio.write_bytes(b"x")
+    out = jobs_dir / "out"
+    out.mkdir()
+    enqueue_job(
+        IsolateJobSpec(
+            id="stuck",
+            audio_path=str(audio),
+            output_dir=str(out),
+            title="Stuck",
+            created_at=1.0,
+        )
+    )
+    assert read_status("stuck")["status"] == "queued"
+    jobs._finalize_job_after_process("stuck")
+    status = read_status("stuck")
+    assert status is not None
+    assert status["status"] == "failed"
+    assert status["error"] == jobs._WORKER_EXITED_BEFORE_START
+    assert "stuck" not in jobs.queued_job_ids()
+    assert (jobs_dir / "isolate_jobs" / "stuck").is_dir()
+
+
+def test_queued_child_exit_lets_next_job_run(jobs_dir: Path, monkeypatch):
+    import ui.isolate_jobs as jobs
+
+    audio_a = jobs_dir / "a.wav"
+    audio_b = jobs_dir / "b.wav"
+    audio_a.write_bytes(b"a")
+    audio_b.write_bytes(b"b")
+    out_a = jobs_dir / "out_a"
+    out_b = jobs_dir / "out_b"
+    out_a.mkdir()
+    out_b.mkdir()
+    calls: list[str] = []
+
+    def fake_separate(*, audio_path, output_dir, config, on_progress, **kwargs):
+        calls.append(Path(audio_path).name)
+        on_progress("separate", "mock")
+        dest = Path(output_dir) / "vocals.wav"
+        dest.write_bytes(b"v")
+        return {"vocals": dest}
+
+    monkeypatch.setattr("audio_to_tab.isolate.separate_stems", fake_separate)
+    monkeypatch.setattr("audio_to_tab.hardware.ensure_cuda_available", lambda *a, **k: None)
+    monkeypatch.setattr("audio_to_tab.hardware.get_desktop_probe", lambda: MagicMock())
+    monkeypatch.setattr("ui.media.cleanup_mix_artifacts", lambda *_a, **_k: None)
+    monkeypatch.setattr("ui.common.write_run_metadata", lambda *_a, **_k: None)
+
+    enqueue_job(
+        IsolateJobSpec(
+            id="phantom",
+            audio_path=str(audio_a),
+            output_dir=str(out_a),
+            title="Phantom",
+            created_at=1.0,
+        )
+    )
+    enqueue_job(
+        IsolateJobSpec(
+            id="next",
+            audio_path=str(audio_b),
+            output_dir=str(out_b),
+            title="Next",
+            created_at=2.0,
+        )
+    )
+    jobs._finalize_job_after_process("phantom")
+    jobs._execute_job("next")
+
+    assert read_status("phantom")["status"] == "failed"
+    nxt = read_status("next")
+    assert nxt is not None
+    assert nxt["status"] == "succeeded", nxt
+    assert calls == ["b.wav"]
+
+
+def test_setup_error_marks_job_failed(jobs_dir: Path, monkeypatch):
+    import ui.isolate_jobs as jobs
+
+    audio = jobs_dir / "a.wav"
+    audio.write_bytes(b"x")
+    out = jobs_dir / "out"
+    out.mkdir()
+    enqueue_job(
+        IsolateJobSpec(
+            id="setup-boom",
+            audio_path=str(audio),
+            output_dir=str(out),
+            title="Boom",
+            created_at=time.time(),
+        )
+    )
+
+    def boom():
+        raise OSError("probe failed")
+
+    monkeypatch.setattr("audio_to_tab.hardware.get_desktop_probe", boom)
+    jobs._run_one_job("setup-boom")
+    status = read_status("setup-boom")
+    assert status is not None
+    assert status["status"] == "failed"
+    assert "probe failed" in str(status.get("error") or "")
+    assert "setup-boom" not in jobs.queued_job_ids()
+
+
+def test_deleted_job_is_not_resurrected(jobs_dir: Path):
+    import ui.isolate_jobs as jobs
+
+    audio = jobs_dir / "a.wav"
+    audio.write_bytes(b"x")
+    enqueue_job(
+        IsolateJobSpec(
+            id="dropme",
+            audio_path=str(audio),
+            output_dir=str(jobs_dir / "out"),
+            title="Drop",
+            created_at=time.time(),
+        )
+    )
+    assert remove_job("dropme") is True
+    job_dir = jobs_dir / "isolate_jobs" / "dropme"
+    assert jobs.read_status("dropme") is None
+    assert not job_dir.exists()
+    assert jobs.write_status("dropme", completed_stages=["ingest"]) is None
+    assert not job_dir.exists()
+    assert not (job_dir / "status.json").exists()
+    assert "dropme" not in jobs.queued_job_ids()
+
+
+def test_reconcile_fails_stale_running_job(jobs_dir: Path):
+    import ui.isolate_jobs as jobs
+
+    write_status("stale-run", status="running", stage="separate", message="Working")
+    jobs._reconcile_orphaned_jobs()
+    status = read_status("stale-run")
+    assert status is not None
+    assert status["status"] == "failed"
+    assert separation_in_progress() is False
+
+
+def test_reconcile_paused_cancelled_and_keeps_queued(jobs_dir: Path):
+    import ui.isolate_jobs as jobs
+
+    write_status("pause-me", status="pausing", message="Pausing…")
+    write_status("cancel-me", status="cancelled", message="Removed from queue")
+    write_status("wait-me", status="queued", message="Queued")
+    jobs._reconcile_orphaned_jobs()
+    assert read_status("pause-me")["status"] == "paused"
+    assert read_status("cancel-me") is None
+    assert not (jobs_dir / "isolate_jobs" / "cancel-me").exists()
+    assert read_status("wait-me")["status"] == "queued"
+    assert jobs.queued_job_ids() == ["wait-me"]
+
+
+def test_worker_start_reconciles_stale_running(jobs_dir: Path, monkeypatch):
+    import ui.isolate_jobs as jobs
+
+    monkeypatch.setenv("ISOLATE_JOBS_WORKER", "1")
+    monkeypatch.setattr(jobs, "_WORKER_STARTED", False)
+    monkeypatch.setattr(jobs, "_WORKER_THREAD", None)
+    monkeypatch.setattr(jobs, "_ACTIVE_JOB_ID", None)
+    monkeypatch.setattr(jobs, "_ACTIVE_PROCESS", None)
+    write_status("orphan-run", status="running", stage="separate", message="Working")
+    ensure_worker_started()
+    deadline = time.time() + 5
+    status = None
+    while time.time() < deadline:
+        status = read_status("orphan-run")
+        if status and status.get("status") == "failed":
+            break
+        time.sleep(0.05)
+    assert status is not None
+    assert status["status"] == "failed"
+    assert separation_in_progress() is False
+
+
+def test_worker_busy_false_when_process_dead(jobs_dir: Path, monkeypatch):
+    import ui.isolate_jobs as jobs
+
+    proc = MagicMock()
+    proc.is_alive.return_value = False
+    monkeypatch.setattr(jobs, "_ACTIVE_PROCESS", proc)
+    monkeypatch.setattr(jobs, "_ACTIVE_JOB_ID", "ghost")
+    write_status("ghost", status="cancelled", message="Removed from queue")
+    assert jobs.worker_busy() is False
+    assert jobs._ACTIVE_JOB_ID is None
+    assert jobs._ACTIVE_PROCESS is None
+    assert jobs.active_job_id() is None
+    assert not (jobs.active_job_id() and jobs.worker_busy())

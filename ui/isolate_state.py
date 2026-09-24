@@ -2054,6 +2054,7 @@ PERSISTED_SETTING_KEYS: tuple[str, ...] = (
     "isolate_metro_accent",
     "isolate_metro_rate",
     "isolate_metro_sound",
+    "isolate_metro_follow",
     *(f"isolate_track_{oid}" for oid in DEMUCS_STEM_CHECKBOX_IDS),
 )
 
@@ -3158,6 +3159,7 @@ MIXER_COMPONENT_KEY_PREFIX = "stem_mixer_run_"
 ISOLATE_METRO_ACCENT_KEY = "isolate_metro_accent"
 ISOLATE_METRO_RATE_KEY = "isolate_metro_rate"
 ISOLATE_METRO_SOUND_KEY = "isolate_metro_sound"
+ISOLATE_METRO_FOLLOW_KEY = "isolate_metro_follow"
 ISOLATE_METRO_APPLIED_KEY = "isolate_metro_applied"
 _METRO_WIDGET_RUN_KEY = "_metro_widget_run"
 
@@ -3178,6 +3180,7 @@ def metronome_render_from_session(session: Mapping[str, Any]) -> MetronomeRender
         accent=session.get(ISOLATE_METRO_ACCENT_KEY, True),
         rate=session.get(ISOLATE_METRO_RATE_KEY, 1.0),
         sound=session.get(ISOLATE_METRO_SOUND_KEY, "classic"),
+        follow=session.get(ISOLATE_METRO_FOLLOW_KEY, "smart"),
     )
 
 
@@ -3187,6 +3190,7 @@ def metronome_applied_stamp(run_dir: Path | str, options: MetronomeRenderOptions
         "accent": bool(options.accent),
         "rate": float(options.rate),
         "sound": str(options.sound),
+        "follow": str(options.follow),
     }
 
 
@@ -3209,14 +3213,17 @@ def seed_metronome_widgets_for_run(
             accent=render.get("accent", True),
             rate=render.get("rate", 1.0),
             sound=render.get("sound", "classic"),
+            follow=render.get("follow", "smart"),
         )
         session[ISOLATE_METRO_ACCENT_KEY] = options.accent
         session[ISOLATE_METRO_RATE_KEY] = options.rate
         session[ISOLATE_METRO_SOUND_KEY] = options.sound
+        session[ISOLATE_METRO_FOLLOW_KEY] = options.follow
         session[ISOLATE_METRO_APPLIED_KEY] = metronome_applied_stamp(token, options)
         return
     session.setdefault(ISOLATE_METRO_ACCENT_KEY, True)
     session.setdefault(ISOLATE_METRO_RATE_KEY, 1.0)
     session.setdefault(ISOLATE_METRO_SOUND_KEY, "classic")
+    session.setdefault(ISOLATE_METRO_FOLLOW_KEY, "smart")
     # Unknown baked options: let the Mixer rebake to the current prefs.
     session.pop(ISOLATE_METRO_APPLIED_KEY, None)

@@ -133,7 +133,12 @@ def jobs_root() -> Path:
 
 
 def _job_dir(job_id: str) -> Path:
-    path = jobs_root() / job_id
+    """Path to a job folder. Does not create it — reads must not resurrect deletes."""
+    return jobs_root() / job_id
+
+
+def _ensure_job_dir(job_id: str) -> Path:
+    path = _job_dir(job_id)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -244,9 +249,22 @@ def format_job_error(error: str | None) -> str:
     return cleaned or "Separation failed"
 
 
-def write_status(job_id: str, **updates: Any) -> dict[str, Any]:
+def write_status(job_id: str, **updates: Any) -> dict[str, Any] | None:
+    """Update ``status.json``. A missing job folder is left missing.
+
+    Partial updates must not recreate a deleted job as ``queued`` via
+    ``_default_status``. An explicit ``status`` may create the file only when
+    the folder already exists (enqueue creates the folder first).
+    """
+    job_dir = _job_dir(job_id)
+    if not job_dir.is_dir():
+        return None
     path = _status_path(job_id)
-    current = _read_json(path) or _default_status(job_id)
+    current = _read_json(path)
+    if current is None:
+        if "status" not in updates:
+            return None
+        current = _default_status(job_id)
     current.update(updates)
     current["id"] = job_id
     current["updated_at"] = time.time()
@@ -292,6 +310,7 @@ def enqueue_job(spec: IsolateJobSpec) -> str:
         spec.id = uuid.uuid4().hex
     if not spec.created_at:
         spec.created_at = time.time()
+    _ensure_job_dir(spec.id)
     _write_json(_spec_path(spec.id), spec.to_dict())
     write_status(
         spec.id,
@@ -320,7 +339,10 @@ def _checkpoint_dir(job_id: str) -> Path:
 
 
 def _request_abort(job_id: str) -> None:
-    _abort_flag_path(job_id).write_text("1", encoding="utf-8")
+    path = _abort_flag_path(job_id)
+    if not path.parent.is_dir():
+        return
+    path.write_text("1", encoding="utf-8")
 
 
 def _clear_abort_flag(job_id: str) -> None:
@@ -382,10 +404,36 @@ def _artifacts_from_completed_run(output_dir: Path) -> dict[str, str] | None:
     return wavs or None
 
 
+_WORKER_EXITED_BEFORE_START = "Worker exited before the job started"
+_SETUP_FAIL_LEAVE = frozenset({"cancelled", "pausing", "failed", "succeeded", "paused"})
+_ORPHAN_IN_FLIGHT = frozenset({"running", "pausing", "cancelled"})
+
+
+def _fail_unstarted_job(job_id: str) -> None:
+    """Mark a job failed when its worker child died before leaving ``queued``."""
+    write_status(
+        job_id,
+        status="failed",
+        stage="error",
+        message=_WORKER_EXITED_BEFORE_START,
+        error=_WORKER_EXITED_BEFORE_START,
+        finished_at=time.time(),
+    )
+
+
 def _finalize_job_after_process(job_id: str) -> None:
-    """Apply pause/cancel cleanup after the child process exits."""
+    """Apply pause/cancel cleanup after the child process exits.
+
+    A child that exits while status is still ``queued`` (or the status file is
+    gone but the folder remains) must become ``failed``. Leaving ``queued``
+    makes the worker retry the same id forever and the UI stays on Waiting.
+    A deleted folder is left deleted — do not recreate it.
+    """
+    if not _job_dir(job_id).is_dir():
+        return
     status = read_status(job_id)
-    if not status:
+    if not status or status.get("status") == "queued":
+        _fail_unstarted_job(job_id)
         return
     st = status.get("status")
     if st == "pausing":
@@ -637,19 +685,33 @@ def merge_library_runs(
     return rows
 
 
+def _release_dead_process_locked() -> multiprocessing.Process | None:
+    """Return the live child, or drop a finished one so it cannot latch the UI.
+
+    Caller must hold ``_QUEUE_LOCK``. A missing process is not cleared: the
+    worker may have claimed ``_ACTIVE_JOB_ID`` and not stored the process yet.
+    """
+    global _ACTIVE_JOB_ID, _ACTIVE_PROCESS
+    proc = _ACTIVE_PROCESS
+    if proc is not None and proc.is_alive():
+        return proc
+    if proc is not None:
+        _ACTIVE_PROCESS = None
+        _ACTIVE_JOB_ID = None
+    return None
+
+
 def active_job_id() -> str | None:
     """Job id the worker is starting, running, or stopping (process still alive)."""
     with _QUEUE_LOCK:
+        _release_dead_process_locked()
         return _ACTIVE_JOB_ID
 
 
 def worker_busy() -> bool:
-    """True while a child process is still running or being torn down."""
+    """True only while the isolate child process is alive."""
     with _QUEUE_LOCK:
-        proc = _ACTIVE_PROCESS
-        if proc is not None and proc.is_alive():
-            return True
-        return _ACTIVE_JOB_ID is not None
+        return _release_dead_process_locked() is not None
 
 
 def jobs_active() -> bool:
@@ -702,6 +764,25 @@ def _job_process_entry(job_id: str) -> None:
 
 
 def _run_one_job(job_id: str) -> None:
+    """Run one job. Setup errors become ``failed`` instead of a dead ``queued`` row."""
+    try:
+        _run_one_job_inner(job_id)
+    except Exception as exc:
+        latest = read_status(job_id)
+        if latest and latest.get("status") in _SETUP_FAIL_LEAVE:
+            return
+        detail = str(exc).strip() or exc.__class__.__name__
+        write_status(
+            job_id,
+            status="failed",
+            stage="error",
+            message="Separation failed",
+            error=detail,
+            finished_at=time.time(),
+        )
+
+
+def _run_one_job_inner(job_id: str) -> None:
     from audio_to_tab.isolate import IsolateConfig, JobAborted, separate_stems
     from audio_to_tab.hardware import (
         get_desktop_probe,
@@ -949,27 +1030,59 @@ def _run_one_job(job_id: str) -> None:
 def _execute_job(job_id: str) -> None:
     global _ACTIVE_JOB_ID, _ACTIVE_PROCESS
     if _use_inline_worker():
-        _run_one_job(job_id)
-        _finalize_job_after_process(job_id)
+        try:
+            _run_one_job(job_id)
+        finally:
+            _finalize_job_after_process(job_id)
         return
-    proc = multiprocessing.Process(
-        target=_job_process_entry,
-        args=(job_id,),
-        name=f"isolate-{job_id[:8]}",
-    )
-    proc.start()
+    proc: multiprocessing.Process | None = None
+    try:
+        proc = multiprocessing.Process(
+            target=_job_process_entry,
+            args=(job_id,),
+            name=f"isolate-{job_id[:8]}",
+        )
+        proc.start()
+        with _QUEUE_LOCK:
+            _ACTIVE_PROCESS = proc
+            _ACTIVE_JOB_ID = job_id
+        proc.join()
+    finally:
+        with _QUEUE_LOCK:
+            if proc is not None and _ACTIVE_PROCESS is proc:
+                _ACTIVE_PROCESS = None
+        # Child exit (or start failure) must not leave status=queued.
+        _finalize_job_after_process(job_id)
+
+
+def _reconcile_orphaned_jobs() -> None:
+    """Finalize in-flight jobs left on disk when no child is alive.
+
+    Queued jobs are real work and are left for the worker. ``running`` /
+    ``pausing`` / ``cancelled`` with no live process cannot make progress:
+    finish, pause, or delete them so the strip is not stuck waiting.
+    """
     with _QUEUE_LOCK:
-        _ACTIVE_PROCESS = proc
-        _ACTIVE_JOB_ID = job_id
-    proc.join()
-    with _QUEUE_LOCK:
-        if _ACTIVE_PROCESS is proc:
-            _ACTIVE_PROCESS = None
-    _finalize_job_after_process(job_id)
+        proc = _ACTIVE_PROCESS
+        if proc is not None and proc.is_alive():
+            return
+    root = jobs_root()
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return
+    for child in children:
+        if not child.is_dir():
+            continue
+        status = _read_json(child / "status.json")
+        if not status or status.get("status") not in _ORPHAN_IN_FLIGHT:
+            continue
+        _finalize_job_after_process(str(status.get("id") or child.name))
 
 
 def _worker_loop() -> None:
     global _ACTIVE_JOB_ID, _ACTIVE_PROCESS
+    _reconcile_orphaned_jobs()
     while True:
         try:
             with _QUEUE_LOCK:

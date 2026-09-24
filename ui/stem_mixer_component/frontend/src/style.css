@@ -321,7 +321,8 @@ body {
   background: rgba(0, 0, 0, 0.28);
 }
 
-.mixer .metro-rate-seg .metro-rate-btn {
+.mixer .metro-rate-seg .metro-rate-btn,
+.mixer .metro-rate-seg .metro-follow-btn {
   min-width: 0;
   min-height: 1.55rem;
   height: 1.55rem;
@@ -337,7 +338,8 @@ body {
   opacity: 0.78;
 }
 
-.mixer .metro-rate-seg .metro-rate-btn.active {
+.mixer .metro-rate-seg .metro-rate-btn.active,
+.mixer .metro-rate-seg .metro-follow-btn.active {
   background: #f4f4f4;
   color: #161616;
   opacity: 1;

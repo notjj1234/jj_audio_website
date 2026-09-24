@@ -140,5 +140,9 @@ def test_mixer_live_metronome_hot_swap_without_full_reload():
     ).read_text(encoding="utf-8")
     assert "export function applyClickRate" in clicks
     assert "export function buildMetronomeAudioBuffer" in clicks
-    assert 'hi_tick' in clicks
+    assert "hi_tick" in clicks
+    assert "data-follow=\"smart\"" in text
+    assert "data-follow=\"steady\"" in text
+    assert "steadyTimes1x" in clicks
+    assert 'follow === "steady"' in clicks
 

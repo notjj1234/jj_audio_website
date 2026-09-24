@@ -160,6 +160,7 @@ from ui.isolate_state import (
     mixer_component_key,
     ISOLATE_METRO_ACCENT_KEY,
     ISOLATE_METRO_APPLIED_KEY,
+    ISOLATE_METRO_FOLLOW_KEY,
     ISOLATE_METRO_RATE_KEY,
     ISOLATE_METRO_SOUND_KEY,
     metronome_applied_stamp,
@@ -255,6 +256,7 @@ from audio_to_tab.metronome import (  # noqa: E402
     coerce_metronome_render_options,
     load_metronome_diagnostics,
     rebake_metronome_artifact,
+    steady_click_times,
 )
 from audio_to_tab.mixer import (  # noqa: E402
     DB_DEFAULT,
@@ -940,18 +942,26 @@ def _metronome_payload_for_mixer(run_dir: Path | None) -> dict | None:
         times_f = [float(t) for t in times]
     except (TypeError, ValueError):
         return None
-    ref = diag.get("first_detected_sec", times_f[0] if times_f else 0.0)
-    duration = diag.get("duration_sec", 0.0)
+    ref = diag.get("body_start_sec", diag.get("first_detected_sec", times_f[0] if times_f else 0.0))
+    duration = float(diag.get("duration_sec") or 0.0)
     measure = diag.get("beats_per_measure", 4)
+    bpm = float(diag.get("bpm") or 0.0)
+    steady = steady_click_times(
+        duration_sec=duration,
+        bpm=bpm,
+        body_start_sec=float(ref or 0.0),
+    )
     return {
         "times1x": times_f,
+        "steadyTimes1x": [float(t) for t in steady],
         "refSec": float(ref or 0.0),
         "beatsPerMeasure": max(1, int(measure or 4)),
-        "durationSec": float(duration or 0.0),
+        "durationSec": duration,
         "options": {
             "accent": bool(options.accent),
             "rate": float(options.rate),
             "sound": str(options.sound),
+            "follow": str(options.follow),
         },
     }
 
@@ -972,10 +982,12 @@ def _sync_metronome_options_from_mixer(
         accent=raw.get("accent", True),
         rate=raw.get("rate", 1.0),
         sound=raw.get("sound", "classic"),
+        follow=raw.get("follow", "smart"),
     )
     st.session_state[ISOLATE_METRO_ACCENT_KEY] = options.accent
     st.session_state[ISOLATE_METRO_RATE_KEY] = options.rate
     st.session_state[ISOLATE_METRO_SOUND_KEY] = options.sound
+    st.session_state[ISOLATE_METRO_FOLLOW_KEY] = options.follow
     stamp = metronome_applied_stamp(run_dir, options)
     if st.session_state.get(ISOLATE_METRO_APPLIED_KEY) == stamp:
         return

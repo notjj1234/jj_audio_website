@@ -2,14 +2,18 @@
 
 export type MetronomeSoundId = "classic" | "soft" | "wood" | "hi_tick";
 
+export type MetronomeFollow = "smart" | "steady";
+
 export type MetronomeOptions = {
   accent: boolean;
   rate: number;
   sound: MetronomeSoundId;
+  follow: MetronomeFollow;
 };
 
 export type MetronomeConfig = {
   times1x: number[];
+  steadyTimes1x: number[];
   refSec: number;
   beatsPerMeasure: number;
   durationSec: number;
@@ -58,12 +62,27 @@ export function coerceMetronomeSound(value: unknown): MetronomeSoundId {
   return "classic";
 }
 
+export function coerceMetronomeFollow(value: unknown): MetronomeFollow {
+  return String(value ?? "").trim().toLowerCase() === "steady" ? "steady" : "smart";
+}
+
 export function coerceMetronomeOptions(raw: Partial<MetronomeOptions> | null | undefined): MetronomeOptions {
   return {
     accent: raw?.accent !== false,
     rate: coerceMetronomeRate(raw?.rate ?? 1),
     sound: coerceMetronomeSound(raw?.sound ?? "classic"),
+    follow: coerceMetronomeFollow(raw?.follow),
   };
+}
+
+/** Smart times, or the constant-BPM grid when Steady is selected. */
+export function metronomeClickTimes(config: MetronomeConfig, follow: MetronomeFollow): number[] {
+  const smart = (config.times1x || []).filter((t) => Number.isFinite(t));
+  if (follow === "steady" && config.steadyTimes1x && config.steadyTimes1x.length > 0) {
+    const steady = config.steadyTimes1x.filter((t) => Number.isFinite(t));
+    if (steady.length > 0) return steady;
+  }
+  return smart;
 }
 
 export function applyClickRate(
@@ -175,7 +194,7 @@ export function buildMetronomeAudioBuffer(
   const n = Math.max(1, Math.round(duration * sr));
   const opts = coerceMetronomeOptions(options);
   const preset = SOUND_PRESETS[opts.sound] ?? SOUND_PRESETS.classic;
-  const times1x = (config.times1x || []).filter((t) => Number.isFinite(t));
+  const times1x = metronomeClickTimes(config, opts.follow);
   const audible = applyClickRate(times1x, opts.rate, config.refSec);
   const beatWave = synthClickWave(sr, preset.beatHz, preset.duration, preset.decay);
   const downWave = synthClickWave(sr, preset.downHz, preset.duration, preset.decay);

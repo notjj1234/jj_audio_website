@@ -563,6 +563,7 @@ def test_persisted_settings_include_lite_run_on():
     assert "isolate_metro_accent" in PERSISTED_SETTING_KEYS
     assert "isolate_metro_rate" in PERSISTED_SETTING_KEYS
     assert "isolate_metro_sound" in PERSISTED_SETTING_KEYS
+    assert "isolate_metro_follow" in PERSISTED_SETTING_KEYS
 
 
 def _lite_engine_kwargs(**overrides):
