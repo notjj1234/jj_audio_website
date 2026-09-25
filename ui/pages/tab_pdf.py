@@ -118,10 +118,14 @@ def main() -> None:
             value=can_separate,
             disabled=not can_separate,
             help=(
-                "Turn off for solo guitar uploads (much faster). "
-                "Install Demucs to enable: make install-demucs"
-                if not can_separate
-                else "Turn off only for solo guitar uploads (much faster)."
+                (
+                    "Turn off for solo guitar uploads (much faster). "
+                    "Install Demucs to enable: make install-demucs"
+                    if not can_separate
+                    else "Turn off only for solo guitar uploads (much faster)."
+                )
+                if pro
+                else None
             ),
         )
         tab_model = "htdemucs_6s"
@@ -238,8 +242,6 @@ def main() -> None:
                     prefer_roformer=lite_accelerator_available(probe),
                 )
                 tab_model, tab_guitar_refine = _tab_model_from_guitar_engine(engine)
-                engine_label = TRACK_OPTIONS.get(engine, {}).get("label") or engine
-                st.caption(f"Guitar engine: {engine_label}")
         if pro:
             with st.expander("Advanced transcription settings"):
                 mix_aware = st.checkbox(
@@ -290,7 +292,8 @@ def main() -> None:
                 "Upload a file above to use something else instead."
             )
         youtube_url = st.text_input("Or paste a YouTube URL")
-        st.caption(YOUTUBE_DISCLAIMER)
+        if pro:
+            st.caption(YOUTUBE_DISCLAIMER)
         # st.caption(
         #     "Off until you paste a URL or search. Enable only if you have rights."
         # )

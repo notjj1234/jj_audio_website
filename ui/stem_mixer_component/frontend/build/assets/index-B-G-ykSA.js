@@ -91,8 +91,8 @@ object-assign
     <div class="metro-toolbar" role="group" aria-label="Click track options">
       <div class="metro-rate-seg" role="group" aria-label="Click rate">${n}</div>
       <div class="metro-rate-seg" role="group" aria-label="Metronome mode">
-        <button type="button" class="metro-follow-btn${Z.follow==="smart"?" active":""}" data-follow="smart" aria-pressed="${Z.follow==="smart"?"true":"false"}">Smart</button>
-        <button type="button" class="metro-follow-btn${Z.follow==="steady"?" active":""}" data-follow="steady" aria-pressed="${Z.follow==="steady"?"true":"false"}">Steady</button>
+        <button type="button" class="metro-follow-btn${Z.follow==="smart"?" active":""}" data-follow="smart" aria-pressed="${Z.follow==="smart"?"true":"false"}" title="Follows the song's tempo changes">Smart</button>
+        <button type="button" class="metro-follow-btn${Z.follow==="steady"?" active":""}" data-follow="steady" aria-pressed="${Z.follow==="steady"?"true":"false"}" title="Even clicks at one tempo">Steady</button>
       </div>
       <button type="button" class="metro-chip${Z.accent?" active":""}" id="metro-accent"
         aria-pressed="${Z.accent?"true":"false"}">Accent</button>

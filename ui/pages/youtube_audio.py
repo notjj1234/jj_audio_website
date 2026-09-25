@@ -9,11 +9,13 @@ import streamlit as st
 from ui.common import delete_run, ensure_src_path, run_output_dir
 from ui.desktop_export import (
     EXPORT_FORMAT_LABELS,
+    EXPORT_FORMAT_PLAIN_LABELS,
     EXPORT_FORMATS,
     choose_export_dir,
     export_mix_to_folder,
     open_path_in_os,
 )
+from ui.isolate_state import is_pro_mode
 
 ensure_src_path()
 
@@ -295,17 +297,20 @@ def _run_save_flow(url: str, fmt: str, *, already_staged: Path | None) -> None:
 
 
 def main() -> None:
+    pro = is_pro_mode(st.session_state)
+    title_help = (
+        "Download audio from a public YouTube link and save it to a folder "
+        "(MP3 by default; WAV/FLAC/etc. also available). "
+        "This page does not separate stems — use Audio Isolation for that. "
+        "If the folder window is hidden, Alt+Tab. Saving overwrites a same-named file."
+    ) if pro else None
     st.title(
         "YouTube to MP3",
         anchor=False,
-        help=(
-            "Download audio from a public YouTube link and save it to a folder "
-            "(MP3 by default; WAV/FLAC/etc. also available). "
-            "This page does not separate stems — use Audio Isolation for that. "
-            "If the folder window is hidden, Alt+Tab. Saving overwrites a same-named file."
-        ),
+        help=title_help,
     )
-    st.caption(YOUTUBE_DISCLAIMER)
+    if pro:
+        st.caption(YOUTUBE_DISCLAIMER)
 
     _apply_pending_url()
     if YT_AUDIO_FMT_KEY not in st.session_state:
@@ -323,7 +328,7 @@ def main() -> None:
             "Search songs",
             key="yt_audio_search_open_btn",
             width="stretch",
-            help="Open a search panel to find a public video by song or artist.",
+            help="Open a search panel to find a public video by song or artist." if pro else None,
         ):
             st.session_state[YT_AUDIO_SEARCH_OPEN_KEY] = True
             st.rerun()
@@ -340,12 +345,18 @@ def main() -> None:
         _discard_staging()
     staged = _staged_wav_for(url) if url_ok else None
 
+    labels = EXPORT_FORMAT_LABELS if pro else EXPORT_FORMAT_PLAIN_LABELS
+    fmt_help = (
+        "WAV is the downloaded original. Other formats are converted with ffmpeg."
+        if pro
+        else None
+    )
     st.selectbox(
         "Audio format",
         options=list(EXPORT_FORMATS),
-        format_func=lambda f: EXPORT_FORMAT_LABELS.get(f, f),
+        format_func=lambda f: labels.get(f, f),
         key=YT_AUDIO_FMT_KEY,
-        help="WAV is the downloaded original. Other formats are converted with ffmpeg.",
+        help=fmt_help,
     )
     fmt = str(st.session_state.get(YT_AUDIO_FMT_KEY) or _DEFAULT_FMT)
     if fmt not in EXPORT_FORMATS:
@@ -356,7 +367,7 @@ def main() -> None:
         "Save audio to folder",
         type="primary",
         disabled=not url_ok or busy,
-        help="Download if needed, then choose a folder in Explorer or Finder.",
+        help="Download if needed, then choose a folder in Explorer or Finder." if pro else None,
     )
     if save_clicked:
         if not url:
@@ -371,12 +382,12 @@ def main() -> None:
         if st.button(
             "Choose folder",
             key="yt_audio_choose_folder",
-            help="Audio is already downloaded. Pick a folder to save it.",
+            help="Audio is already downloaded. Pick a folder to save it." if pro else None,
         ):
             _run_save_flow(url, fmt, already_staged=staged)
             st.rerun()
 
-    if note := st.session_state.get(YT_AUDIO_PICKER_NOTE_KEY):
+    if pro and (note := st.session_state.get(YT_AUDIO_PICKER_NOTE_KEY)):
         st.caption(str(note))
     if err := st.session_state.get(YT_AUDIO_ERROR_KEY):
         st.error(str(err))

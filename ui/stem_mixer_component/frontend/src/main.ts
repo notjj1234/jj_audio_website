@@ -1166,8 +1166,8 @@ function metronomeToolbarHtml(): string {
     <div class="metro-toolbar" role="group" aria-label="Click track options">
       <div class="metro-rate-seg" role="group" aria-label="Click rate">${rateBtns}</div>
       <div class="metro-rate-seg" role="group" aria-label="Metronome mode">
-        <button type="button" class="metro-follow-btn${metroOptions.follow === "smart" ? " active" : ""}" data-follow="smart" aria-pressed="${metroOptions.follow === "smart" ? "true" : "false"}">Smart</button>
-        <button type="button" class="metro-follow-btn${metroOptions.follow === "steady" ? " active" : ""}" data-follow="steady" aria-pressed="${metroOptions.follow === "steady" ? "true" : "false"}">Steady</button>
+        <button type="button" class="metro-follow-btn${metroOptions.follow === "smart" ? " active" : ""}" data-follow="smart" aria-pressed="${metroOptions.follow === "smart" ? "true" : "false"}" title="Follows the song's tempo changes">Smart</button>
+        <button type="button" class="metro-follow-btn${metroOptions.follow === "steady" ? " active" : ""}" data-follow="steady" aria-pressed="${metroOptions.follow === "steady" ? "true" : "false"}" title="Even clicks at one tempo">Steady</button>
       </div>
       <button type="button" class="metro-chip${metroOptions.accent ? " active" : ""}" id="metro-accent"
         aria-pressed="${metroOptions.accent ? "true" : "false"}">Accent</button>

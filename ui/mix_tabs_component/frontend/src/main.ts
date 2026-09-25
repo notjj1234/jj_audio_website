@@ -74,6 +74,65 @@ function nextSeq(): number {
   return seq;
 }
 
+/** Wheel over the strip scrolls tabs sideways and leaves the page still. */
+function bindTabStripWheel(bar: HTMLElement): void {
+  bar.addEventListener(
+    "wheel",
+    (ev: WheelEvent) => {
+      const maxScroll = bar.scrollWidth - bar.clientWidth;
+      if (maxScroll <= 1) return;
+      const delta =
+        Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;
+      if (delta === 0) return;
+      ev.preventDefault();
+      bar.scrollLeft += delta;
+    },
+    { passive: false },
+  );
+}
+
+/** Edge fades tell the user more tabs are off screen on that side. */
+function updateOverflowFades(wrap: HTMLElement, bar: HTMLElement): void {
+  const max = bar.scrollWidth - bar.clientWidth;
+  wrap.classList.toggle("fade-left", max > 1 && bar.scrollLeft > 1);
+  wrap.classList.toggle("fade-right", max > 1 && bar.scrollLeft < max - 1);
+}
+
+function tabStops(bar: HTMLElement): HTMLElement[] {
+  return Array.from(bar.querySelectorAll<HTMLElement>('[role="tab"]'));
+}
+
+/** Tabs pattern: Left/Right/Home/End move focus, Enter/Space open, Delete closes. */
+function bindTabStripKeys(bar: HTMLElement): void {
+  bar.addEventListener("keydown", (ev: KeyboardEvent) => {
+    const stops = tabStops(bar);
+    const current = (ev.target as HTMLElement).closest<HTMLElement>('[role="tab"]');
+    const idx = current ? stops.indexOf(current) : -1;
+    if (idx < 0) return;
+    let next = -1;
+    if (ev.key === "ArrowRight") next = (idx + 1) % stops.length;
+    else if (ev.key === "ArrowLeft") next = (idx - 1 + stops.length) % stops.length;
+    else if (ev.key === "Home") next = 0;
+    else if (ev.key === "End") next = stops.length - 1;
+    else if (ev.key === "Enter" || ev.key === " ") {
+      ev.preventDefault();
+      current!.click();
+      return;
+    } else if (ev.key === "Delete") {
+      const id = current!.dataset.id;
+      if (id) {
+        ev.preventDefault();
+        report("close", id);
+      }
+      return;
+    } else return;
+    ev.preventDefault();
+    stops.forEach((el, i) => el.setAttribute("tabindex", i === next ? "0" : "-1"));
+    stops[next].focus();
+    stops[next].scrollIntoView({ block: "nearest", inline: "nearest" });
+  });
+}
+
 function report(action: string, id?: string): void {
   const payload: { action: string; id?: string; seq: number } = {
     action,
@@ -101,24 +160,30 @@ function renderUI(args: Args): void {
       const busyClass = busy ? " busy" : "";
       const ariaBusy = busy ? ` aria-busy="true"` : "";
       return `
-        <div class="mix-tab${active ? " active" : ""}${busyClass}" data-id="${escapeHtml(id)}" role="tab" aria-selected="${active}"${ariaBusy}>
+        <div class="mix-tab${active ? " active" : ""}${busyClass}" data-id="${escapeHtml(id)}" data-focus-key="tab:${escapeHtml(id)}" role="tab" tabindex="${active ? 0 : -1}" aria-selected="${active}"${ariaBusy}>
           ${docIcon()}
           <span class="title" title="${title}">${title}</span>
-          <button type="button" class="close" data-close="${escapeHtml(id)}" aria-label="Close tab" title="Close tab">×</button>
+          <button type="button" class="close" data-close="${escapeHtml(id)}" tabindex="-1" aria-label="Close ${title}" title="Close tab (Delete)">×</button>
           ${progressMarkup(busy, progress)}
         </div>`;
     })
     .join("");
 
+  const focusedKey = (document.activeElement as HTMLElement | null)?.dataset?.focusKey;
+  const prevBar = root.querySelector<HTMLElement>(".mix-tab-bar");
+  const prevScroll = prevBar ? prevBar.scrollLeft : 0;
+
   root.innerHTML = `
-    <div class="mix-tab-bar" role="tablist">
-      <button type="button" class="home-btn${homeActive ? " active" : ""}" data-action="home">
-        ${homeIcon()}
-        <span>${escapeHtml(homeLabel)}</span>
-      </button>
-      ${tabHtml}
-      ${showPlus ? `<button type="button" class="plus-btn" data-action="plus" title="New" aria-label="New">+</button>` : ""}
-      <span class="spacer"></span>
+    <div class="mix-tab-wrap">
+      <div class="mix-tab-bar" role="tablist" aria-label="Open mixes">
+        <button type="button" class="home-btn${homeActive ? " active" : ""}" data-action="home" data-focus-key="home" role="tab" tabindex="${homeActive ? 0 : -1}" aria-selected="${homeActive}">
+          ${homeIcon()}
+          <span>${escapeHtml(homeLabel)}</span>
+        </button>
+        ${tabHtml}
+        ${showPlus ? `<button type="button" class="plus-btn" data-action="plus" title="New tab" aria-label="New tab">+</button>` : ""}
+        <span class="spacer"></span>
+      </div>
     </div>
   `;
 
@@ -144,6 +209,25 @@ function renderUI(args: Args): void {
     });
   });
 
+  const wrap = root.querySelector<HTMLElement>(".mix-tab-wrap");
+  const bar = root.querySelector<HTMLElement>(".mix-tab-bar");
+  if (wrap && bar) {
+    bindTabStripWheel(bar);
+    bindTabStripKeys(bar);
+    const stops = tabStops(bar);
+    if (!stops.some((el) => el.getAttribute("tabindex") === "0") && stops[0]) {
+      stops[0].setAttribute("tabindex", "0");
+    }
+    bar.scrollLeft = prevScroll;
+    const selected = bar.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]');
+    selected?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    if (focusedKey) {
+      bar.querySelector<HTMLElement>(`[data-focus-key="${CSS.escape(focusedKey)}"]`)?.focus();
+    }
+    bar.addEventListener("scroll", () => updateOverflowFades(wrap, bar), { passive: true });
+    updateOverflowFades(wrap, bar);
+  }
+
   requestAnimationFrame(() => Streamlit.setFrameHeight());
 }
 
@@ -152,6 +236,12 @@ function onRender(event: Event): void {
   applyTheme(data.theme);
   renderUI((data.args || {}) as Args);
 }
+
+window.addEventListener("resize", () => {
+  const wrap = document.querySelector<HTMLElement>(".mix-tab-wrap");
+  const bar = document.querySelector<HTMLElement>(".mix-tab-bar");
+  if (wrap && bar) updateOverflowFades(wrap, bar);
+});
 
 Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
 Streamlit.setComponentReady();

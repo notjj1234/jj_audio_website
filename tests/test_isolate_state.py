@@ -2572,28 +2572,32 @@ def test_poll_and_queue_fragments_run_every_one_second():
 
 
 def test_home_queue_is_floating_panel_not_bottom_section():
-    """Queue is a header-toggled floating card on Home or mix, painted early."""
+    """Queue is a header-toggled floating card on Home or mix, painted in a fragment."""
     page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
     source = page.read_text(encoding="utf-8")
     main = source[source.find("def main") :]
+    fragment = source[
+        source.find("def _queue_header_fragment") : source.find(
+            "def _render_queue_float_panel"
+        )
+    ]
     assert 'st.subheader("Queue")' not in main
     assert 'st.divider()' not in main
-    assert 'key="isolate_queue_toggle"' in main
-    assert "ISOLATE_QUEUE_PANEL_OPEN_KEY" in main
+    assert 'key="isolate_queue_toggle"' in fragment
+    assert "ISOLATE_QUEUE_PANEL_OPEN_KEY" in fragment
     assert 'key="isolate_queue_float"' in source
-    assert "_render_queue_float_panel()" in main
+    assert "_render_queue_float_panel()" in fragment
+    assert "_queue_header_fragment()" in main
     assert "_queue_tab_fragment()" in source
     assert 'shell != "mix"' not in main
-    assert 'if st.session_state.get(ISOLATE_QUEUE_PANEL_OPEN_KEY):' in main
-    assert main.find("_render_queue_float_panel()") < main.find(
-        'if shell == "mix":'
-    )
-    assert main.find("_render_queue_float_panel()") < main.find(
-        "_render_mixer_workspace"
-    )
-    assert main.find("_render_queue_float_panel()") < main.find(
-        "_render_new_workspace"
-    )
+    assert "if st.session_state.get(ISOLATE_QUEUE_PANEL_OPEN_KEY):" in fragment
+    assert 'key="isolate_queue_toggle_slot"' in fragment
+    assert "[5.5, 1.15, 1]" in main
+    assert main.find("_render_moises_tab_strip") < main.find("_queue_header_fragment()")
+    assert main.find("_queue_header_fragment()") < main.find('key="isolate_refresh"')
+    assert main.find("_queue_header_fragment()") < main.find('if shell == "mix":')
+    assert main.find("_queue_header_fragment()") < main.find("_render_mixer_workspace")
+    assert main.find("_queue_header_fragment()") < main.find("_render_new_workspace")
     assert "open Queue for jobs" in source
     assert "See Queue" not in source
     assert "scroll to Queue" not in source
@@ -2603,6 +2607,12 @@ def test_home_queue_is_floating_panel_not_bottom_section():
     ).read_text(encoding="utf-8")
     assert "st-key-isolate_queue_float" in css
     assert "st-key-isolate_queue_toggle" in css
+    assert "st-key-isolate_queue_toggle_slot" in css
+    assert "right: 6.75rem" not in css
+    assert "overflow: visible !important" in css
+    assert "height: 2.5rem !important" in css
+    assert 'stVerticalBlock"]:has(.st-key-isolate_queue_float)' in css
+    assert "right: 1.15rem" in css
     assert "position: fixed !important" in css
     assert "420px" in css
     assert "55vh" in css
@@ -2625,7 +2635,7 @@ def test_home_queue_is_floating_panel_not_bottom_section():
         source.find("def _queue_tab_fragment") - 80 : source.find("def _mixer_and_downloads_fragment")
     ]
     assert "_render_job_queue_panel()" in fragment
-    assert "on_click=_toggle_queue_panel" in main
+    assert "on_click=_toggle_queue_panel" in source
     assert "isolate_queue_panel_open" in source
 
 
@@ -2696,8 +2706,9 @@ def test_mixer_workspace_lite_shares_fixup_and_tab_pdf_carry_over():
     assert "Fix the guitar track" not in mixer_ws
     assert "_render_guitar_fixup_panel(" in mixer_ws
     assert "Make a tab PDF from this" in mixer_ws
-    assert "if pro and source_audio_path" not in mixer_ws
+    assert "if pro and source_audio_path" in mixer_ws
     assert "_request_loading_overlay()" in mixer_ws
+    assert mixer_ws.find("if pro:") < mixer_ws.find("_render_guitar_fixup_panel(")
 
 
 def test_file_ready_banner_points_at_home_not_new():

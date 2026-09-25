@@ -24,6 +24,7 @@ from ui.common import (
 )
 from ui.desktop_export import (
     EXPORT_FORMAT_LABELS,
+    EXPORT_FORMAT_PLAIN_LABELS,
     EXPORT_FORMATS,
     choose_export_dir,
     default_export_dir,
@@ -304,6 +305,7 @@ ISOLATE_YOUTUBE_AUTO_DOWNLOAD_KEY = "isolate_youtube_auto_download"
 ISOLATE_YOUTUBE_DOWNLOADING_KEY = "_isolate_youtube_downloading"
 LITE_GUITAR_FELL_BACK_KEY = "_isolate_lite_guitar_fell_back"
 ISOLATE_QUEUE_PANEL_OPEN_KEY = "isolate_queue_panel_open"
+BUSY_TAB_CLOSE_KEY = "_isolate_busy_tab_close"
 
 
 def _close_youtube_search_dialog() -> None:
@@ -1434,11 +1436,11 @@ def _render_outcome_picker(
         st.warning(preset_error)
         resolved = resolve_track_selection(list(DEFAULT_TRACK_OPTIONS))
 
-    if resolved.get("caveat"):
+    pro = is_pro_mode(st.session_state)
+    if pro and resolved.get("caveat"):
         st.caption(resolved["caveat"])
 
     probe = get_desktop_probe()
-    pro = is_pro_mode(st.session_state)
     if pro:
         speed_id = st.radio(
             "Speed",
@@ -1951,9 +1953,10 @@ def _render_region_controls(audio_path: Path | None) -> tuple[float, float | Non
         st.caption("Length unknown. The full file will be processed.")
         return 0.0, None, None
 
-    st.caption(f"Length: **{format_time_sec(duration)}** ({duration:.1f} s)")
-
     pro = is_pro_mode(st.session_state)
+    if pro:
+        st.caption(f"Length: **{format_time_sec(duration)}** ({duration:.1f} s)")
+
     region_key = f"isolate_region_{st.session_state.get('isolate_pending_fp') or st.session_state.get('isolate_upload_fp', 'none')}"
     if region_key not in st.session_state:
         st.session_state[region_key] = (0.0, float(duration))
@@ -1998,18 +2001,12 @@ def _render_region_controls(audio_path: Path | None) -> tuple[float, float | Non
 
     length = end_sec - start_sec
     region_label = format_region_label(start_sec, length)
-    st.caption(f"**{region_label}** ({length:.0f} s)")
+    if pro:
+        st.caption(f"**{region_label}** ({length:.0f} s)")
 
     if length < MIN_REGION_SEC:
         st.error(f"Section must be at least {MIN_REGION_SEC:.0f} seconds.")
         return start_sec, None, region_label
-
-    if not pro and duration > LITE_MAX_DURATION_SEC and length > LITE_MAX_DURATION_SEC + 0.5:
-        st.warning(
-            f"This section is longer than {LITE_MAX_DURATION_SEC:.0f} s. "
-            "Lite on a low-RAM machine can run slowly or run out of memory. "
-            f"Use **Safer: first {LITE_MAX_DURATION_SEC:.0f} s** if needed."
-        )
 
     # Leave start/end at the file bounds → process the whole file (no trim).
     if start_sec <= 0.5 and end_sec >= duration - 0.5:
@@ -2141,7 +2138,6 @@ def _render_section_and_outcomes(
             help=SECTION_OPTIONAL_HELP,
         )
         start_sec, max_duration_sec, region_label = _render_region_controls(audio_path)
-        _render_section_preview(audio_path, start_sec, max_duration_sec, region_label)
     file_dur = (
         _cached_probe_duration_sec(audio_path)
         if audio_path and audio_path.exists()
@@ -2211,7 +2207,8 @@ def _render_separation_controls() -> dict:
             st.rerun()
     if st.session_state.get(ISOLATE_YOUTUBE_SEARCH_OPEN_KEY):
         _youtube_search_dialog()
-    st.caption(YOUTUBE_DISCLAIMER)
+    if is_pro_mode(st.session_state):
+        st.caption(YOUTUBE_DISCLAIMER)
     # st.caption(
     #     "Off until you paste a URL or search. Enable only if you have rights."
     # )
@@ -2265,7 +2262,7 @@ def _render_separation_controls() -> dict:
             st.info(
                 f"Downloading **{st.session_state[ISOLATE_YOUTUBE_DOWNLOADING_KEY]}**…"
             )
-        if already_ready:
+        if already_ready and is_pro_mode(st.session_state):
             pending = st.session_state.get("isolate_pending_audio_path")
             if pending and Path(pending).exists():
                 st.caption(f"Ready: **{Path(pending).stem}**")
@@ -2565,11 +2562,71 @@ def _queue_visible_count() -> int:
         return 0
 
 
+@st.fragment
+def _queue_header_fragment() -> None:
+    """Queue toggle + float panel. Fragment-scoped so mixer playback stays mounted."""
+    queue_open = bool(st.session_state.get(ISOLATE_QUEUE_PANEL_OPEN_KEY))
+    queue_n = _queue_visible_count()
+    queue_label = f"Queue ({queue_n})" if queue_n else "Queue"
+    with st.container(key="isolate_queue_toggle_slot"):
+        st.button(
+            queue_label,
+            key="isolate_queue_toggle",
+            type="primary" if queue_open else "secondary",
+            help="Jobs: open in mixer, delete, pause, or stop.",
+            width="stretch",
+            on_click=_toggle_queue_panel,
+        )
+    if st.session_state.get(ISOLATE_QUEUE_PANEL_OPEN_KEY):
+        _render_queue_float_panel()
+
+
 def _render_queue_float_panel() -> None:
     """Non-modal floating Queue card (Home or mix). Fixed overlay via CSS."""
     with st.container(key="isolate_queue_float", border=True):
         st.markdown("**Queue**")
         _queue_tab_fragment()
+
+
+def _arm_confirm(flag: str) -> None:
+    st.session_state[flag] = True
+
+
+def _disarm_confirm(flag: str) -> None:
+    st.session_state.pop(flag, None)
+
+
+def _confirm_button(
+    label: str,
+    *,
+    key: str,
+    confirm_label: str,
+    confirm_help: str,
+    help: str | None = None,
+    width: str = "content",
+) -> bool:
+    """Two-step button for deletes with no undo. True only on the confirm click."""
+    flag = f"{key}__confirm"
+    if st.session_state.get(flag):
+        confirmed = st.button(
+            confirm_label,
+            key=f"{key}__yes",
+            type="primary",
+            help=confirm_help,
+            width=width,
+            on_click=_disarm_confirm,
+            args=(flag,),
+        )
+        st.button(
+            "Cancel",
+            key=f"{key}__no",
+            width=width,
+            on_click=_disarm_confirm,
+            args=(flag,),
+        )
+        return confirmed
+    st.button(label, key=key, help=help, width=width, on_click=_arm_confirm, args=(flag,))
+    return False
 
 
 def _render_job_queue_panel() -> None:
@@ -2579,7 +2636,13 @@ def _render_job_queue_panel() -> None:
         st.caption("No jobs yet.")
         return
     if parts["succeeded"]:
-        if st.button("Delete all finished", key="isolate_delete_all_finished"):
+        n_done = len(parts["succeeded"])
+        if _confirm_button(
+            "Delete all finished",
+            key="isolate_delete_all_finished",
+            confirm_label=f"Delete {n_done} from disk",
+            confirm_help="Removes the separated tracks for every finished job. No undo.",
+        ):
             dirs = delete_all_finished_jobs(parts["succeeded"])
             _clear_mixer_if_run_deleted(dirs)
             _rerun_preserve_scroll()
@@ -2705,7 +2768,12 @@ def _render_queue_job_row(
                 else:
                     st.caption("Those files are no longer available.")
         with cols[2]:
-            if st.button("Delete", key=f"delete_finished_{job_id}"):
+            if _confirm_button(
+                "Delete",
+                key=f"delete_finished_{job_id}",
+                confirm_label="Delete from disk",
+                confirm_help="Removes this job's separated tracks. No undo.",
+            ):
                 result = delete_finished_job(read_status(job_id) or job)
                 _clear_mixer_if_run_deleted(result.get("run_dir"))
                 _rerun_preserve_scroll()
@@ -3034,23 +3102,30 @@ def _save_current_mix(ready: str, export_root: Path, base_name: str, fmt: str) -
 
 def _download_format_widget() -> str:
     """Format selector used by the Downloads panel. Returns an EXPORT_FORMATS key."""
+    pro = is_pro_mode(st.session_state)
+    labels = EXPORT_FORMAT_LABELS if pro else EXPORT_FORMAT_PLAIN_LABELS
+    help_text = (
+        "WAV is lossless; other formats are handled automatically."
+        if pro
+        else None
+    )
     if _st_at_least(1, 41, 0):
         fmt = st.segmented_control(
             "Export format",
             options=list(EXPORT_FORMATS),
-            format_func=lambda f: EXPORT_FORMAT_LABELS[f],
+            format_func=lambda f: labels[f],
             default="wav",
             key="isolate_download_format",
-            help="WAV is lossless; other formats are handled automatically.",
+            help=help_text,
         )
         return fmt or "wav"
     fmt = st.selectbox(
         "Export format",
         options=list(EXPORT_FORMATS),
-        format_func=lambda f: EXPORT_FORMAT_LABELS[f],
+        format_func=lambda f: labels[f],
         index=0,
         key="isolate_download_format",
-        help="WAV is lossless; other formats are converted with ffmpeg.",
+        help=help_text,
     )
     return fmt or "wav"
 
@@ -3093,10 +3168,11 @@ def _render_downloads_panel(
                 target = Path(str(last)) if last else export_root
                 if not open_path_in_os(target):
                     st.warning("Could not open that folder.")
-        st.caption(
-            "If the folder window is hidden, Alt+Tab. Saving overwrites a same-named "
-            "file. On Linux, a missing zenity picker is treated as cancel."
-        )
+        if is_pro_mode(st.session_state):
+            st.caption(
+                "If the folder window is hidden, Alt+Tab. Saving overwrites a same-named "
+                "file. On Linux, a missing zenity picker is treated as cancel."
+            )
 
         st.divider()
         fmt = _download_format_widget()
@@ -3616,9 +3692,11 @@ def _render_listening_switcher(browser_id: str | None, rows: list[dict] | None =
             on_change=_rename_listen_run,
         )
     with cols[1]:
-        delete_clicked = st.button(
+        delete_clicked = _confirm_button(
             "Delete this run",
             key="isolate_delete_listening",
+            confirm_label="Delete from disk",
+            confirm_help="Removes these separated tracks. No undo.",
             width="stretch",
         )
 
@@ -3760,39 +3838,79 @@ def _render_moises_tab_strip(browser_id: str | None) -> None:
             open_mix_shell(st.session_state)
             _rerun_scroll_top()
     elif action == "close" and tab_id:
-        draft_was_focused = is_new_draft_tab(tab_id) and str(
-            st.session_state.get(SHELL_TAB_KEY) or ""
-        ) == str(tab_id)
-        neighbor = close_open_mix_tab(st.session_state, tab_id)
-        if is_new_draft_tab(tab_id):
-            if draft_was_focused:
-                if neighbor and is_new_draft_tab(neighbor):
-                    focus_new_draft_tab(st.session_state, neighbor)
-                elif neighbor:
-                    _focus_mix_tab(rows, neighbor)
-                    open_mix_shell(st.session_state)
-                else:
-                    open_home_shell(st.session_state)
-            _persist_isolate_ui_state()
+        busy = overlays.get(tab_id) or {}
+        if busy.get("busy"):
+            st.session_state[BUSY_TAB_CLOSE_KEY] = {
+                "id": tab_id,
+                "title": str(busy.get("title") or "") or draft_tab_title(st.session_state, tab_id),
+            }
             _rerun_scroll_top()
             return
-        # Always detach loaded mixer pointers for the closed run. Otherwise the
-        # strip's ``if loaded: add_open_mix_tab(loaded)`` reopens the last tab.
-        if is_loaded_mix_tab(st.session_state, tab_id):
+        _close_mix_tab(rows, tab_id)
+
+
+def _render_busy_tab_close_prompt(browser_id: str | None) -> None:
+    """Ask before closing a tab whose separation is still running."""
+    pending = st.session_state.get(BUSY_TAB_CLOSE_KEY)
+    if not isinstance(pending, dict) or not pending.get("id"):
+        return
+    tab_id = str(pending["id"])
+    title = str(pending.get("title") or "this track")
+    with st.container(border=True, key="isolate_busy_tab_close"):
+        st.warning(
+            f"**{title}** is still separating. Closing the tab does not stop the job; "
+            "the tab comes back when it finishes."
+        )
+        cols = st.columns(2)
+        with cols[0]:
+            if st.button(
+                "Close tab, keep separating",
+                key="isolate_busy_close_yes",
+                type="primary",
+                width="stretch",
+            ):
+                st.session_state.pop(BUSY_TAB_CLOSE_KEY, None)
+                _close_mix_tab(_library_rows_available(browser_id), tab_id)
+        with cols[1]:
+            if st.button("Keep tab open", key="isolate_busy_close_no", width="stretch"):
+                st.session_state.pop(BUSY_TAB_CLOSE_KEY, None)
+                _rerun_scroll_top()
+
+
+def _close_mix_tab(rows: list[dict], tab_id: str) -> None:
+    draft_was_focused = is_new_draft_tab(tab_id) and str(
+        st.session_state.get(SHELL_TAB_KEY) or ""
+    ) == str(tab_id)
+    neighbor = close_open_mix_tab(st.session_state, tab_id)
+    if is_new_draft_tab(tab_id):
+        if draft_was_focused:
             if neighbor and is_new_draft_tab(neighbor):
                 focus_new_draft_tab(st.session_state, neighbor)
             elif neighbor:
                 _focus_mix_tab(rows, neighbor)
                 open_mix_shell(st.session_state)
             else:
-                _dismiss_last_mix_tab()
-        elif neighbor is None and not any(
-            not is_new_draft_tab(t)
-            for t in (st.session_state.get(OPEN_MIX_TABS_KEY) or [])
-        ):
-            _dismiss_last_mix_tab()
+                open_home_shell(st.session_state)
         _persist_isolate_ui_state()
         _rerun_scroll_top()
+        return
+    # Always detach loaded mixer pointers for the closed run. Otherwise the
+    # strip's ``if loaded: add_open_mix_tab(loaded)`` reopens the last tab.
+    if is_loaded_mix_tab(st.session_state, tab_id):
+        if neighbor and is_new_draft_tab(neighbor):
+            focus_new_draft_tab(st.session_state, neighbor)
+        elif neighbor:
+            _focus_mix_tab(rows, neighbor)
+            open_mix_shell(st.session_state)
+        else:
+            _dismiss_last_mix_tab()
+    elif neighbor is None and not any(
+        not is_new_draft_tab(t)
+        for t in (st.session_state.get(OPEN_MIX_TABS_KEY) or [])
+    ):
+        _dismiss_last_mix_tab()
+    _persist_isolate_ui_state()
+    _rerun_scroll_top()
 
 
 def _has_source_for_job(choice: dict) -> bool:
@@ -3989,13 +4107,14 @@ def _render_mixer_workspace(browser_id: str | None) -> None:
             st.caption("Pick a run above.")
         return
 
+    pro = is_pro_mode(st.session_state)
     pending_fp = pending_upload_fp_for_stale(st.session_state)
     show_file_ready_banner = should_hide_stale_results(
         pending_upload_fp=pending_fp,
         has_artifacts=True,
         results_source_fp=st.session_state.get("isolate_results_source_fp"),
     )
-    if not show_file_ready_banner:
+    if pro and not show_file_ready_banner:
         st.caption(
             "New file selected. Mixer still shows the chosen run until you separate again."
         )
@@ -4006,10 +4125,10 @@ def _render_mixer_workspace(browser_id: str | None) -> None:
         st.session_state.get("isolate_run_dir", next(iter(stem_paths.values())).parent)
     )
 
-    pro = is_pro_mode(st.session_state)
     bass_bleed = _load_bass_bleed_diagnostics(artifacts_map)
 
-    _render_mixer_region_caption(base_name)
+    if pro:
+        _render_mixer_region_caption(base_name)
 
     # Mixer first. Guitar fix-up and re-separate used to sit above it, so the
     # result people waited minutes for was below two panels of repair tooling.
@@ -4025,19 +4144,19 @@ def _render_mixer_workspace(browser_id: str | None) -> None:
         download_urls=mixer_download_urls,
     )
 
-    if bass_bleed.get("flagged"):
+    if pro and bass_bleed.get("flagged"):
         st.warning(
             "Guitar check: "
             f"{bass_bleed.get('reason', 'this track may contain extra bass bleed')} "
             "Use **Guitar fix-up** below to adjust without re-separating."
         )
 
-    _render_guitar_fixup_panel(stem_paths, run_dir, artifacts_map or {}, bass_bleed)
     if pro:
+        _render_guitar_fixup_panel(stem_paths, run_dir, artifacts_map or {}, bass_bleed)
         _render_reseparate_panel(stem_paths, run_dir)
 
     source_audio_path = st.session_state.get("isolate_source_audio_path")
-    if source_audio_path and Path(source_audio_path).exists():
+    if pro and source_audio_path and Path(source_audio_path).exists():
         st.divider()
         st.caption("Other tools")
         if st.button("Make a tab PDF from this →"):
@@ -4055,33 +4174,60 @@ def _render_file_ready_banner() -> None:
         results_source_fp=st.session_state.get("isolate_results_source_fp"),
     ):
         return
-    st.info(
-        f"**{_staged_source_name()}** is ready. Click **Separate tracks** on Home to "
-        "replace the current results. Existing stems stay on disk until the new job finishes."
-    )
+    if is_pro_mode(st.session_state):
+        st.info(
+            f"**{_staged_source_name()}** is ready. Click **Separate tracks** on Home to "
+            "replace the current results. Existing stems stay on disk until the new job finishes."
+        )
+    else:
+        st.info(
+            f"**{_staged_source_name()}** is ready. Click **Separate tracks** on Home to start."
+        )
 
 
 def main() -> None:
-    # Title + Queue/Refresh + Home|mix|+ stay sticky as one chrome block.
+    # Title scrolls away. Home|mix|+ with Queue/Refresh stay pinned.
     # Status / flash / banners paint below so they never split the sticky surface.
-    with st.container(key="isolate_sticky_chrome"):
-        title_col, queue_col, refresh_col = st.columns(
-            [5.2, 1.15, 1], vertical_alignment="center"
+    st.title("Audio Isolation", anchor=False, help=PAGE_TITLE_HELP)
+
+    if not shutil.which("ffmpeg"):
+        st.error(
+            "ffmpeg is required for audio conversion but was not found on PATH. "
+            f"{_ffmpeg_install_hint()}"
         )
-        with title_col:
-            st.title("Audio Isolation", anchor=False, help=PAGE_TITLE_HELP)
-        queue_open = bool(st.session_state.get(ISOLATE_QUEUE_PANEL_OPEN_KEY))
-        queue_n = _queue_visible_count()
-        queue_label = f"Queue ({queue_n})" if queue_n else "Queue"
+        return
+
+    demucs_ok = is_demucs_available()
+    if not demucs_ok:
+        st.error(
+            "Audio separation requires Demucs, which is not installed. "
+            f"{DEMUCS_INSTALL_HINT}"
+        )
+        return
+
+    logger.debug("isolate paint demucs=%s", demucs_ok)
+    ensure_worker_started()
+    browser_id = _get_browser_user_id()
+    _restore_isolate_ui_state()
+    _rehydrate_artifacts_from_disk(browser_id)
+
+    _ensure_workspace_tab(
+        has_artifacts=bool(st.session_state.get("isolate_artifacts"))
+    )
+    with st.container(key="isolate_sticky_chrome"):
+        # The global overlay is nav-only (app.py). Job state belongs to the status
+        # strip below, which stays non-blocking because the app remains usable.
+        # Always mount this 0-height iframe so its slot never appears/disappears.
+        _scroll_main_to_top(isolate_scroll_top_token(st.session_state))
+
+        owner = browser_id if isinstance(browser_id, str) else None
+        tabs_col, queue_col, refresh_col = st.columns(
+            [5.5, 1.15, 1], vertical_alignment="center"
+        )
+        with tabs_col:
+            _render_moises_tab_strip(owner)
         with queue_col:
-            st.button(
-                queue_label,
-                key="isolate_queue_toggle",
-                type="primary" if queue_open else "secondary",
-                help="Jobs: open in mixer, delete, pause, or stop.",
-                width="stretch",
-                on_click=_toggle_queue_panel,
-            )
+            _queue_header_fragment()
         with refresh_col:
             refresh_clicked = st.button(
                 "Refresh",
@@ -4089,51 +4235,17 @@ def main() -> None:
                 help="Re-scan the local run library",
                 width="stretch",
             )
-
-        if not shutil.which("ffmpeg"):
-            st.error(
-                "ffmpeg is required for audio conversion but was not found on PATH. "
-                f"{_ffmpeg_install_hint()}"
-            )
-            return
-
-        demucs_ok = is_demucs_available()
-        if not demucs_ok:
-            st.error(
-                "Audio separation requires Demucs, which is not installed. "
-                f"{DEMUCS_INSTALL_HINT}"
-            )
-            return
-
-        logger.debug("isolate paint demucs=%s", demucs_ok)
-        ensure_worker_started()
-        browser_id = _get_browser_user_id()
-        _restore_isolate_ui_state()
         if refresh_clicked:
             _refresh_isolate_from_disk(browser_id)
-        _rehydrate_artifacts_from_disk(browser_id)
-
-        _ensure_workspace_tab(
-            has_artifacts=bool(st.session_state.get("isolate_artifacts"))
-        )
-        # The global overlay is nav-only (app.py). Job state belongs to the status
-        # strip below, which stays non-blocking because the app remains usable.
-        # Always mount this 0-height iframe so its slot never appears/disappears.
-        _scroll_main_to_top(isolate_scroll_top_token(st.session_state))
-
-        owner = browser_id if isinstance(browser_id, str) else None
-        _render_moises_tab_strip(owner)
 
     _poll_running_jobs()
+    _render_busy_tab_close_prompt(owner)
     if flash := st.session_state.pop("isolate_flash", None):
         st.success(flash)
-    _render_file_ready_banner()
+    else:
+        _render_file_ready_banner()
 
     shell = apply_shell_view(st.session_state)
-
-    # Paint before Home/mix so the fixed overlay appears without waiting on the form.
-    if st.session_state.get(ISOLATE_QUEUE_PANEL_OPEN_KEY):
-        _render_queue_float_panel()
 
     if shell == "mix":
         _render_mixer_workspace(owner)

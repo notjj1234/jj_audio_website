@@ -51,6 +51,11 @@ def test_mix_tabs_source_has_moises_chrome():
     assert "mix-tab-bar" in main or "Home" in main
     assert "tab-progress" in main
     assert "aria-busy" in main
+    assert "bindTabStripWheel" in main
+    assert "scrollLeft" in main
+    assert "bindTabStripKeys" in main
+    assert '"ArrowRight"' in main and '"ArrowLeft"' in main
+    assert "updateOverflowFades" in main
     assert "M7 3h8l5 5v13" in main
     assert "M8 12h8M12 8v8" not in main
     style = (
@@ -63,6 +68,10 @@ def test_mix_tabs_source_has_moises_chrome():
     ).read_text(encoding="utf-8")
     assert "tab-progress" in style
     assert "mt-indeterminate" in style
+    assert ".mix-tab-wrap.fade-right::after" in style
+    assert ":focus-visible" in style
+    close_css = style[style.find(".mix-tab .close {") :]
+    assert "width: 24px" in close_css[: close_css.find("}")]
 
 
 def test_mix_tabs_strip_is_sticky_in_app_css():
@@ -98,5 +107,11 @@ def test_mix_tabs_strip_is_sticky_in_app_css():
     chrome = main[main.find('key="isolate_sticky_chrome"') : main.find("_poll_running_jobs()")]
     assert "_render_moises_tab_strip" in chrome
     assert 'key="isolate_refresh"' in chrome
-    assert 'key="isolate_queue_toggle"' in chrome
+    assert "_queue_header_fragment()" in chrome
+    assert "[5.5, 1.15, 1]" in chrome
+    assert 'st.title("Audio Isolation"' not in chrome
+    assert main.find('st.title("Audio Isolation"') < main.find('key="isolate_sticky_chrome"')
+    assert main.find('st.title("Audio Isolation"') < main.find("_render_moises_tab_strip")
+    assert main.find("_render_moises_tab_strip") < main.find("_queue_header_fragment()")
+    assert main.find("_queue_header_fragment()") < main.find('key="isolate_refresh"')
     assert main.find("_render_moises_tab_strip") < main.find("_poll_running_jobs()")

@@ -51,6 +51,7 @@ def test_isolate_page_imports_without_running_main(isolate_page) -> None:
 def test_isolate_queue_float_helpers_are_wired(isolate_page) -> None:
     assert isolate_page.ISOLATE_QUEUE_PANEL_OPEN_KEY == "isolate_queue_panel_open"
     assert callable(isolate_page._toggle_queue_panel)
+    assert callable(isolate_page._queue_header_fragment)
     assert callable(isolate_page._render_queue_float_panel)
     assert callable(isolate_page._queue_tab_fragment)
     assert callable(isolate_page._render_job_queue_panel)

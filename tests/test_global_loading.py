@@ -33,6 +33,29 @@ def test_tab_change_alone_does_not_dim_the_window() -> None:
     assert should_show_global_loading(nav_requested=False) is False
 
 
+def test_lite_pro_switch_dims_the_window_with_a_gear() -> None:
+    """Switching Interface blocks the window until that rerun finishes."""
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "ui" / "app.py").read_text(
+        encoding="utf-8"
+    )
+    persist = source[source.find("def _persist_mode") : source.find("st.sidebar.radio")]
+    assert '["_ui_mode_switching"] = True' in persist
+    assert "audiotools-mode-switch" in source
+    assert "audiotools-gear" in source
+    assert "html:has(.audiotools-mode-switch) body *" in source
+    assert "pointer-events: none !important" in source
+    # st.html strips <script>, so dismissal must be server-side, not JS.
+    overlay = source[source.find("_MODE_SWITCH_HTML = ") :]
+    overlay = overlay[: overlay.find('"""', overlay.find('"""') + 3)]
+    assert "<script" not in overlay
+    run_at = source.find("try:\n    pg.run()")
+    assert source.find("_mode_switch_slot.html(_MODE_SWITCH_HTML)") < run_at
+    assert run_at < source.find("_mode_switch_slot.empty()")
+    assert "finally:" in source[run_at : source.find("_mode_switch_slot.empty()")]
+
+
 def test_enqueue_does_not_request_nav_overlay() -> None:
     """Separate / Add to queue must not raise the window-wide nav scrim."""
     from pathlib import Path

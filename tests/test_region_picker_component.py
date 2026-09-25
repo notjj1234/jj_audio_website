@@ -65,6 +65,11 @@ def test_region_picker_source_uses_wavesurfer_regions():
     assert "endSec" in main
     assert "wantPlaying" in main
     assert "playSelection" in main
+    updated = main[
+        main.find("function onUserRegionUpdated") : main.find("function maybeResumePlayAfterReady")
+    ]
+    assert "wavesurfer?.isPlaying()" in updated
+    assert "clearWantPlaying()" in updated
     assert "resolvePlayableUrl" in main
     assert "REPORT_DEBOUNCE_MS" in main
     assert "dropBlobCache" in main

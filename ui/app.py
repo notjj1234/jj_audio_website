@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from pathlib import Path
 
 import streamlit as st
@@ -290,16 +291,18 @@ st.html(
     min-height: 280px !important;
   }
 
-  /* Isolate sticky chrome: title + Queue/Refresh + Home|mix|+ as one pin surface.
-     Sticky must be on an ancestor whose PARENT is the tall page vertical block
-     (stLayoutWrapper / stElementContainer). Sticky on the keyed block alone fails:
-     its parent is only as tall as the chrome, so it scrolls away immediately.
+  /* Isolate sticky chrome: Home|mix|+ with Queue/Refresh. The page title
+     sits above this block and scrolls away. Sticky must be on an ancestor
+     whose PARENT is the tall page vertical block (stLayoutWrapper /
+     stElementContainer). Sticky on the keyed block alone fails: its parent
+     is only as tall as the chrome, so it scrolls away immediately.
+     top clears Streamlit's overlay header so the tab row is not covered.
      Status strip paints below chrome (not sticky) so it never splits the header. */
   [data-testid="stLayoutWrapper"]:has(.st-key-isolate_sticky_chrome),
   [data-testid="stElementContainer"]:has(.st-key-isolate_sticky_chrome),
   [data-testid="stVerticalBlockBorderWrapper"]:has(.st-key-isolate_sticky_chrome) {
     position: sticky !important;
-    top: 0 !important;
+    top: 3.75rem !important;
     z-index: 90 !important;
     background: var(--background-color, #0e1117) !important;
     padding-bottom: 0 !important;
@@ -379,26 +382,81 @@ st.html(
     background-color: rgba(15, 23, 42, 0.42) !important;
   }
 
-  /* Refresh + Queue sit level with the Isolate title, right of the header row */
+  /* Refresh + Queue sit on the mix-tabs row (visible sticky band).
+     The open Queue card is position:fixed; its in-flow wrapper must not
+     stretch this row, or Refresh drops below Queue while a job is open. */
   [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) {
     align-items: center !important;
+    overflow: visible !important;
   }
-  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) [data-testid="stHeading"],
-  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) h1 {
-    padding-top: 0 !important;
-    margin-bottom: 0 !important;
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) [data-testid="stColumn"],
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) [data-testid="column"] {
+    display: flex !important;
+    align-items: center !important;
+    overflow: visible !important;
+  }
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) [data-testid="stLayoutWrapper"],
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) [data-testid="stElementContainer"],
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) [data-testid="stVerticalBlockBorderWrapper"] {
+    overflow: visible !important;
+  }
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) [data-testid="stVerticalBlock"]:has(.st-key-isolate_queue_float) {
+    gap: 0 !important;
+  }
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) :is(
+    [data-testid="stElementContainer"],
+    [data-testid="stLayoutWrapper"],
+    [data-testid="stVerticalBlockBorderWrapper"]
+  ):has(.st-key-isolate_queue_float):not(:has(.st-key-isolate_queue_toggle)) {
+    height: 0 !important;
+    min-height: 0 !important;
+    max-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    border: none !important;
   }
   [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) .st-key-isolate_refresh,
-  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) .st-key-isolate_queue_toggle {
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) .st-key-isolate_queue_toggle,
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) .st-key-isolate_queue_toggle_slot,
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) [data-testid="stElementContainer"]:has(.st-key-isolate_refresh),
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) [data-testid="stElementContainer"]:has(.st-key-isolate_queue_toggle_slot) {
     display: flex;
+    align-items: center;
     justify-content: flex-end;
+    width: 100%;
+    margin-top: 0 !important;
+    margin-bottom: 0 !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+  }
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) .st-key-isolate_refresh button,
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) .st-key-isolate_queue_toggle button {
+    box-sizing: border-box !important;
+    height: 2.5rem !important;
+    min-height: 2.5rem !important;
+    width: 100% !important;
+    margin: 0 !important;
   }
 
   /* Isolate Queue: non-modal floating activity panel (not a sidebar / drawer). */
   .st-key-isolate_queue_float,
-  div[class*="st-key-isolate_queue_float"],
-  [data-testid="stElementContainer"]:has(> .st-key-isolate_queue_float),
-  [data-testid="stVerticalBlockBorderWrapper"]:has(> .st-key-isolate_queue_float) {
+  div[class*="st-key-isolate_queue_float"] {
+    position: fixed !important;
+    right: 1.15rem;
+    bottom: 1.15rem;
+    width: 420px;
+    max-width: calc(100vw - 2.3rem);
+    max-height: 55vh;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    z-index: 95 !important;
+    background: var(--background-color, #0e1117) !important;
+    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.38);
+    border-radius: 0.75rem;
+  }
+  [data-testid="stElementContainer"]:has(> .st-key-isolate_queue_float):not(:has(.st-key-isolate_queue_toggle_slot)),
+  [data-testid="stVerticalBlockBorderWrapper"]:has(> .st-key-isolate_queue_float):not(:has(.st-key-isolate_queue_toggle_slot)) {
     position: fixed !important;
     right: 1.15rem;
     bottom: 1.15rem;
@@ -636,6 +694,99 @@ _LOADING_OVERLAY_CLEAR_HTML = """
 </style>
 """
 
+# Lite/Pro flips a lot of controls in one rerun. st.html strips <script>, so the
+# overlay lives in an st.empty() slot that Python clears once pg.run() returns.
+_MODE_SWITCH_MIN_VISIBLE_SEC = 0.5
+_MODE_SWITCH_HTML = """
+<style>
+  @keyframes audiotools-gear-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+  html:has(.audiotools-mode-switch) body * {
+    pointer-events: none !important;
+  }
+  .audiotools-mode-switch {
+    position: fixed;
+    inset: 0;
+    z-index: 2147483646;
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.55);
+    backdrop-filter: brightness(0.5) blur(2px);
+    -webkit-backdrop-filter: brightness(0.5) blur(2px);
+    pointer-events: auto !important;
+    cursor: wait;
+  }
+  html:has(.audiotools-mode-switch) body .audiotools-mode-switch,
+  html:has(.audiotools-mode-switch) body .audiotools-mode-switch * {
+    pointer-events: auto !important;
+    cursor: wait;
+  }
+  .audiotools-mode-switch-card {
+    width: 176px;
+    height: 176px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    background: #161a18;
+    border: 4px solid #8ef0e4;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  }
+  .audiotools-gear {
+    position: relative;
+    width: 108px;
+    height: 108px;
+    animation: audiotools-gear-spin 1.1s linear infinite;
+  }
+  .audiotools-gear-teeth {
+    position: absolute;
+    inset: 0;
+    background: #f4f7f5;
+    border-radius: 14px;
+  }
+  .audiotools-gear-teeth:nth-child(1) { transform: rotate(30deg); }
+  .audiotools-gear-teeth:nth-child(2) { transform: rotate(60deg); }
+  .audiotools-gear-teeth:nth-child(3) { transform: rotate(90deg); }
+  .audiotools-gear-hub {
+    position: absolute;
+    width: 40px;
+    height: 40px;
+    margin: -20px 0 0 -20px;
+    top: 50%;
+    left: 50%;
+    border-radius: 50%;
+    background: #161a18;
+    border: 4px solid #8ef0e4;
+    z-index: 1;
+  }
+  .audiotools-mode-switch-label {
+    position: absolute;
+    top: calc(100% + 18px);
+    color: #ffffff;
+    font-size: 1.35rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.9);
+  }
+</style>
+<div class="audiotools-mode-switch" role="status" aria-live="polite" aria-busy="true">
+  <div class="audiotools-mode-switch-card">
+    <div class="audiotools-gear" aria-hidden="true">
+      <div class="audiotools-gear-teeth"></div>
+      <div class="audiotools-gear-teeth"></div>
+      <div class="audiotools-gear-teeth"></div>
+    </div>
+    <div class="audiotools-gear-hub" aria-hidden="true"></div>
+    <div class="audiotools-mode-switch-label">Switching…</div>
+  </div>
+</div>
+"""
+
 _nav_requested = bool(st.session_state.pop("_nav_loading", False))
 if should_show_global_loading(nav_requested=_nav_requested):
     st.html(_loading_overlay_html("Loading…"))
@@ -646,6 +797,7 @@ _ui_state_path = DATA_DIR / ISOLATE_UI_STATE_FILENAME
 
 
 def _persist_mode() -> None:
+    st.session_state["_ui_mode_switching"] = True
     write_ui_mode(_ui_state_path, st.session_state.get(UI_MODE_KEY))
 
 
@@ -676,4 +828,16 @@ _nav = [
     st.Page(str(_pages / "tab_pdf.py"), title="Tab PDF (demo)"),
 ]
 pg = st.navigation(_nav)
-pg.run()
+_mode_switching = bool(st.session_state.pop("_ui_mode_switching", False))
+_mode_switch_slot = st.empty()
+_mode_switch_started = time.monotonic()
+if _mode_switching:
+    _mode_switch_slot.html(_MODE_SWITCH_HTML)
+try:
+    pg.run()
+finally:
+    if _mode_switching:
+        _remaining = _MODE_SWITCH_MIN_VISIBLE_SEC - (time.monotonic() - _mode_switch_started)
+        if _remaining > 0:
+            time.sleep(_remaining)
+        _mode_switch_slot.empty()

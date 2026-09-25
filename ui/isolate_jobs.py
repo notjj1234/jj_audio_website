@@ -1347,9 +1347,7 @@ def apply_finished_job_poll_outcome(
     promote_job_origin_tab(session, status)
     if notify_only:
         title = status.get("title") or "track"
-        session["isolate_flash"] = (
-            f"**{title}** finished. Open it from the mix tabs on Mixer…"
-        )
+        session["isolate_flash"] = f"**{title}** finished. Its tab is open above."
         return False
 
     job_id = str(status.get("id") or "").strip() or "latest"
@@ -1366,6 +1364,6 @@ def apply_finished_job_poll_outcome(
         if Path(path).suffix.lower() == ".wav" and not str(n).endswith("_diagnostics")
     ]
     session["isolate_flash"] = (
-        f"Separated {len(produced)} tracks. Live mixer and downloads are on Mixer."
+        f"Separated {len(produced)} tracks. The mixer and downloads are open below."
     )
     return True

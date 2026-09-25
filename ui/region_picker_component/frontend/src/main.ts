@@ -200,10 +200,15 @@ function reportRegion(start: number, end: number): void {
   }, REPORT_DEBOUNCE_MS);
 }
 
+/** Trimming only moves the bounds. Playback restarts only if it was already on. */
 function onUserRegionUpdated(region: Region): void {
   if (suppressingReport || region.id !== "selection") return;
   reportRegion(region.start, region.end);
-  playSelection(region, /* persist */ true);
+  if (wavesurfer?.isPlaying()) {
+    playSelection(region, /* persist */ true);
+  } else {
+    clearWantPlaying();
+  }
 }
 
 function maybeResumePlayAfterReady(): void {

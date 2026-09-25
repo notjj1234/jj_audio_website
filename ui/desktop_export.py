@@ -80,6 +80,15 @@ EXPORT_FORMAT_LABELS = {
     "m4a": "M4A (AAC)",
 }
 
+EXPORT_FORMAT_PLAIN_LABELS = {
+    "wav": "WAV",
+    "mp3": "MP3",
+    "flac": "FLAC",
+    "ogg": "OGG",
+    "opus": "Opus",
+    "m4a": "M4A",
+}
+
 _FFMPEG_PROFILES = {
     "mp3": ["-c:a", "libmp3lame", "-b:a", "192k", "-vn"],
     "flac": ["-c:a", "flac", "-vn"],
