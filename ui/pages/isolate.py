@@ -306,6 +306,7 @@ ISOLATE_YOUTUBE_DOWNLOADING_KEY = "_isolate_youtube_downloading"
 LITE_GUITAR_FELL_BACK_KEY = "_isolate_lite_guitar_fell_back"
 ISOLATE_QUEUE_PANEL_OPEN_KEY = "isolate_queue_panel_open"
 BUSY_TAB_CLOSE_KEY = "_isolate_busy_tab_close"
+MIX_TAB_DELETE_KEY = "_isolate_mix_tab_delete"
 
 
 def _close_youtube_search_dialog() -> None:
@@ -1222,6 +1223,12 @@ def _render_stem_tile(
 def _rerun_preserve_scroll() -> None:
     """In-place control: remount only the current fragment so main-pane scroll stays."""
     st.rerun(scope="fragment")
+
+
+PENDING_QUEUE_DELETE_KEY = "isolate_pending_queue_delete"
+_DELETING_TRACKS_CAPTION = "Deleting separated tracks…"
+_DELETED_TRACKS_FLASH = "Deleted separated tracks."
+_DELETE_FAILED_FLASH = "Could not delete that separation."
 
 
 def _rerun_after_tile_pick() -> None:
@@ -2596,6 +2603,17 @@ def _disarm_confirm(flag: str) -> None:
     st.session_state.pop(flag, None)
 
 
+def accept_confirm_click(session: dict, flag: str, clicked: bool) -> bool:
+    """True only when confirm is clicked while the flag is still set.
+
+    The flag is cleared after the click is accepted, never before it is read.
+    """
+    if not session.get(flag) or not clicked:
+        return False
+    session.pop(flag, None)
+    return True
+
+
 def _confirm_button(
     label: str,
     *,
@@ -2614,17 +2632,17 @@ def _confirm_button(
             type="primary",
             help=confirm_help,
             width=width,
-            on_click=_disarm_confirm,
-            args=(flag,),
         )
-        st.button(
+        if st.button(
             "Cancel",
             key=f"{key}__no",
             width=width,
-            on_click=_disarm_confirm,
-            args=(flag,),
-        )
-        return confirmed
+        ):
+            _disarm_confirm(flag)
+            st.rerun(scope="app")
+        if accept_confirm_click(st.session_state, flag, confirmed):
+            return True
+        return False
     st.button(label, key=key, help=help, width=width, on_click=_arm_confirm, args=(flag,))
     return False
 
@@ -2643,9 +2661,7 @@ def _render_job_queue_panel() -> None:
             confirm_label=f"Delete {n_done} from disk",
             confirm_help="Removes the separated tracks for every finished job. No undo.",
         ):
-            dirs = delete_all_finished_jobs(parts["succeeded"])
-            _clear_mixer_if_run_deleted(dirs)
-            _rerun_preserve_scroll()
+            _request_queue_delete(parts["succeeded"])
     waiting_ids = queued_job_ids()
     active_id = active_job_id()
     stopping_previous = False
@@ -2671,16 +2687,110 @@ def _render_job_queue_panel() -> None:
             )
 
 
-def _clear_mixer_if_run_deleted(run_dirs: list[str] | str | None) -> None:
-    if not run_dirs:
+def _request_queue_delete(jobs: list[dict]) -> None:
+    """Remember finished jobs and rerun the whole app so the mixer can close."""
+    slim = []
+    for job in jobs:
+        if job.get("status") != "succeeded":
+            continue
+        slim.append(
+            {
+                "id": str(job.get("id") or ""),
+                "status": "succeeded",
+                "run_dir": str(job.get("run_dir") or "") or None,
+            }
+        )
+    if not slim:
+        st.session_state["isolate_flash"] = _DELETE_FAILED_FLASH
+        st.rerun(scope="app")
+    st.session_state[PENDING_QUEUE_DELETE_KEY] = {"phase": "show", "jobs": slim}
+    st.rerun(scope="app")
+
+
+def detach_deleted_mix_runs(session: dict, run_dirs: list[str]) -> None:
+    """Close mix tabs for deleted runs and drop the loaded mixer.
+
+    Path match uses the mix-tab normalizer, so a trailing slash or ``..``
+    still counts as the open mix. Sets skip-rehydrate when that mix was loaded.
+    """
+    loaded = False
+    for run_dir in run_dirs:
+        if not run_dir:
+            continue
+        if is_loaded_mix_tab(session, run_dir):
+            loaded = True
+        close_open_mix_tab(session, run_dir)
+    if not loaded:
         return
-    targets = {str(run_dirs)} if isinstance(run_dirs, str) else {str(d) for d in run_dirs if d}
-    current = st.session_state.get("isolate_run_dir") or st.session_state.get(
-        "isolate_viewing_run_dir"
+    _clear_loaded_mixer_keys(session, dismiss=True)
+    open_home_shell(session)
+
+
+def _clear_loaded_mixer_keys(session: dict, *, dismiss: bool) -> None:
+    for key in (
+        "isolate_artifacts",
+        "isolate_base_name",
+        "isolate_run_dir",
+        "isolate_volumes_db",
+        "isolate_master_volume_db",
+        "isolate_mixer_state",
+        "isolate_mix_ready",
+        "isolate_mix_fp",
+        "isolate_selected_stems",
+        "isolate_results_fp",
+        "isolate_source_audio_path",
+        "isolate_source_kind",
+        "isolate_region_label",
+        "isolate_clip_length",
+        "isolate_viewing_run_dir",
+        "isolate_listen_applied_dir",
+        "isolate_listen_missing",
+        "isolate_results_source_fp",
+        "isolate_last_export_path",
+        LISTEN_PICKER_KEY,
+        LISTEN_PICKER_NEXT_KEY,
+        "isolate_flash",
+    ):
+        session.pop(key, None)
+    if dismiss:
+        session[ISOLATE_SKIP_REHYDRATE_KEY] = True
+    else:
+        session.pop(ISOLATE_SKIP_REHYDRATE_KEY, None)
+
+
+def _execute_pending_queue_delete(jobs: list[dict]) -> None:
+    failed = False
+    deleted_dirs: list[str] = []
+    for job in jobs:
+        result = delete_finished_job(job)
+        run_dir = str(result.get("run_dir") or "")
+        still_there = bool(run_dir) and Path(run_dir).exists()
+        if still_there or not result.get("ok"):
+            failed = True
+            continue
+        if run_dir:
+            deleted_dirs.append(run_dir)
+    if deleted_dirs:
+        detach_deleted_mix_runs(st.session_state, deleted_dirs)
+    _persist_isolate_ui_state()
+    st.session_state["isolate_flash"] = (
+        _DELETE_FAILED_FLASH if failed else _DELETED_TRACKS_FLASH
     )
-    if current and str(current) in targets:
-        _clear_loaded_mixer()
-        _persist_isolate_ui_state()
+
+
+def _drain_pending_queue_delete() -> None:
+    """Paint Deleting…, then remove the runs on the following full run."""
+    pending = st.session_state.get(PENDING_QUEUE_DELETE_KEY)
+    if not isinstance(pending, dict):
+        return
+    if pending.get("phase") != "run":
+        st.caption(_DELETING_TRACKS_CAPTION)
+        pending["phase"] = "run"
+        st.session_state[PENDING_QUEUE_DELETE_KEY] = pending
+        st.rerun(scope="app")
+    jobs = list(pending.get("jobs") or [])
+    st.session_state.pop(PENDING_QUEUE_DELETE_KEY, None)
+    _execute_pending_queue_delete(jobs)
 
 
 def _render_job_failure(
@@ -2774,9 +2884,7 @@ def _render_queue_job_row(
                 confirm_label="Delete from disk",
                 confirm_help="Removes this job's separated tracks. No undo.",
             ):
-                result = delete_finished_job(read_status(job_id) or job)
-                _clear_mixer_if_run_deleted(result.get("run_dir"))
-                _rerun_preserve_scroll()
+                _request_queue_delete([read_status(job_id) or job])
         return
     if status == "running" and job_id:
         with cols[1]:
@@ -3520,25 +3628,6 @@ def _focus_mix_tab(rows: list[dict], run_dir: str) -> None:
     _apply_library_row(row, viewing_mode=str(row.get("id") or str(run_dir)), reopen_name=True)
 
 
-def _close_mix_tab(rows: list[dict], run_dir: str) -> None:
-    neighbor = close_open_mix_tab(st.session_state, run_dir)
-    if is_loaded_mix_tab(st.session_state, run_dir):
-        if neighbor and is_new_draft_tab(neighbor):
-            focus_new_draft_tab(st.session_state, neighbor)
-        elif neighbor:
-            _focus_mix_tab(rows, neighbor)
-        else:
-            _dismiss_last_mix_tab()
-    elif neighbor is None and not any(
-        not is_new_draft_tab(t)
-        for t in (st.session_state.get(OPEN_MIX_TABS_KEY) or [])
-    ):
-        # Last mix tab closed even if pointer match failed — still detach.
-        _dismiss_last_mix_tab()
-    _persist_isolate_ui_state()
-    _rerun_scroll_top()
-
-
 def _library_rows_available(browser_id: str | None) -> list[dict]:
     owner = browser_id if isinstance(browser_id, str) else None
     owned = list_recent_runs("isolate", owner=owner)
@@ -3559,35 +3648,7 @@ def _clear_loaded_mixer(*, dismiss: bool = False) -> None:
     ``dismiss=True`` means the user closed the last mix tab — skip auto-rehydrate
     so the next paint does not revive that tab from the library.
     """
-    for key in (
-        "isolate_artifacts",
-        "isolate_base_name",
-        "isolate_run_dir",
-        "isolate_volumes_db",
-        "isolate_master_volume_db",
-        "isolate_mixer_state",
-        "isolate_mix_ready",
-        "isolate_mix_fp",
-        "isolate_selected_stems",
-        "isolate_results_fp",
-        "isolate_source_audio_path",
-        "isolate_source_kind",
-        "isolate_region_label",
-        "isolate_clip_length",
-        "isolate_viewing_run_dir",
-        "isolate_listen_applied_dir",
-        "isolate_listen_missing",
-        "isolate_results_source_fp",
-        "isolate_last_export_path",
-        LISTEN_PICKER_KEY,
-        LISTEN_PICKER_NEXT_KEY,
-        "isolate_flash",
-    ):
-        st.session_state.pop(key, None)
-    if dismiss:
-        st.session_state[ISOLATE_SKIP_REHYDRATE_KEY] = True
-    else:
-        st.session_state.pop(ISOLATE_SKIP_REHYDRATE_KEY, None)
+    _clear_loaded_mixer_keys(st.session_state, dismiss=dismiss)
 
 
 def _dismiss_last_mix_tab() -> None:
@@ -3846,7 +3907,44 @@ def _render_moises_tab_strip(browser_id: str | None) -> None:
             }
             _rerun_scroll_top()
             return
-        _close_mix_tab(rows, tab_id)
+        if is_new_draft_tab(tab_id):
+            _close_mix_tab(rows, tab_id)
+            return
+        st.session_state[MIX_TAB_DELETE_KEY] = {"id": tab_id}
+        _rerun_scroll_top()
+
+
+def _succeeded_job_for_run(run_dir: str) -> dict:
+    for job in list_jobs(limit=50):
+        if job.get("status") != "succeeded":
+            continue
+        if is_loaded_mix_tab({"isolate_run_dir": job.get("run_dir")}, run_dir):
+            return job
+    return {"id": "", "status": "succeeded", "run_dir": run_dir}
+
+
+def _render_mix_tab_delete_prompt() -> None:
+    """Confirm before the mix-tab X deletes that run from disk."""
+    pending = st.session_state.get(MIX_TAB_DELETE_KEY)
+    if not isinstance(pending, dict) or not pending.get("id"):
+        return
+    run_dir = str(pending["id"])
+    with st.container(border=True, key="isolate_mix_tab_delete"):
+        st.caption("Delete this mix from disk?")
+        if _confirm_button(
+            "Delete this mix",
+            key="isolate_mix_tab_delete_btn",
+            confirm_label="Delete from disk",
+            confirm_help="Removes these separated tracks. No undo.",
+        ):
+            st.session_state.pop(MIX_TAB_DELETE_KEY, None)
+            _request_queue_delete([_succeeded_job_for_run(run_dir)])
+        if st.session_state.get(MIX_TAB_DELETE_KEY) and st.button(
+            "Cancel",
+            key="isolate_mix_tab_delete_cancel",
+        ):
+            st.session_state.pop(MIX_TAB_DELETE_KEY, None)
+            _rerun_scroll_top()
 
 
 def _render_busy_tab_close_prompt(browser_id: str | None) -> None:
@@ -4206,6 +4304,7 @@ def main() -> None:
         return
 
     logger.debug("isolate paint demucs=%s", demucs_ok)
+    _drain_pending_queue_delete()
     ensure_worker_started()
     browser_id = _get_browser_user_id()
     _restore_isolate_ui_state()
@@ -4240,6 +4339,7 @@ def main() -> None:
 
     _poll_running_jobs()
     _render_busy_tab_close_prompt(owner)
+    _render_mix_tab_delete_prompt()
     if flash := st.session_state.pop("isolate_flash", None):
         st.success(flash)
     else:

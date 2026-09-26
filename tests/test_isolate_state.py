@@ -3310,3 +3310,52 @@ def test_seed_metronome_widgets_without_render_keeps_prefs():
     assert session[ISOLATE_METRO_ACCENT_KEY] is False
     assert ISOLATE_METRO_APPLIED_KEY not in session
 
+
+def test_queue_delete_clears_loaded_mix_and_normalized_path(tmp_path: Path):
+    from ui.isolate_state import ISOLATE_SKIP_REHYDRATE_KEY, OPEN_MIX_TABS_KEY
+    from ui.pages.isolate import accept_confirm_click, detach_deleted_mix_runs
+
+    run = tmp_path / "Brianstorm"
+    run.mkdir()
+    run_s = str(run)
+    aliased = str(run / ".." / run.name)
+    session = {
+        OPEN_MIX_TABS_KEY: [run_s],
+        "isolate_run_dir": run_s,
+        "isolate_artifacts": {"vocals": str(run / "vocals.wav")},
+        "isolate_viewing_run_dir": run_s,
+    }
+    detach_deleted_mix_runs(session, [aliased])
+    assert session.get(OPEN_MIX_TABS_KEY) == []
+    assert "isolate_artifacts" not in session
+    assert "isolate_run_dir" not in session
+    assert session.get(ISOLATE_SKIP_REHYDRATE_KEY) is True
+
+    flag = "delete__confirm"
+    armed = {flag: True}
+    assert accept_confirm_click(armed, flag, False) is False
+    assert flag in armed
+    assert accept_confirm_click(armed, flag, True) is True
+    assert flag not in armed
+
+
+def test_failed_delete_run_does_not_detach_mix(tmp_path: Path, monkeypatch):
+    import streamlit as st
+    from ui.pages import isolate as page
+
+    run = tmp_path / "outside" / "run"
+    run.mkdir(parents=True)
+    calls: list = []
+    monkeypatch.setattr(page, "detach_deleted_mix_runs", lambda *args, **kwargs: calls.append(args))
+    monkeypatch.setattr(page, "_persist_isolate_ui_state", lambda: None)
+    monkeypatch.setattr(
+        page,
+        "delete_finished_job",
+        lambda job: {"ok": False, "run_dir": str(run)},
+    )
+    page._execute_pending_queue_delete(
+        [{"id": "x", "status": "succeeded", "run_dir": str(run)}]
+    )
+    assert calls == []
+    assert st.session_state["isolate_flash"] == page._DELETE_FAILED_FLASH
+
