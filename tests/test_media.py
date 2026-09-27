@@ -74,9 +74,9 @@ def test_stem_media_urls_cache_busts_metronome(tmp_path: Path, monkeypatch):
     urls = stem_media_urls({"metronome": metro, "vocals": vocals})
     assert "metronome" in urls
     metro_coord = next(c for c in coords if ".metronome" in c)
-    voc_coord = next(c for c in coords if c.endswith(".vocals"))
+    voc_coord = next(c for c in coords if ".vocals" in c)
     assert str(metro.stat().st_mtime_ns) in metro_coord
-    assert str(vocals.stat().st_mtime_ns) not in voc_coord
+    assert str(vocals.stat().st_mtime_ns) in voc_coord
 
 
 def test_ensure_mixer_audio_paths_long_uses_original(tmp_path: Path):

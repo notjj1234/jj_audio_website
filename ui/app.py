@@ -473,20 +473,20 @@ st.html(
   .st-key-isolate_queue_float [data-testid="stHorizontalBlock"] {
     flex-wrap: wrap !important;
     gap: 0.35rem !important;
-    align-items: center !important;
+    align-items: stretch !important;
+    justify-content: flex-start !important;
   }
-  .st-key-isolate_queue_float [data-testid="stHorizontalBlock"] > div:first-child {
-    flex: 1 1 100% !important;
-    width: 100% !important;
-    min-width: 0 !important;
-  }
-  .st-key-isolate_queue_float [data-testid="stHorizontalBlock"] > div:not(:first-child) {
-    flex: 1 1 auto !important;
-    min-width: 5.5rem !important;
+  .st-key-isolate_queue_float [class*="st-key-queue_confirm_row"] [data-testid="stHorizontalBlock"] > div {
+    flex: 1 1 0 !important;
     width: auto !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
+  .st-key-isolate_queue_float [class*="st-key-queue_confirm_row"] [data-testid="stButton"] button {
+    width: 100% !important;
   }
   .st-key-isolate_queue_float [data-testid="stButton"] button p {
-    white-space: nowrap !important;
+    white-space: normal !important;
   }
 
   /* New-tab outcome/stem tiles: icon stacked above label (same for presets + custom) */

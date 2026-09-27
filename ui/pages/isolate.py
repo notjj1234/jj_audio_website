@@ -195,6 +195,7 @@ from ui.isolate_state import (
     resolve_youtube_job_name,
     roformer_speed_note,
     running_progress_view,
+    refresh_open_mix_action,
     select_rehydrate_row,
     session_mixer_artifacts_ok,
     should_hide_stale_results,
@@ -2419,19 +2420,54 @@ def _ffmpeg_install_hint() -> str:
     return "Install ffmpeg: sudo apt install ffmpeg (or your distro equivalent)"
 
 
-def _rehydrate_artifacts_from_disk(browser_id: str | None) -> None:
+def _rehydrate_artifacts_from_disk(browser_id: str | None) -> bool:
     """Restore mixer results from last-viewed run, else the latest library row."""
     rows = _library_rows_available(browser_id)
     row = select_rehydrate_row(st.session_state, rows, wav_exists=_wav_exists)
     if row is None:
-        return
-    _apply_library_row(row, viewing_mode="latest", reopen_name=False)
+        return False
+    return _apply_library_row(row, viewing_mode="latest", reopen_name=False)
+
+
+def _sync_listen_name_if_current(run_dir: str, title: str) -> None:
+    """Keep the Listening-to field aligned when Refresh renames the open mix."""
+    if str(st.session_state.get("isolate_listen_name_for") or "") == run_dir:
+        st.session_state["isolate_listen_name"] = title
 
 
 def _refresh_isolate_from_disk(browser_id: str | None) -> None:
+    """Reload the open mix from disk. A dismissed Home stays on Home."""
     ensure_worker_started()
-    st.session_state.pop(ISOLATE_SKIP_REHYDRATE_KEY, None)
-    _rehydrate_artifacts_from_disk(browser_id)
+    rows = _library_rows_available(browser_id)
+    loaded = str(st.session_state.get("isolate_run_dir") or "")
+    row = (
+        next((item for item in rows if str(item.get("run_dir") or "") == loaded), None)
+        if loaded
+        else None
+    )
+    changed = False
+    if row is not None:
+        action = refresh_open_mix_action(st.session_state, row)
+        if action == "stems":
+            changed = _apply_library_row(
+                row,
+                viewing_mode=str(row.get("id") or loaded),
+                reopen_name=False,
+            )
+            if changed:
+                _sync_listen_name_if_current(
+                    loaded, str(st.session_state.get("isolate_base_name") or "tracks")
+                )
+        elif action == "title":
+            title = str(row.get("title") or "tracks")
+            st.session_state["isolate_base_name"] = title
+            _sync_listen_name_if_current(loaded, title)
+            changed = True
+    elif not st.session_state.get(ISOLATE_SKIP_REHYDRATE_KEY):
+        changed = _rehydrate_artifacts_from_disk(browser_id)
+    st.session_state["isolate_flash"] = (
+        "Reloaded from disk." if changed else "Already up to date."
+    )
     _persist_isolate_ui_state()
     st.rerun()
 
@@ -2647,6 +2683,48 @@ def _confirm_button(
     return False
 
 
+def _queue_confirm_pair(
+    label: str,
+    *,
+    key: str,
+    confirm_label: str,
+    confirm_help: str,
+    help: str | None = None,
+    width: str = "content",
+) -> bool:
+    """Queue-only two-step delete. Confirm and Cancel share one equal row.
+
+    The idle label stays a single button. Once armed, the pair replaces that
+    control so the red confirm cannot sit beside a different action.
+    """
+    flag = f"{key}__confirm"
+    if st.session_state.get(flag):
+        with st.container(key=f"queue_confirm_row_{key}"):
+            yes_col, no_col = st.columns(2)
+            with yes_col:
+                confirmed = st.button(
+                    confirm_label,
+                    key=f"{key}__yes",
+                    type="primary",
+                    help=confirm_help,
+                    width="stretch",
+                )
+            with no_col:
+                cancelled = st.button(
+                    "Cancel",
+                    key=f"{key}__no",
+                    width="stretch",
+                )
+        if cancelled:
+            _disarm_confirm(flag)
+            st.rerun(scope="app")
+        if accept_confirm_click(st.session_state, flag, confirmed):
+            return True
+        return False
+    st.button(label, key=key, help=help, width=width, on_click=_arm_confirm, args=(flag,))
+    return False
+
+
 def _render_job_queue_panel() -> None:
     ensure_worker_started()
     parts = partition_queue_jobs(jobs_visible_in_queue(list_jobs(limit=30)))
@@ -2655,7 +2733,7 @@ def _render_job_queue_panel() -> None:
         return
     if parts["succeeded"]:
         n_done = len(parts["succeeded"])
-        if _confirm_button(
+        if _queue_confirm_pair(
             "Delete all finished",
             key="isolate_delete_all_finished",
             confirm_label=f"Delete {n_done} from disk",
@@ -2824,44 +2902,43 @@ def _render_queue_job_row(
     title = _job_source_title(job)
     job_id = str(job.get("id") or "")
     label = "done" if status == "succeeded" else status
-    if status == "running":
-        n_actions = 2
+    st.write(f"**{title}** · {label}")
+    if status == "failed":
+        _render_job_failure(
+            title,
+            job.get("error") or job.get("message"),
+            detail_key=f"job_fail_details_{job_id}",
+            inline_caption=True,
+        )
+    elif status == "queued":
+        st.caption(
+            queued_wait_caption(
+                job_id,
+                waiting_ids,
+                stopping_previous=stopping_previous,
+            )
+        )
+    elif status == "cancelled":
+        st.caption("Removed from queue")
     elif status == "paused":
-        n_actions = 2
-    elif status == "succeeded":
-        n_actions = 2
-    elif status == "failed":
-        n_actions = 2
-    else:
-        n_actions = 1
-    cols = st.columns([4, *([1] * n_actions)])
-    with cols[0]:
-        st.write(f"**{title}** · {label}")
-        if status == "failed":
-            _render_job_failure(
-                title,
-                job.get("error") or job.get("message"),
-                detail_key=f"job_fail_details_{job_id}",
-                inline_caption=True,
-            )
-        elif status == "queued":
-            st.caption(
-                queued_wait_caption(
-                    job_id,
-                    waiting_ids,
-                    stopping_previous=stopping_previous,
-                )
-            )
-        elif status == "cancelled":
-            st.caption("Removed from queue")
-        elif status == "paused":
-            st.caption(paused_job_caption(job.get("completed_stages")))
-        elif status == "pausing":
-            st.caption("Pausing…")
-        # running: progress paints full-width below Pause/Stop (see below)
+        st.caption(paused_job_caption(job.get("completed_stages")))
+    elif status == "pausing":
+        st.caption("Pausing…")
+    # running: progress paints full-width below Pause/Stop (see below)
     if status == "succeeded" and job_id:
-        with cols[1]:
-            if st.button("Open in Mixer", key=f"open_mixer_{job_id}"):
+        if st.session_state.get(f"delete_finished_{job_id}__confirm"):
+            if _queue_confirm_pair(
+                "Delete",
+                key=f"delete_finished_{job_id}",
+                confirm_label="Delete from disk",
+                confirm_help="Removes this job's separated tracks. No undo.",
+                width="stretch",
+            ):
+                _request_queue_delete([read_status(job_id) or job])
+            return
+        open_col, delete_col = st.columns(2)
+        with open_col:
+            if st.button("Open in Mixer", key=f"open_mixer_{job_id}", width="stretch"):
                 fresh = read_status(job_id) or job
                 if apply_succeeded_job_to_session(
                     st.session_state,
@@ -2877,20 +2954,23 @@ def _render_queue_job_row(
                     _rerun_scroll_top()
                 else:
                     st.caption("Those files are no longer available.")
-        with cols[2]:
-            if _confirm_button(
+        with delete_col:
+            if _queue_confirm_pair(
                 "Delete",
                 key=f"delete_finished_{job_id}",
                 confirm_label="Delete from disk",
                 confirm_help="Removes this job's separated tracks. No undo.",
+                width="stretch",
             ):
                 _request_queue_delete([read_status(job_id) or job])
         return
     if status == "running" and job_id:
-        with cols[1]:
+        pause_col, stop_col = st.columns(2)
+        with pause_col:
             if st.button(
                 "Pause",
                 key=f"pause_job_{job_id}",
+                width="stretch",
                 help=(
                     "Pauses after the current step finishes (or stops heavy processing). "
                     "Resume continues from the last saved step."
@@ -2899,7 +2979,7 @@ def _render_queue_job_row(
                 pause_job(job_id)
                 ensure_worker_started()
                 _rerun_preserve_scroll()
-        with cols[2]:
+        with stop_col:
             # Two-step: this throws away minutes of finished compute and there is
             # no undo, so a single stray click must not be enough.
             confirm_key = f"isolate_confirm_stop_{job_id}"
@@ -2909,17 +2989,19 @@ def _render_queue_job_row(
                     key=f"stop_job_{job_id}",
                     type="primary",
                     help="Discard this job and its progress.",
+                    width="stretch",
                 ):
                     st.session_state.pop(confirm_key, None)
                     remove_job(job_id)
                     ensure_worker_started()
                     _rerun_preserve_scroll()
-                if st.button("Keep going", key=f"isolate_keep_{job_id}"):
+                if st.button("Keep going", key=f"isolate_keep_{job_id}", width="stretch"):
                     st.session_state.pop(confirm_key, None)
                     _rerun_preserve_scroll()
             elif st.button(
                 "Stop",
                 key=f"isolate_stop_ask_{job_id}",
+                width="stretch",
                 help="Cancel this job. Progress so far is lost.",
             ):
                 st.session_state[confirm_key] = True
@@ -2928,45 +3010,48 @@ def _render_queue_job_row(
         _render_running_progress(fresh)
         return
     if status == "paused" and job_id:
-        with cols[1]:
-            if st.button("Resume", key=f"resume_job_{job_id}"):
+        resume_col, remove_col = st.columns(2)
+        with resume_col:
+            if st.button("Resume", key=f"resume_job_{job_id}", width="stretch"):
                 resume_job(job_id)
                 ensure_worker_started()
                 _rerun_preserve_scroll()
-        with cols[2]:
-            if st.button("Remove", key=f"remove_paused_{job_id}"):
+        with remove_col:
+            if st.button("Remove", key=f"remove_paused_{job_id}", width="stretch"):
                 remove_job(job_id)
                 ensure_worker_started()
                 _rerun_preserve_scroll()
         return
     if status == "failed" and job_id:
-        with cols[1]:
+        retry_col, remove_col = st.columns(2)
+        with retry_col:
             if st.button(
                 "Try again",
                 key=f"isolate_queue_retry_{job_id}",
                 type="primary",
+                width="stretch",
                 help="Queue the same track with the same settings.",
             ):
                 _retry_failed_job(job_id)
-        with cols[2]:
+        with remove_col:
             if st.button(
                 "Remove",
                 key=f"remove_job_{job_id}",
+                width="stretch",
                 help="Drop this job from the list.",
             ):
                 remove_job(job_id)
                 ensure_worker_started()
                 _rerun_preserve_scroll()
         return
-    with cols[1]:
-        if job_id and st.button(
-            "Remove",
-            key=f"remove_job_{job_id}",
-            help="Drop this job from the list.",
-        ):
-            remove_job(job_id)
-            ensure_worker_started()
-            _rerun_preserve_scroll()
+    if job_id and st.button(
+        "Remove",
+        key=f"remove_job_{job_id}",
+        help="Drop this job from the list.",
+    ):
+        remove_job(job_id)
+        ensure_worker_started()
+        _rerun_preserve_scroll()
 
 
 def _render_failed_strip(failed: dict) -> None:
@@ -4331,7 +4416,7 @@ def main() -> None:
             refresh_clicked = st.button(
                 "Refresh",
                 key="isolate_refresh",
-                help="Re-scan the local run library",
+                help="Reload this mix and the library from disk",
                 width="stretch",
             )
         if refresh_clicked:

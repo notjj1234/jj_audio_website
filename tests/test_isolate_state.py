@@ -124,6 +124,7 @@ from ui.isolate_state import (
     os_notify_message,
     jobs_needing_os_notify,
     select_rehydrate_row,
+    refresh_open_mix_action,
     session_mixer_artifacts_ok,
     should_auto_apply_job,
     staged_audio_for_new_tab,
@@ -1962,6 +1963,66 @@ def test_select_rehydrate_row_skips_when_session_wavs_ok():
     assert session_mixer_artifacts_ok(session, wav_exists=lambda _: True) is True
 
 
+def test_refresh_open_mix_action_title_only_leaves_stem_set():
+    session = {
+        "isolate_artifacts": {"vocals": r"C:\runs\a\vocals.wav", "bass_bleed_diagnostics": "d.json"},
+        "isolate_base_name": "Old",
+        "isolate_volumes_db": {"vocals": -3},
+    }
+    row = {
+        "title": "New",
+        "artifacts": {"vocals": "C:/runs/a/vocals.wav", "bass_bleed_diagnostics": "other.json"},
+    }
+    assert refresh_open_mix_action(session, row) == "title"
+    assert session["isolate_volumes_db"]["vocals"] == -3
+
+
+def test_refresh_open_mix_action_stem_set_changed():
+    session = {
+        "isolate_artifacts": {"vocals": "/runs/a/vocals.wav"},
+        "isolate_base_name": "Song",
+    }
+    row = {
+        "title": "Song",
+        "artifacts": {
+            "vocals": "/runs/a/vocals.wav",
+            "guitar": "/runs/a/guitar.wav",
+        },
+    }
+    assert refresh_open_mix_action(session, row) == "stems"
+
+
+def test_refresh_open_mix_action_unchanged():
+    session = {
+        "isolate_artifacts": {"guitar": "/runs/a/guitar.wav", "vocals": "/runs/a/vocals.wav"},
+        "isolate_base_name": "Song",
+    }
+    row = {
+        "title": "Song",
+        "artifacts": {"vocals": "/runs/a/vocals.wav", "guitar": "/runs/a/guitar.wav"},
+    }
+    assert refresh_open_mix_action(session, row) == "unchanged"
+
+
+def test_refresh_does_not_reopen_dismissed_home():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    refresh = source[
+        source.find("def _refresh_isolate_from_disk") : source.find("def _open_mixer_workspace")
+    ]
+    assert "ISOLATE_SKIP_REHYDRATE_KEY" in refresh
+    assert ".pop(ISOLATE_SKIP_REHYDRATE_KEY" not in refresh
+    assert "refresh_open_mix_action(" in refresh
+    assert "_apply_library_row(" in refresh
+    assert 'action == "stems"' in refresh
+    assert 'action == "title"' in refresh
+    assert "Reloaded from disk." in refresh
+    assert "Already up to date." in refresh
+    assert "_rerun_scroll_top" not in refresh
+    assert 'help="Reload this mix and the library from disk"' in source
+    assert 'help="Re-scan the local run library"' not in source
+
+
 def test_select_rehydrate_row_prefers_last_viewed():
     session = {"isolate_viewing_run_dir": "/runs/old"}
     rows = [{"run_dir": "/runs/new"}, {"run_dir": "/runs/old"}]
@@ -2617,9 +2678,35 @@ def test_home_queue_is_floating_panel_not_bottom_section():
     assert "420px" in css
     assert "55vh" in css
     assert "not a sidebar" in css.lower() or "not a sidebar / drawer" in css
+    queue_css = css[css.find("Isolate Queue:") : css.find("New-tab outcome")]
+    assert "flex: 1 1 100%" not in queue_css
+    assert "min-width: 5.5rem" not in queue_css
+    assert "st-key-queue_confirm_row" in queue_css
+    assert "flex: 1 1 0" in queue_css
+    assert "white-space: normal" in queue_css
+    panel = source[
+        source.find("def _render_job_queue_panel") : source.find("def _request_queue_delete")
+    ]
+    assert "_queue_confirm_pair(" in panel
+    assert "_confirm_button(" not in panel
+    pair = source[
+        source.find("def _queue_confirm_pair") : source.find("def _render_job_queue_panel")
+    ]
+    assert 'key=f"queue_confirm_row_{key}"' in pair
+    assert "st.columns(2)" in pair
+    assert 'width="stretch"' in pair
     queue_row = source[
         source.find("def _render_queue_job_row") : source.find("def _render_failed_strip")
     ]
+    title_at = queue_row.find('st.write(f"**{title}**')
+    cols_at = queue_row.find("st.columns(")
+    assert title_at != -1 and cols_at != -1 and title_at < cols_at
+    assert "[4, *([1] * n_actions)]" not in queue_row
+    armed = queue_row.find("delete_finished_{job_id}__confirm")
+    mixer = queue_row.find("Open in Mixer")
+    assert armed != -1 and mixer != -1 and armed < mixer
+    assert "return" in queue_row[armed:mixer]
+    assert "_queue_confirm_pair(" in queue_row
     assert "Open in Mixer" in queue_row
     assert "pause_job_" in queue_row
     assert "isolate_stop_ask_" in queue_row

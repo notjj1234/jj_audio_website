@@ -1970,6 +1970,42 @@ def apply_listen_picker_pending(session: MutableMapping[str, Any]) -> None:
         session[LISTEN_PICKER_KEY] = str(nxt)
 
 
+def wav_artifact_paths(artifacts: object) -> frozenset[str]:
+    """Normalized wav paths from a session or library artifact map.
+
+    Diagnostic JSON sidecars are ignored. Path case and separators are
+    normalized so a Windows rescan does not look like a stem-set change.
+    """
+    if not isinstance(artifacts, dict):
+        return frozenset()
+    found: set[str] = set()
+    for name, path in artifacts.items():
+        if str(name).endswith("_diagnostics"):
+            continue
+        text = str(path or "").strip()
+        if not text.lower().endswith(".wav"):
+            continue
+        found.add(os.path.normcase(text.replace("\\", "/")))
+    return frozenset(found)
+
+
+def refresh_open_mix_action(session: Mapping[str, Any], row: Mapping[str, Any]) -> str:
+    """How Refresh should update the loaded mix from its library row.
+
+    ``stems`` — wav path set changed; the caller may re-apply the row, which
+    resets mixer faders. ``title`` — only the display name changed; update
+    ``isolate_base_name`` and leave faders. ``unchanged`` — leave the mixer.
+    """
+    if wav_artifact_paths(session.get("isolate_artifacts")) != wav_artifact_paths(
+        row.get("artifacts")
+    ):
+        return "stems"
+    title = str(row.get("title") or "tracks")
+    if title != str(session.get("isolate_base_name") or ""):
+        return "title"
+    return "unchanged"
+
+
 def select_rehydrate_row(
     session: MutableMapping[str, Any],
     rows: list[dict[str, Any]],
