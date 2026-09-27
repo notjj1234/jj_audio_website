@@ -148,3 +148,49 @@ def test_mixer_live_metronome_hot_swap_without_full_reload():
     assert "steadyTimes1x" in clicks
     assert 'follow === "steady"' in clicks
 
+
+def test_mixer_playback_presets_and_youtube_frame_are_wired():
+    text = _mixer_main_ts()
+    assert 'data-preset="all"' in text
+    assert 'data-preset="karaoke"' in text
+    assert 'data-preset="acapella"' in text
+    assert 'data-preset="drumsBass"' in text
+    assert "Drums + Bass" in text
+    assert "presetSoloMap" in text
+    assert 'id !== "vocals" && id !== "metronome"' in text
+    assert "function videoNeedsSeek" in text
+    assert "youtubeVideoId" in text
+    assert "Hide video" in text
+    assert "Show video" in text
+    assert "Open on YouTube" in text
+    assert "controls: 1" in text
+    assert "fs: 1" in text
+    assert "localVideoUrl" in text
+    assert "mixer-video-wrap" in text
+    assert "wrap.hidden = !hasVideo || hideYoutubeVideo" in text
+    helper = text[text.find("const VIDEO_DRIFT_SEC") : text.find("function presetSoloMap")]
+    assert "0.4" in helper
+    assert "2000" in helper
+    assert "function videoNeedsSeek" in helper
+
+    def video_needs_seek(audio: float, video: float, now_ms: float, last_ms: float) -> bool:
+        if now_ms - last_ms < 2000:
+            return False
+        return abs(video - audio) > 0.4
+
+    assert video_needs_seek(10.0, 10.2, 5000, 0) is False
+    assert video_needs_seek(10.0, 10.5, 5000, 0) is True
+    assert video_needs_seek(10.0, 12.0, 1000, 0) is False
+
+
+def test_stem_mixer_accepts_optional_youtube_id():
+    from ui.stem_mixer_component import stem_mixer
+
+    params = inspect.signature(stem_mixer).parameters
+    assert "youtube_video_id" in params
+    assert params["youtube_video_id"].default is None
+    assert "hide_youtube_video" in params
+    assert params["hide_youtube_video"].default is False
+    assert "local_video_url" in params
+    assert params["local_video_url"].default is None
+

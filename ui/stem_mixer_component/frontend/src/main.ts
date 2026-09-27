@@ -537,6 +537,289 @@ let transportPending: "play" | "pause" | "stop" | null = null;
 let reportTimer: number | null = null;
 let lastPublished = "";
 
+type PlaybackPresetId = "all" | "karaoke" | "acapella" | "drumsBass" | "custom";
+let activePreset: PlaybackPresetId = "all";
+
+const VIDEO_DRIFT_SEC = 0.4;
+const VIDEO_RESYNC_COOLDOWN_MS = 2000;
+
+function videoNeedsSeek(
+  audioSec: number,
+  videoSec: number,
+  nowMs: number,
+  lastSeekMs: number
+): boolean {
+  if (nowMs - lastSeekMs < VIDEO_RESYNC_COOLDOWN_MS) return false;
+  return Math.abs(videoSec - audioSec) > VIDEO_DRIFT_SEC;
+}
+
+function presetSoloMap(
+  ids: string[],
+  preset: Exclude<PlaybackPresetId, "custom">
+): Record<string, boolean> | null {
+  if ((preset === "karaoke" || preset === "acapella") && !ids.includes("vocals")) {
+    return null;
+  }
+  const soloed: Record<string, boolean> = {};
+  for (const id of ids) soloed[id] = false;
+  if (preset === "all") return soloed;
+  if (preset === "acapella") {
+    soloed.vocals = true;
+    return soloed;
+  }
+  if (preset === "karaoke") {
+    for (const id of ids) {
+      if (id !== "vocals" && id !== "metronome") soloed[id] = true;
+    }
+    return soloed;
+  }
+  if (ids.includes("drums")) soloed.drums = true;
+  if (ids.includes("bass")) soloed.bass = true;
+  return soloed;
+}
+
+type YTPlayer = {
+  playVideo: () => void;
+  pauseVideo: () => void;
+  seekTo: (seconds: number, allowSeekAhead: boolean) => void;
+  getCurrentTime: () => number;
+  mute: () => void;
+  destroy: () => void;
+};
+
+let youtubeVideoId = "";
+let youtubeFallbackId = "";
+let localVideoUrl = "";
+let localVideoEl: HTMLVideoElement | null = null;
+let hideYoutubeVideo = false;
+let ytPlayer: YTPlayer | null = null;
+let ytMountedId = "";
+let videoSyncAt = 0;
+
+function ensureYoutubeApi(): Promise<void> {
+  const yt = (window as unknown as { YT?: { Player?: unknown } }).YT;
+  if (yt?.Player) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const w = window as unknown as { onYouTubeIframeAPIReady?: () => void };
+    const prev = w.onYouTubeIframeAPIReady;
+    w.onYouTubeIframeAPIReady = () => {
+      prev?.();
+      resolve();
+    };
+    if (!document.querySelector("script[data-youtube-iframe]")) {
+      const script = document.createElement("script");
+      script.src = "https://www.youtube.com/iframe_api";
+      script.dataset.youtubeIframe = "1";
+      script.onerror = () => reject(new Error("YouTube player failed to load"));
+      document.head.appendChild(script);
+    }
+  });
+}
+
+function destroyYoutubePlayer(): void {
+  try {
+    ytPlayer?.destroy();
+  } catch {
+    /* frame already gone; stems keep playing */
+  }
+  ytPlayer = null;
+  ytMountedId = "";
+}
+
+function destroyLocalVideo(): void {
+  if (!localVideoEl) return;
+  try {
+    localVideoEl.pause();
+    localVideoEl.removeAttribute("src");
+    localVideoEl.load();
+  } catch {
+    /* element already gone */
+  }
+  localVideoEl = null;
+}
+
+function showYoutubeFallback(): void {
+  youtubeFallbackId = youtubeVideoId;
+  destroyYoutubePlayer();
+  const slot = document.getElementById("yt-player-slot");
+  if (!slot || !youtubeVideoId) return;
+  const id = youtubeVideoId;
+  slot.replaceChildren();
+  const box = document.createElement("div");
+  box.className = "mixer-video-fallback";
+  const img = document.createElement("img");
+  img.alt = "YouTube thumbnail";
+  img.src = `https://i.ytimg.com/vi/${encodeURIComponent(id)}/hqdefault.jpg`;
+  const link = document.createElement("a");
+  link.href = `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = "Open on YouTube";
+  box.append(img, link);
+  slot.append(box);
+}
+
+function nudgeYoutubeToAudio(): void {
+  const t = engine.currentTime();
+  videoSyncAt = performance.now();
+  if (ytPlayer && !hideYoutubeVideo && youtubeVideoId) {
+    try {
+      ytPlayer.mute();
+      ytPlayer.seekTo(t, true);
+      if (engine.isPlaying()) ytPlayer.playVideo();
+      else ytPlayer.pauseVideo();
+    } catch {
+      /* picture failed; audio remains the clock */
+    }
+  }
+  if (localVideoEl && !hideYoutubeVideo && localVideoUrl && !youtubeVideoId) {
+    try {
+      localVideoEl.muted = true;
+      if (Math.abs(localVideoEl.currentTime - t) > VIDEO_DRIFT_SEC) {
+        localVideoEl.currentTime = t;
+      }
+      if (engine.isPlaying()) void localVideoEl.play();
+      else localVideoEl.pause();
+    } catch {
+      /* picture failed; audio remains the clock */
+    }
+  }
+}
+
+function mountLocalVideo(): void {
+  const slot = document.getElementById("yt-player-slot");
+  if (!slot || !localVideoUrl || hideYoutubeVideo || youtubeVideoId) {
+    destroyLocalVideo();
+    return;
+  }
+  if (localVideoEl && localVideoEl.dataset.src === localVideoUrl) return;
+  destroyYoutubePlayer();
+  destroyLocalVideo();
+  slot.replaceChildren();
+  const video = document.createElement("video");
+  video.className = "mixer-local-video";
+  video.controls = true;
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = "metadata";
+  video.src = localVideoUrl;
+  video.dataset.src = localVideoUrl;
+  video.addEventListener("play", () => {
+    if (!engine.isPlaying()) video.pause();
+  });
+  slot.append(video);
+  localVideoEl = video;
+  nudgeYoutubeToAudio();
+}
+
+function mountYoutubePlayer(): void {
+  const slot = document.getElementById("yt-player-slot");
+  if (!slot || !youtubeVideoId || hideYoutubeVideo) {
+    destroyYoutubePlayer();
+    return;
+  }
+  if (ytPlayer && ytMountedId === youtubeVideoId) return;
+  destroyYoutubePlayer();
+  slot.replaceChildren();
+  const holder = document.createElement("div");
+  holder.id = "yt-player";
+  slot.appendChild(holder);
+  const wanted = youtubeVideoId;
+  void ensureYoutubeApi()
+    .then(() => {
+      if (hideYoutubeVideo || youtubeVideoId !== wanted) return;
+      const YT = (window as unknown as {
+        YT?: {
+          Player: new (
+            el: string,
+            opts: Record<string, unknown>
+          ) => YTPlayer;
+        };
+      }).YT;
+      if (!YT?.Player || !document.getElementById("yt-player")) return;
+      ytPlayer = new YT.Player("yt-player", {
+        videoId: wanted,
+        playerVars: {
+          autoplay: 0,
+          mute: 1,
+          controls: 1,
+          disablekb: 1,
+          fs: 1,
+          modestbranding: 1,
+          rel: 0,
+          playsinline: 1,
+        },
+        events: {
+          onReady: (ev: { target: YTPlayer }) => {
+            try {
+              ev.target.mute();
+              ev.target.pauseVideo();
+            } catch {
+              /* audio still plays */
+            }
+            nudgeYoutubeToAudio();
+          },
+          onStateChange: (ev: { data: number }) => {
+            if (ev.data === 1 && !engine.isPlaying()) {
+              try {
+                ytPlayer?.pauseVideo();
+              } catch {
+                /* ignore */
+              }
+            }
+          },
+          onError: () => {
+            showYoutubeFallback();
+          },
+        },
+      });
+      ytMountedId = wanted;
+    })
+    .catch(() => {
+      showYoutubeFallback();
+    });
+}
+
+function updateYoutubeChrome(): void {
+  const wrap = document.getElementById("mixer-video-wrap");
+  const showBtn = document.getElementById("btn-show-video");
+  const hasVideo = Boolean(youtubeVideoId || localVideoUrl);
+  if (wrap) wrap.hidden = !hasVideo || hideYoutubeVideo;
+  if (showBtn) showBtn.hidden = !hasVideo || !hideYoutubeVideo;
+}
+
+function mountPicture(): void {
+  if (youtubeVideoId) mountYoutubePlayer();
+  else mountLocalVideo();
+}
+
+function applyYoutubeArgs(id: string, hide: boolean, videoUrl = ""): void {
+  const nextId = (id || "").trim();
+  const nextUrl = nextId ? "" : (videoUrl || "").trim();
+  const nextHide = !(nextId || nextUrl) || hide;
+  if (nextId !== youtubeVideoId || nextHide) youtubeFallbackId = "";
+  const changed =
+    nextId !== youtubeVideoId ||
+    nextUrl !== localVideoUrl ||
+    nextHide !== hideYoutubeVideo;
+  youtubeVideoId = nextId;
+  localVideoUrl = nextUrl;
+  hideYoutubeVideo = nextHide;
+  updateYoutubeChrome();
+  if (
+    !changed &&
+    (ytPlayer || localVideoEl || (youtubeFallbackId && youtubeFallbackId === nextId))
+  ) {
+    return;
+  }
+  if (nextHide || (!nextId && !nextUrl)) {
+    destroyYoutubePlayer();
+    destroyLocalVideo();
+    return;
+  }
+  mountPicture();
+}
+
 const SLEEP_RESUME_HINT = "Tap Play to resume after sleep";
 
 engine.setSoftPauseCallback(() => {
@@ -590,6 +873,7 @@ function statePayload(): string {
     soloed: state.soloed,
     masterVolumeDb: state.masterVolumeDb,
     metronomeOptions: metroConfig ? metroOptions : null,
+    hideYoutubeVideo: hideYoutubeVideo,
   });
 }
 
@@ -613,6 +897,9 @@ function reportState(immediate = false): void {
     };
     if (metroConfig) {
       value.metronomeOptions = { ...metroOptions };
+    }
+    if (youtubeVideoId || localVideoUrl) {
+      value.hideYoutubeVideo = hideYoutubeVideo;
     }
     Streamlit.setComponentValue(value);
   };
@@ -653,6 +940,7 @@ function applyTransport(): void {
       .stop()
       .finally(() => {
         transportBusy = false;
+        nudgeYoutubeToAudio();
         if (transportPending) applyTransport();
         else saveTransport();
       });
@@ -681,6 +969,7 @@ function applyTransport(): void {
     })
     .finally(() => {
       transportBusy = false;
+      nudgeYoutubeToAudio();
       if (transportPending) {
         applyTransport();
         return;
@@ -753,11 +1042,24 @@ function renderUI(theme?: Theme): void {
         </label>
       </div>
       <div class="mixer-master">
+        <div class="mixer-presets">
+          <button type="button" class="ghost" data-preset="all">All</button>
+          <button type="button" class="ghost" data-preset="karaoke">Karaoke</button>
+          <button type="button" class="ghost" data-preset="acapella">Acapella</button>
+          <button type="button" class="ghost" data-preset="drumsBass">Drums + Bass</button>
+        </div>
         <button type="button" class="ghost" id="btn-muteall">Mute all</button>
         <button type="button" class="ghost" id="btn-reset">Reset mix</button>
         <button type="button" class="ghost" id="btn-clearsolo" hidden>Clear solo</button>
+        <button type="button" class="ghost" id="btn-show-video" hidden>Show video</button>
       </div>
-      <div class="mixer-stems" id="stems"></div>
+      <div class="mixer-stage">
+        <div class="mixer-video-wrap" id="mixer-video-wrap" hidden>
+          <div class="mixer-video" id="yt-player-slot"></div>
+          <button type="button" class="ghost" id="btn-hide-video">Hide video</button>
+        </div>
+        <div class="mixer-stems" id="stems"></div>
+      </div>
     </div>
   `;
 
@@ -828,6 +1130,7 @@ function renderUI(theme?: Theme): void {
     wantPlaying = true;
     setPlayPauseLabel(true);
     void engine.restart().then(() => {
+      nudgeYoutubeToAudio();
       if (engine.isPlaying()) clearSleepResumeHint();
       saveTransport();
     });
@@ -836,6 +1139,7 @@ function renderUI(theme?: Theme): void {
   document.getElementById("btn-muteall")!.onclick = () => {
     // If every stem is already muted, Unmute All; otherwise Mute All.
     const target = !allMuted();
+    activePreset = "custom";
     for (const stem of stemInfos) {
       state.muted[stem.id] = target;
       // Mute and solo are mutually exclusive per stem.
@@ -854,6 +1158,7 @@ function renderUI(theme?: Theme): void {
       state.volumesDb[stem.id] = DB_DEFAULT;
     }
     state.masterVolumeDb = DB_DEFAULT;
+    activePreset = "all";
     stemsEl.querySelectorAll<HTMLInputElement>(".vol-slider").forEach((el) => {
       el.value = String(DB_DEFAULT);
       const label = el.parentElement?.querySelector(".vol-val");
@@ -873,19 +1178,50 @@ function renderUI(theme?: Theme): void {
     for (const stem of stemInfos) {
       state.soloed[stem.id] = false;
     }
+    activePreset = "all";
     applyStateGains();
     reportState();
     updateStemChrome();
     updateMuteAllLabel();
   };
+
+  document.querySelectorAll<HTMLButtonElement>(".mixer-presets button").forEach((el) => {
+    el.onclick = () => {
+      const preset = el.dataset.preset as Exclude<PlaybackPresetId, "custom">;
+      const soloed = presetSoloMap(stemInfos.map((s) => s.id), preset);
+      if (!soloed) return;
+      state.soloed = soloed;
+      activePreset = preset;
+      applyStateGains();
+      reportState();
+      updateStemChrome();
+      updateMuteAllLabel();
+    };
+  });
+
+  document.getElementById("btn-hide-video")!.onclick = () => {
+    hideYoutubeVideo = true;
+    destroyYoutubePlayer();
+    destroyLocalVideo();
+    updateYoutubeChrome();
+    reportState(true);
+  };
+  document.getElementById("btn-show-video")!.onclick = () => {
+    hideYoutubeVideo = false;
+    updateYoutubeChrome();
+    mountPicture();
+    reportState(true);
+  };
   updateMuteAllLabel();
   updateStemChrome();
+  updateYoutubeChrome();
 
   const seek = document.getElementById("seek") as HTMLInputElement;
   seek.oninput = () => {
     const dur = engine.getDuration() || 1;
     const t = (Number(seek.value) / 1000) * dur;
     void engine.seek(t);
+    nudgeYoutubeToAudio();
     updatePlayheads(t, dur);
   };
 
@@ -928,6 +1264,7 @@ function renderUI(theme?: Theme): void {
     el.onclick = () => {
       const id = el.dataset.id!;
       const muted = !state.muted[id];
+      activePreset = "custom";
       state.muted[id] = muted;
       if (muted) state.soloed[id] = false;
       applyStateGains();
@@ -941,6 +1278,7 @@ function renderUI(theme?: Theme): void {
     el.onclick = () => {
       const id = el.dataset.id!;
       const soloed = !state.soloed[id];
+      activePreset = "custom";
       state.soloed[id] = soloed;
       if (soloed) state.muted[id] = false;
       applyStateGains();
@@ -966,6 +1304,25 @@ function renderUI(theme?: Theme): void {
       }
     }
     updatePlayheads(t, dur);
+    if (playing && !hideYoutubeVideo && (ytPlayer || localVideoEl)) {
+      const now = performance.now();
+      let videoSec = t;
+      try {
+        if (ytPlayer) videoSec = ytPlayer.getCurrentTime();
+        else if (localVideoEl) videoSec = localVideoEl.currentTime;
+      } catch {
+        videoSec = t;
+      }
+      if (videoNeedsSeek(t, videoSec, now, videoSyncAt)) {
+        videoSyncAt = now;
+        try {
+          if (ytPlayer) ytPlayer.seekTo(t, true);
+          else if (localVideoEl) localVideoEl.currentTime = t;
+        } catch {
+          /* audio stays the clock */
+        }
+      }
+    }
     if (playing) clearSleepResumeHint();
     if (!transportBusy && transportPending === null) {
       wantPlaying = playing;
@@ -1007,9 +1364,22 @@ function updateMuteAllLabel(): void {
   if (btn) btn.textContent = allMuted() ? "Unmute all" : "Mute all";
 }
 
+function updatePresetChrome(): void {
+  const ids = stemInfos.map((s) => s.id);
+  document.querySelectorAll<HTMLButtonElement>(".mixer-presets button").forEach((el) => {
+    const preset = el.dataset.preset as Exclude<PlaybackPresetId, "custom">;
+    const available = presetSoloMap(ids, preset) !== null;
+    el.disabled = !available;
+    const on = available && activePreset === preset;
+    el.classList.toggle("active", on);
+    el.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+}
+
 function updateStemChrome(): void {
   const clearBtn = document.getElementById("btn-clearsolo");
   if (clearBtn) clearBtn.hidden = !anySoloed();
+  updatePresetChrome();
 
   document.querySelectorAll<HTMLElement>(".stem-row").forEach((row) => {
     const id = row.dataset.id!;
@@ -1076,6 +1446,7 @@ function seekFromWavePointer(el: HTMLElement, clientX: number): void {
   const ratio = rect.width > 0 ? (clientX - rect.left) / rect.width : 0;
   const t = Math.max(0, Math.min(1, ratio)) * dur;
   void engine.seek(t);
+  nudgeYoutubeToAudio();
   updatePlayheads(t, dur);
 }
 
@@ -1391,6 +1762,9 @@ async function onRender(event: Event): Promise<void> {
     initialMasterVolumeDb?: number;
     trackTitle?: string;
     metronome?: unknown;
+    youtubeVideoId?: string;
+    hideYoutubeVideo?: boolean;
+    localVideoUrl?: string;
   };
 
   const stems = args.stems ?? [];
@@ -1405,6 +1779,11 @@ async function onRender(event: Event): Promise<void> {
 
   if (key === lastStemKey) {
     softUpdateStemDownloads(stems);
+    applyYoutubeArgs(
+      args.youtubeVideoId ?? "",
+      Boolean(args.hideYoutubeVideo),
+      args.localVideoUrl ?? ""
+    );
     scheduleFrameHeight();
     return;
   }
@@ -1446,7 +1825,18 @@ async function onRender(event: Event): Promise<void> {
     if (state.muted[s.id] === undefined) state.muted[s.id] = s.id === "metronome";
     if (state.soloed[s.id] === undefined) state.soloed[s.id] = false;
   }
+  activePreset = "all";
+  destroyYoutubePlayer();
+  destroyLocalVideo();
+  youtubeVideoId = "";
+  localVideoUrl = "";
+  hideYoutubeVideo = true;
   renderUI(data.theme);
+  applyYoutubeArgs(
+    String(args.youtubeVideoId ?? ""),
+    Boolean(args.hideYoutubeVideo),
+    String(args.localVideoUrl ?? "")
+  );
   const st = status();
   if (st) st.textContent = "Loading stems…";
   const liveBuffers: Record<string, (ctx: AudioContext, durationSec: number) => AudioBuffer> =

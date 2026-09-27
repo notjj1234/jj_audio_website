@@ -58,6 +58,9 @@ def stem_mixer(
     initial_master_volume_db: float = 0.0,
     track_title: str = "",
     metronome: dict[str, Any] | None = None,
+    youtube_video_id: str | None = None,
+    hide_youtube_video: bool = False,
+    local_video_url: str | None = None,
     key: str | None = None,
 ) -> dict[str, Any] | None:
     """
@@ -89,6 +92,9 @@ def stem_mixer(
         initialMasterVolumeDb=float(initial_master_volume_db),
         trackTitle=track_title,
         metronome=metronome,
+        youtubeVideoId=(youtube_video_id or "").strip(),
+        hideYoutubeVideo=bool(hide_youtube_video),
+        localVideoUrl=(local_video_url or "").strip(),
         key=key,
         default=None,
     )

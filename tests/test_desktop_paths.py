@@ -354,6 +354,10 @@ def test_server_role_passes_loopback_flags_to_streamlit(tmp_path, monkeypatch):
     assert "--server.port=8502" in argv
     assert "--server.enableXsrfProtection=true" in argv
     assert "--client.toolbarMode=viewer" in argv
+    assert "--client.toolbarMode=minimal" not in argv
+    about = (Path(__file__).resolve().parents[1] / "ui" / "app.py").read_text(encoding="utf-8")
+    assert "separates songs into stems on this computer" in about
+    assert "Nothing is sent to an account." in about
     assert "--server.fileWatcherType=none" in argv
     assert "--server.runOnSave=false" in argv
 

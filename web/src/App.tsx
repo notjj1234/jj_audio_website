@@ -1,10 +1,20 @@
-import { NavLink, Navigate, Outlet, Route, Routes } from "react-router-dom";
+import { NavLink, Navigate, Outlet, Route, Routes, useNavigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "./auth";
 import { IsolatePage } from "./pages/IsolatePage";
+import { LoginPage } from "./pages/LoginPage";
 import { TabPage } from "./pages/TabPage";
 
 function Shell() {
-  const { loading, sessionError, retrySession } = useAuth();
+  const { loading, sessionError, retrySession, email, logout } = useAuth();
+  const navigate = useNavigate();
+
+  const handleAuthClick = () => {
+    if (email) {
+      void logout();
+    } else {
+      void navigate("/login");
+    }
+  };
 
   if (loading) {
     return (
@@ -42,6 +52,16 @@ function Shell() {
           >
             Isolate
           </NavLink>
+          <span className="user-info">
+            {email ? `Signed in as ${email}` : "Anonymous"}
+          </span>
+          <button
+            type="button"
+            className="secondary"
+            onClick={handleAuthClick}
+          >
+            {email ? "Sign out" : "Sign in"}
+          </button>
           <a
             href="https://github.com/notjj1234/jj_audio_website/issues"
             target="_blank"
@@ -63,6 +83,7 @@ export function App() {
     <AuthProvider>
       <Routes>
         <Route element={<Shell />}>
+          <Route path="/login" element={<LoginPage />} />
           <Route path="/tab" element={<TabPage />} />
           <Route path="/isolate" element={<IsolatePage />} />
           <Route path="*" element={<Navigate to="/isolate" replace />} />

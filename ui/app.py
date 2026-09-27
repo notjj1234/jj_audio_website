@@ -71,7 +71,8 @@ _MENU_ITEMS = {
     "Report a bug": None,
     "About": (
         f"# {_WINDOW_PRODUCT} {_APP_VERSION}\n\n"
-        "Demo. Processing stays on this computer. No account."
+        f"{_WINDOW_PRODUCT} separates songs into stems on this computer. "
+        "Nothing is sent to an account."
     ),
 }
 _page_config: dict[str, object] = {

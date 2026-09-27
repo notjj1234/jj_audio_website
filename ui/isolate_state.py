@@ -988,6 +988,38 @@ def youtube_video_id(url: str) -> str | None:
     return None
 
 
+_LOCAL_VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".webm", ".mkv"})
+
+
+def mixer_local_video_path(run_dir: Path | None) -> Path | None:
+    """Uploaded source video copied beside the stems, if this run has one."""
+    if run_dir is None or not run_dir.is_dir():
+        return None
+    found = [
+        path
+        for path in run_dir.iterdir()
+        if path.is_file()
+        and path.stem == "source_video"
+        and path.suffix.lower() in _LOCAL_VIDEO_SUFFIXES
+    ]
+    return found[0] if found else None
+
+
+def mixer_youtube_video_id(session: Mapping[str, Any]) -> str | None:
+    """YouTube id for the loaded mix, or None for a file or a missing link."""
+    kind = infer_source_kind(
+        source_kind=session.get("isolate_source_kind"),
+        source_fingerprint=session.get("isolate_results_source_fp"),
+    )
+    if kind != SOURCE_KIND_YOUTUBE:
+        return None
+    fingerprint = str(session.get("isolate_results_source_fp") or "")
+    prefix = "youtube:"
+    if not fingerprint.startswith(prefix):
+        return None
+    return youtube_video_id(fingerprint[len(prefix) :])
+
+
 def youtube_label_from_url(url: str) -> str:
     """Default Output name from a pasted URL (id until the file is downloaded)."""
     return youtube_video_id(url) or "youtube_audio"

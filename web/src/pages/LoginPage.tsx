@@ -10,7 +10,7 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  if (!loading && email) return <Navigate to="/tab" replace />;
+  if (!loading && email) return <Navigate to="/isolate" replace />;
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -18,7 +18,7 @@ export function LoginPage() {
     setError(null);
     try {
       await login(user, password);
-      navigate("/tab");
+      navigate("/isolate");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

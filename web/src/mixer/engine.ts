@@ -76,6 +76,60 @@ export function clearSolo(state: MixerState): MixerState {
   return { ...state, soloed: {} };
 }
 
+/** Playback-only mix shapes. They change solo flags and leave volume and mute alone. */
+export type PlaybackPreset = "all" | "karaoke" | "acapella" | "drumsBass";
+
+const PRESET_VOCALS = "vocals";
+
+export function playbackPresetAvailable(
+  stemIds: string[],
+  preset: PlaybackPreset
+): boolean {
+  if (preset === "karaoke" || preset === "acapella") {
+    return stemIds.includes(PRESET_VOCALS);
+  }
+  return true;
+}
+
+/**
+ * Solo map for a playback preset.
+ * Karaoke solos every stem except vocals (the click track stays unsoloed).
+ * Returns null when the preset needs vocals and this mix has none.
+ */
+export function presetSoloMap(
+  stemIds: string[],
+  preset: PlaybackPreset
+): Record<string, boolean> | null {
+  if (!playbackPresetAvailable(stemIds, preset)) return null;
+  const soloed: Record<string, boolean> = {};
+  for (const id of stemIds) soloed[id] = false;
+  if (preset === "all") return soloed;
+  if (preset === "acapella") {
+    soloed[PRESET_VOCALS] = true;
+    return soloed;
+  }
+  if (preset === "karaoke") {
+    for (const id of stemIds) {
+      if (id !== PRESET_VOCALS && id !== "metronome") soloed[id] = true;
+    }
+    return soloed;
+  }
+  if (stemIds.includes("drums")) soloed.drums = true;
+  if (stemIds.includes("bass")) soloed.bass = true;
+  return soloed;
+}
+
+/** Apply a preset without touching volumes, mute, or playback position. */
+export function applyPlaybackPreset(
+  stemIds: string[],
+  state: MixerState,
+  preset: PlaybackPreset
+): MixerState | null {
+  const soloed = presetSoloMap(stemIds, preset);
+  if (!soloed) return null;
+  return { ...state, soloed };
+}
+
 /** Clear all mute and solo flags (volumes unchanged). */
 export function resetMuteSolo(stemIds: string[], state: MixerState): MixerState {
   const muted: Record<string, boolean> = {};

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   allMuted,
   anySoloed,
+  applyPlaybackPreset,
   clearSolo,
   dbToLinear,
   effectiveGains,
@@ -76,6 +77,51 @@ describe("mixer helpers", () => {
     expect(gains.c).toBe(0);
     expect(isAudible("b", ids, state)).toBe(true);
     expect(isAudible("a", ids, state)).toBe(false);
+  });
+
+  it("playback presets change solo only", () => {
+    const ids = ["vocals", "drums", "bass", "guitar", "metronome"];
+    const state = {
+      volumesDb: { vocals: 3, drums: -2 },
+      muted: { vocals: true, metronome: true },
+      soloed: { guitar: true },
+      masterVolumeDb: 1,
+    };
+    const karaoke = applyPlaybackPreset(ids, state, "karaoke");
+    expect(karaoke).not.toBeNull();
+    expect(karaoke!.volumesDb).toBe(state.volumesDb);
+    expect(karaoke!.muted).toBe(state.muted);
+    expect(karaoke!.masterVolumeDb).toBe(1);
+    expect(karaoke!.soloed).toEqual({
+      vocals: false,
+      drums: true,
+      bass: true,
+      guitar: true,
+      metronome: false,
+    });
+    const acapella = applyPlaybackPreset(ids, state, "acapella");
+    expect(acapella!.soloed.vocals).toBe(true);
+    expect(acapella!.soloed.drums).toBe(false);
+    expect(acapella!.muted).toBe(state.muted);
+    const rhythm = applyPlaybackPreset(ids, state, "drumsBass");
+    expect(rhythm!.soloed).toEqual({
+      vocals: false,
+      drums: true,
+      bass: true,
+      guitar: false,
+      metronome: false,
+    });
+    const all = applyPlaybackPreset(ids, state, "all");
+    expect(Object.values(all!.soloed).every((on) => on === false)).toBe(true);
+    expect(all!.muted.vocals).toBe(true);
+
+    const noVocals = ["drums", "bass"];
+    expect(applyPlaybackPreset(noVocals, state, "karaoke")).toBeNull();
+    expect(applyPlaybackPreset(noVocals, state, "acapella")).toBeNull();
+    expect(applyPlaybackPreset(noVocals, state, "drumsBass")!.soloed).toEqual({
+      drums: true,
+      bass: true,
+    });
   });
 
   it("setAllMuted and clearSolo build new state without mutating", () => {

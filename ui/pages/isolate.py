@@ -157,6 +157,8 @@ from ui.isolate_state import (
     sync_demucs_compute_defaults,
     listen_picker_default,
     load_persist_isolate_user_id,
+    mixer_local_video_path,
+    mixer_youtube_video_id,
     migrate_track_options,
     mixer_component_key,
     ISOLATE_METRO_ACCENT_KEY,
@@ -241,6 +243,7 @@ from audio_to_tab.ingest import (  # noqa: E402
     download_youtube_audio,
     format_youtube_duration,
     is_youtube_url,
+    normalize_audio,
     search_youtube_videos,
 )
 from audio_to_tab.isolate import (  # noqa: E402
@@ -377,8 +380,8 @@ def _download_youtube_with_status(url: str, *, title: str) -> str | None:
 def _youtube_search_dialog() -> None:
     """Centered modal: search public videos, pick one to fill the URL and auto-download."""
     st.caption(
-        "Find a public video and click **Use**. Audio downloads so you can "
-        "preview a section or separate the whole track."
+        "Find a public video. **Use** downloads it so you can preview a section. "
+        "**Separate** queues the outcome already chosen on Home."
     )
     with st.form("isolate_youtube_search_form", clear_on_submit=False, border=False):
         search_q = st.text_input(
@@ -460,7 +463,7 @@ def _youtube_search_dialog() -> None:
             thumb = str(hit.get("thumbnail_url") or "").strip()
             meta_bits = [b for b in (channel, dur) if b]
             meta = " · ".join(meta_bits)
-            row = st.columns([1, 3, 1], vertical_alignment="center")
+            row = st.columns([1, 2.6, 1.4], vertical_alignment="center")
             with row[0]:
                 if thumb:
                     st.image(thumb, width=120)
@@ -489,6 +492,23 @@ def _youtube_search_dialog() -> None:
                     st.session_state["isolate_flash"] = (
                         f"Downloaded **{title}**. Pick a section or separate tracks."
                     )
+                    st.rerun()
+                if st.button(
+                    "Separate",
+                    key=f"isolate_youtube_separate_{vid}",
+                    disabled=not url or busy,
+                    width="stretch",
+                    help="Download this track and queue the outcome already chosen on Home.",
+                ):
+                    queue_youtube_url(st.session_state, url, title=title)
+                    st.session_state.pop("isolate_youtube_search_error", None)
+                    err = _download_youtube_with_status(url, title=title)
+                    if err:
+                        st.session_state["isolate_youtube_search_error"] = err
+                        st.rerun()
+                    _close_youtube_search_dialog()
+                    st.session_state.pop(ISOLATE_YOUTUBE_AUTO_DOWNLOAD_KEY, None)
+                    st.session_state["isolate_search_enqueue"] = True
                     st.rerun()
             with st.expander(
                 "Preview",
@@ -1058,6 +1078,8 @@ def _render_live_mixer(
     key_src = str(run_dir.resolve()) if run_dir is not None else _artifact_fingerprint(stem_paths)
     mixer_key = mixer_component_key(key_src)
     metro = _metronome_payload_for_mixer(run_dir)
+    video_id = mixer_youtube_video_id(st.session_state)
+    local_url = None if video_id else _local_mixer_video_url(run_dir)
     return stem_mixer(
         stems_arg,
         initial_volumes_db={n: float(volumes.get(n, DB_DEFAULT)) for n in stem_names},
@@ -1068,6 +1090,9 @@ def _render_live_mixer(
         initial_master_volume_db=master_db,
         track_title=track_title,
         metronome=metro,
+        youtube_video_id=video_id,
+        hide_youtube_video=bool(st.session_state.get("isolate_hide_youtube_video")),
+        local_video_url=local_url,
         key=mixer_key,
     )
 
@@ -1871,6 +1896,65 @@ def _speed_preset_radio_label(preset_id: str) -> str:
     return SPEED_PRESETS[preset_id]["label"]
 
 
+_VIDEO_UPLOAD_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv"}
+_HOME_UPLOAD_TYPES = [
+    *AUDIO_UPLOAD_TYPES,
+    "video/mp4",
+    "video/quicktime",
+    "video/webm",
+    "video/x-matroska",
+    ".mp4",
+    ".mov",
+    ".webm",
+    ".mkv",
+]
+_VIDEO_MEDIA_TYPES = {
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+    ".mkv": "video/x-matroska",
+}
+
+
+def _local_mixer_video_url(run_dir: Path | None) -> str | None:
+    """Browser URL for a video copied into this run. Audio-only runs return None."""
+    video = mixer_local_video_path(run_dir)
+    if video is None:
+        return None
+    try:
+        from streamlit.runtime import get_instance
+
+        runtime = get_instance()
+        if runtime is None:
+            return None
+        return runtime.media_file_mgr.add(
+            str(video.resolve()),
+            _VIDEO_MEDIA_TYPES.get(video.suffix.lower(), "video/mp4"),
+            f"isolate.video.{video.name}",
+            file_name=video.name,
+        )
+    except Exception:
+        logger.warning("Could not register mixer video %s", video, exc_info=True)
+        return None
+
+
+def _extract_uploaded_audio(uploaded: object) -> tuple[Path | None, str | None]:
+    """Save an upload. Video files become wav through the existing ffmpeg normalizer."""
+    path = save_upload(uploaded)
+    if path.suffix.lower() not in _VIDEO_UPLOAD_SUFFIXES:
+        st.session_state.pop("isolate_pending_video_path", None)
+        return path, None
+    st.session_state["isolate_pending_video_path"] = str(path)
+    wav = path.with_name(f"{path.stem}.extracted.wav")
+    try:
+        audio = normalize_audio(path, wav)
+    except Exception as exc:
+        wav.unlink(missing_ok=True)
+        st.session_state.pop("isolate_pending_video_path", None)
+        return None, str(exc)
+    return audio, None
+
+
 def _ensure_pending_audio(uploaded: object) -> Path | None:
     """Save upload to disk when fingerprint changes so duration/preview work."""
     fp = upload_fingerprint(uploaded)
@@ -1885,7 +1969,12 @@ def _ensure_pending_audio(uploaded: object) -> Path | None:
         pending_path_exists=pending_exists,
     ):
         if uploaded is not None:
-            path = save_upload(uploaded)
+            path, err = _extract_uploaded_audio(uploaded)
+            if err or path is None:
+                st.session_state.pop("isolate_pending_audio_path", None)
+                st.session_state.pop("isolate_pending_fp", None)
+                st.error(err or "Could not read this file.")
+                return None
             st.session_state["isolate_pending_audio_path"] = str(path)
             st.session_state["isolate_pending_fp"] = fp
             return path
@@ -2188,8 +2277,9 @@ def _render_separation_controls() -> dict:
     persist = _persist_kwargs()
 
     uploaded = st.file_uploader(
-        "Upload MP3 / WAV / FLAC / M4A",
-        type=AUDIO_UPLOAD_TYPES,
+        "Upload audio or video",
+        type=_HOME_UPLOAD_TYPES,
+        help="MP3, WAV, FLAC, M4A, MP4, MOV, WEBM, or MKV. Video audio is extracted on this computer.",
         key=f"isolate_upload_{st.session_state.get('isolate_upload_key', 0)}",
     )
     _sync_upload_output_name(uploaded)
@@ -3242,6 +3332,10 @@ def _mixer_and_downloads_fragment(
             st.session_state["isolate_master_volume_db"] = float(
                 mixer_state["masterVolumeDb"]
             )
+        if "hideYoutubeVideo" in mixer_state:
+            st.session_state["isolate_hide_youtube_video"] = bool(
+                mixer_state["hideYoutubeVideo"]
+            )
         _sync_metronome_options_from_mixer(
             mixer_state, run_dir=run_dir, stem_paths=selected_stem_paths
         )
@@ -3451,6 +3545,7 @@ def _resolve_audio_for_job(choice: dict) -> tuple[Path | None, str | None]:
             st.session_state["isolate_pending_audio_path"] = str(path)
             st.session_state["isolate_pending_fp"] = f"youtube:{youtube_url}"
             st.session_state["isolate_upload_fp"] = f"youtube:{youtube_url}"
+            st.session_state.pop("isolate_pending_video_path", None)
             new_name = apply_youtube_output_name_sync(
                 st.session_state,
                 downloaded_stem=path.stem,
@@ -3469,7 +3564,9 @@ def _resolve_audio_for_job(choice: dict) -> tuple[Path | None, str | None]:
     if uploaded and pending and Path(pending).exists():
         return Path(pending), None
     if uploaded:
-        path = save_upload(uploaded)
+        path, err = _extract_uploaded_audio(uploaded)
+        if err or path is None:
+            return None, err or "Could not read this file."
         st.session_state["isolate_pending_audio_path"] = str(path)
         fp = upload_fingerprint(uploaded)
         if fp:
@@ -3480,6 +3577,24 @@ def _resolve_audio_for_job(choice: dict) -> tuple[Path | None, str | None]:
     if choice.get("audio_path") and Path(choice["audio_path"]).exists():
         return Path(choice["audio_path"]), None
     return None, None
+
+
+def _copy_source_video_into_run(output_dir: Path) -> None:
+    """Keep an uploaded video beside the stems so the mixer can play it muted."""
+    fp = str(st.session_state.get("isolate_pending_fp") or "")
+    if fp.startswith("youtube:"):
+        return
+    raw = st.session_state.get("isolate_pending_video_path")
+    if not raw:
+        return
+    src = Path(str(raw))
+    if not src.is_file() or src.suffix.lower() not in _VIDEO_UPLOAD_SUFFIXES:
+        return
+    dest = output_dir / f"source_video{src.suffix.lower()}"
+    try:
+        shutil.copy2(src, dest)
+    except OSError as exc:
+        logger.warning("Could not keep the source video for the mixer: %s", exc)
 
 
 def _enqueue_confirmed_job(choice: dict, audio_path: Path) -> None:
@@ -3573,6 +3688,7 @@ def _enqueue_confirmed_job(choice: dict, audio_path: Path) -> None:
         st.session_state.pop("isolate_clip_length", None)
 
     output_dir = run_output_dir()
+    _copy_source_video_into_run(output_dir)
     source_fp = st.session_state.get("isolate_pending_fp") or st.session_state.get("isolate_upload_fp")
     staged_before = st.session_state.get("isolate_pending_audio_path")
     staged_fp = str(source_fp) if source_fp else None
@@ -4096,6 +4212,27 @@ def _close_mix_tab(rows: list[dict], tab_id: str) -> None:
     _rerun_scroll_top()
 
 
+def _try_enqueue_choice(choice: dict) -> None:
+    """Queue the current Home form. Same checks as Separate tracks."""
+    if choice.get("error"):
+        st.error(choice["error"])
+        return
+    if choice.get("max_duration_sec") is not None and choice["max_duration_sec"] < MIN_REGION_SEC:
+        st.error(f"Section must be at least {MIN_REGION_SEC:.0f} seconds.")
+        return
+    if not _has_source_for_job(choice):
+        st.error("Upload an audio file or enter a YouTube URL.")
+        return
+    audio_path, resolve_error = _resolve_audio_for_job(choice)
+    if resolve_error:
+        st.error(resolve_error)
+        return
+    if audio_path is None:
+        st.error("Upload an audio file or enter a YouTube URL.")
+        return
+    _enqueue_confirmed_job(choice, audio_path)
+
+
 def _has_source_for_job(choice: dict) -> bool:
     uploaded = choice.get("uploaded")
     return bool(
@@ -4114,6 +4251,8 @@ def _has_source_for_job(choice: dict) -> bool:
 
 def _render_new_workspace(demucs_ok: bool) -> None:
     choice = _render_separation_controls()
+    if st.session_state.pop("isolate_search_enqueue", False):
+        _try_enqueue_choice(choice)
     # Jobs run one at a time. Saying "Separate tracks" while one is already
     # running promises something immediate and then silently queues instead.
     busy = separation_in_progress()
@@ -4125,20 +4264,7 @@ def _render_new_workspace(demucs_ok: bool) -> None:
         disabled=not demucs_ok,
         key="isolate_separate",
     ):
-        if choice.get("error"):
-            st.error(choice["error"])
-        elif choice.get("max_duration_sec") is not None and choice["max_duration_sec"] < MIN_REGION_SEC:
-            st.error(f"Section must be at least {MIN_REGION_SEC:.0f} seconds.")
-        elif not _has_source_for_job(choice):
-            st.error("Upload an audio file or enter a YouTube URL.")
-        else:
-            audio_path, resolve_error = _resolve_audio_for_job(choice)
-            if resolve_error:
-                st.error(resolve_error)
-            elif audio_path is None:
-                st.error("Upload an audio file or enter a YouTube URL.")
-            else:
-                _enqueue_confirmed_job(choice, audio_path)
+        _try_enqueue_choice(choice)
     card = str(st.session_state.get(OUTCOME_CARD_KEY) or DEFAULT_OUTCOME_CARD)
     if card in OUTCOME_CARDS:
         outcome_label = str(OUTCOME_CARDS[card]["label"])

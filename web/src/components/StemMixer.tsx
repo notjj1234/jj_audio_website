@@ -6,13 +6,16 @@ import {
   StemMixerEngine,
   allMuted,
   anySoloed,
+  applyPlaybackPreset,
   clearSolo,
   defaultMuted,
   effectiveGains,
   isAudible,
+  playbackPresetAvailable,
   resetMuteSolo,
   setAllMuted,
   type MixerState,
+  type PlaybackPreset,
   type StemInfo,
 } from "../mixer/engine";
 
@@ -38,6 +41,7 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
   });
   const [mixError, setMixError] = useState<string | null>(null);
   const [mixBusy, setMixBusy] = useState(false);
+  const [preset, setPreset] = useState<PlaybackPreset | "custom">("all");
 
   const stemIds = useMemo(() => stems.map((s) => s.id), [stems]);
   const stemKey = useMemo(
@@ -65,6 +69,7 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
       next.muted[s.id] = defaultMuted(s.id);
       next.soloed[s.id] = false;
     }
+    setPreset("all");
     setState(next);
     setStatus("Loading stems…");
     let cancelled = false;
@@ -118,6 +123,7 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
   };
 
   const toggleMute = (id: string) => {
+    setPreset("custom");
     const muted = !state.muted[id];
     apply({
       ...state,
@@ -127,6 +133,7 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
   };
 
   const toggleSolo = (id: string) => {
+    setPreset("custom");
     const soloed = !state.soloed[id];
     apply({
       ...state,
@@ -135,8 +142,29 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
     });
   };
 
-  const muteAll = () => apply(setAllMuted(stemIds, clearSolo(state), true));
-  const unmuteAll = () => apply(setAllMuted(stemIds, state, false));
+  const applyPreset = (nextPreset: PlaybackPreset) => {
+    const next = applyPlaybackPreset(stemIds, state, nextPreset);
+    if (!next) return;
+    setPreset(nextPreset);
+    apply(next);
+  };
+
+  const hasVocals = playbackPresetAvailable(stemIds, "karaoke");
+  const presetButtons: { id: PlaybackPreset; label: string }[] = [
+    { id: "all", label: "All" },
+    { id: "karaoke", label: "Karaoke" },
+    { id: "acapella", label: "Acapella" },
+    { id: "drumsBass", label: "Drums + Bass" },
+  ];
+
+  const muteAll = () => {
+    setPreset("custom");
+    apply(setAllMuted(stemIds, clearSolo(state), true));
+  };
+  const unmuteAll = () => {
+    setPreset("custom");
+    apply(setAllMuted(stemIds, state, false));
+  };
   const masterDb = state.masterVolumeDb ?? DB_DEFAULT;
 
   const downloadMix = async () => {
@@ -230,6 +258,24 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
       </div>
 
       <div className="mixer-master">
+        <div className="mixer-presets">
+          {presetButtons.map((item) => {
+            const disabled =
+              (item.id === "karaoke" || item.id === "acapella") && !hasVocals;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                className={`ghost${preset === item.id ? " active" : ""}`}
+                disabled={disabled}
+                aria-pressed={preset === item.id}
+                onClick={() => applyPreset(item.id)}
+              >
+                {item.label}
+              </button>
+            );
+          })}
+        </div>
         <button
           type="button"
           className="ghost"
@@ -240,7 +286,10 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
         <button
           type="button"
           className="ghost"
-          onClick={() => apply(resetMuteSolo(stemIds, state))}
+          onClick={() => {
+            setPreset("all");
+            apply(resetMuteSolo(stemIds, state));
+          }}
         >
           Reset mute &amp; solo
         </button>
@@ -248,7 +297,10 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
           <button
             type="button"
             className="ghost"
-            onClick={() => apply(clearSolo(state))}
+            onClick={() => {
+              setPreset("all");
+              apply(clearSolo(state));
+            }}
           >
             Clear solo
           </button>

@@ -81,6 +81,16 @@ a {
   text-underline-offset: 4px;
 }
 
+.user-info {
+  font-size: 0.8rem;
+  color: rgba(26, 31, 28, 0.62);
+  align-self: center;
+}
+
+.nav button.secondary {
+  font-weight: 600;
+}
+
 main {
   flex: 1;
   width: min(100%, var(--max));
@@ -407,6 +417,22 @@ button.danger,
 .mixer button.ghost:hover {
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+
+.mixer-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.mixer button.ghost.active {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.mixer button.ghost:disabled {
+  opacity: 0.45;
+  text-decoration: none;
 }
 
 .mixer-time {

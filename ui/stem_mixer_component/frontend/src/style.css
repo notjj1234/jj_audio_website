@@ -174,9 +174,77 @@ body {
   gap: 0.15rem 0.75rem;
 }
 
+.mixer-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.mixer-presets button.active {
+  background: var(--primary);
+  color: #fff;
+}
+
+.mixer-presets button:disabled {
+  opacity: 0.45;
+}
+
+.mixer-stage {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+}
+
+.mixer-video-wrap {
+  flex: 0 0 280px;
+  max-width: 42%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.mixer-video,
+.mixer-video iframe,
+.mixer-local-video,
+.mixer-video-fallback img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #111;
+  object-fit: cover;
+}
+
+.mixer-video-wrap[hidden],
+#btn-show-video[hidden] {
+  display: none;
+}
+
+.mixer-video-fallback {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.mixer-video-fallback a {
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
 .mixer-stems {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+@media (max-width: 720px) {
+  .mixer-stage {
+    flex-direction: column;
+  }
+  .mixer-video-wrap {
+    flex-basis: auto;
+    max-width: 100%;
+    width: 100%;
+  }
 }
 
 .stem-row {

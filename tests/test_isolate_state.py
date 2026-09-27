@@ -133,6 +133,8 @@ from ui.isolate_state import (
     user_progress_hint,
     youtube_label_from_url,
     youtube_video_id,
+    mixer_local_video_path,
+    mixer_youtube_video_id,
     sync_output_name_on_upload,
     sync_output_name_on_youtube,
     upload_fingerprint,
@@ -1179,6 +1181,42 @@ def test_youtube_video_id_from_common_urls():
     assert youtube_label_from_url("not-a-url") == "youtube_audio"
 
 
+def test_mixer_local_video_path_only_for_uploaded_source_video(tmp_path):
+    assert mixer_local_video_path(None) is None
+    assert mixer_local_video_path(tmp_path) is None
+    extra = tmp_path / "vocals.mp4"
+    extra.write_bytes(b"nope")
+    assert mixer_local_video_path(tmp_path) is None
+    video = tmp_path / "source_video.mp4"
+    video.write_bytes(b"video")
+    assert mixer_local_video_path(tmp_path) == video
+    (tmp_path / "source_video.txt").write_text("notes", encoding="utf-8")
+    assert mixer_local_video_path(tmp_path) == video
+
+
+def test_home_upload_accepts_video_and_extracts_with_ffmpeg():
+    page = (
+        Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    ).read_text(encoding="utf-8")
+    for suffix in (".mp4", ".mov", ".webm", ".mkv"):
+        assert suffix in page
+    assert "_HOME_UPLOAD_TYPES" in page
+    assert "normalize_audio" in page
+    assert 'output_dir / f"source_video{src.suffix.lower()}"' in page
+    assert "st.error(err or \"Could not read this file.\")" in page
+
+
+def test_mixer_youtube_video_id_only_for_loaded_youtube_mix():
+    url = "https://www.youtube.com/watch?v=BaW_jenozKc"
+    loaded = {
+        "isolate_source_kind": "youtube",
+        "isolate_results_source_fp": f"youtube:{url}",
+    }
+    assert mixer_youtube_video_id(loaded) == "BaW_jenozKc"
+    assert mixer_youtube_video_id({"isolate_source_kind": "file", "isolate_results_source_fp": f"youtube:{url}"}) is None
+    assert mixer_youtube_video_id({"isolate_source_kind": "youtube", "isolate_results_source_fp": "upload:abc"}) is None
+
+
 def test_resolve_youtube_job_name_empty_prefers_downloaded_stem():
     assert (
         resolve_youtube_job_name("", "https://youtu.be/BaW_jenozKc", "ACDC - Back in Black")
@@ -1308,6 +1346,17 @@ def test_youtube_search_use_queues_hit_title():
     assert use_block.find("_download_youtube_with_status(") < use_block.find(
         "_close_youtube_search_dialog()"
     )
+    assert 'key=f"isolate_youtube_separate_{vid}"' in dialog
+    assert 'st.session_state["isolate_search_enqueue"] = True' in dialog
+    workspace = source[
+        source.find("def _render_new_workspace") : source.find("def _render_mixer_region_caption")
+    ]
+    assert 'st.session_state.pop("isolate_search_enqueue", False)' in workspace
+    assert "_try_enqueue_choice(choice)" in workspace
+    enqueue_helper = source[
+        source.find("def _try_enqueue_choice") : source.find("def _has_source_for_job")
+    ]
+    assert "_enqueue_confirmed_job(choice, audio_path)" in enqueue_helper
     controls = source[
         source.find("def _render_separation_controls") : source.find("def _ffmpeg_install_hint")
     ]
