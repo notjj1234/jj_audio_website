@@ -16,8 +16,10 @@ from audio_to_tab.ingest import (
     _thumbnail_url_for_entry,
     _watch_url_from_entry,
     _youtube_log_path,
+    _youtube_preview_ydl_opts,
     _youtube_ydl_opts,
     download_youtube_audio,
+    download_youtube_preview_video,
     format_youtube_duration,
     is_youtube_url,
     normalize_audio,
@@ -37,6 +39,55 @@ def test_youtube_url_allowlist():
 def test_download_youtube_rejects_non_youtube(tmp_path):
     with pytest.raises(ValueError, match="Only YouTube"):
         download_youtube_audio("https://example.com/a.wav", tmp_path)
+
+
+def test_download_youtube_preview_video_uses_capped_mp4(tmp_path):
+    dest = tmp_path / "source_video.mp4"
+    seen: dict = {}
+
+    class FakeYDL:
+        def __init__(self, opts):
+            seen["opts"] = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download=True):
+            assert download is True
+            assert "watch?v=abc" in url
+            (tmp_path / ".source_video.download.mp4").write_bytes(b"mp4")
+            return {"title": "Song"}
+
+    with patch("yt_dlp.YoutubeDL", FakeYDL):
+        path = download_youtube_preview_video("https://www.youtube.com/watch?v=abc", dest)
+    assert path == dest
+    assert dest.read_bytes() == b"mp4"
+    opts = seen["opts"]
+    assert "480" in opts["format"]
+    assert opts["merge_output_format"] == "mp4"
+    assert opts["postprocessors"] == []
+    assert not any(
+        isinstance(item, dict) and item.get("key") == "FFmpegExtractAudio"
+        for item in opts["postprocessors"]
+    )
+
+
+def test_download_youtube_preview_rejects_non_youtube(tmp_path):
+    with pytest.raises(ValueError, match="Only YouTube"):
+        download_youtube_preview_video("https://example.com/a.mp4", tmp_path / "source_video.mp4")
+
+
+def test_youtube_preview_ydl_opts_drops_wav_extract():
+    opts = _youtube_preview_ydl_opts(
+        template="/tmp/.source_video.download.%(ext)s",
+        player_client="default,-android_sdkless",
+    )
+    assert opts["postprocessors"] == []
+    assert opts["merge_output_format"] == "mp4"
+    assert "height<=480" in opts["format"]
 
 
 def test_youtube_ydl_opts_sets_noplaylist_and_client():

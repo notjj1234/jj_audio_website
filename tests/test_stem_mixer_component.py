@@ -193,4 +193,85 @@ def test_stem_mixer_accepts_optional_youtube_id():
     assert params["hide_youtube_video"].default is False
     assert "local_video_url" in params
     assert params["local_video_url"].default is None
+    assert "video_offset_sec" in params
+    assert params["video_offset_sec"].default == 0.0
+
+
+def test_mixer_remounts_picture_after_paint_and_offsets_seek():
+    text = _mixer_main_ts()
+    render = text[text.find("function renderUI") : text.find("function updateTrackTitleDisplay")]
+    inner = render.find("root.innerHTML")
+    assert inner > 0
+    assert render.find("destroyYoutubePlayer()") < inner
+    assert render.find("destroyLocalVideo()") < inner
+    assert render.rfind("mountPicture();") > inner
+    assert "function pictureTimeForMixer" in text
+    assert "function mixerTimeForPicture" in text
+    assert 'syncOrigin = "audio"' in text
+    assert 'syncOrigin = "video"' in text
+
+    def picture_time(mixer: float, offset: float) -> float:
+        offset = offset if offset > 0 else 0
+        mixer = mixer if mixer > 0 else 0
+        return mixer + offset
+
+    def mixer_time(picture: float, offset: float, dur: float) -> float:
+        offset = offset if offset > 0 else 0
+        raw = picture - offset
+        if not dur > 0:
+            return max(0.0, raw)
+        return max(0.0, min(dur, raw))
+
+    assert picture_time(0, 12.5) == 12.5
+    assert picture_time(3, 12.5) == 15.5
+    assert mixer_time(15.5, 12.5, 30) == 3
+    assert mixer_time(0, 12.5, 30) == 0
+    assert mixer_time(100, 12.5, 30) == 30
+
+
+def test_mixer_video_size_and_position_stay_inside_frame():
+    text = _mixer_main_ts()
+    assert "function clampVideoWidth" in text
+    assert "function clampVideoBox" in text
+    assert 'id="btn-drag-video"' in text
+    assert 'id="btn-resize-video"' in text
+    assert "is-placed" in text
+    assert "VIDEO_MIN_WIDTH = 160" in text
+    assert "VIDEO_STEM_GUTTER = 160" in text
+    assert "videoLayout" in text
+
+    def clamp_video_width(width: float, frame_width: float) -> float:
+        min_w = 160.0
+        max_w = max(min_w, frame_width - 160.0)
+        w = width if width == width else min_w  # NaN check
+        return max(min_w, min(max_w, w))
+
+    def clamp_video_box(
+        x: float,
+        y: float,
+        width: float,
+        frame_width: float,
+        frame_height: float,
+        box_height: float,
+    ) -> tuple[float, float, float]:
+        w = clamp_video_width(width, frame_width)
+        h = box_height if box_height > 0 else w * 9 / 16
+        max_x = max(0.0, frame_width - w)
+        max_y = max(0.0, frame_height - h)
+        return (
+            max(0.0, min(max_x, x)),
+            max(0.0, min(max_y, y)),
+            w,
+        )
+
+    assert clamp_video_width(80, 800) == 160
+    assert clamp_video_width(900, 800) == 640
+    assert clamp_video_width(320, 800) == 320
+    x, y, w = clamp_video_box(700, 500, 200, 800, 400, 112.5)
+    assert w == 200
+    assert x == 600
+    assert y == 287.5
+    x2, y2, _w2 = clamp_video_box(-20, -10, 200, 800, 400, 112.5)
+    assert x2 == 0
+    assert y2 == 0
 

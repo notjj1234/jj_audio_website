@@ -1020,6 +1020,17 @@ def mixer_youtube_video_id(session: Mapping[str, Any]) -> str | None:
     return youtube_video_id(fingerprint[len(prefix) :])
 
 
+def prefer_local_mixer_picture(
+    youtube_id: str | None,
+    local_video: Path | None,
+) -> tuple[str | None, Path | None]:
+    """Local file wins so the mixer does not drop it when a YouTube id is set."""
+    if local_video is not None:
+        return None, local_video
+    vid = (youtube_id or "").strip() or None
+    return vid, None
+
+
 def youtube_label_from_url(url: str) -> str:
     """Default Output name from a pasted URL (id until the file is downloaded)."""
     return youtube_video_id(url) or "youtube_audio"

@@ -553,6 +553,94 @@ function videoNeedsSeek(
   return Math.abs(videoSec - audioSec) > VIDEO_DRIFT_SEC;
 }
 
+/** Picture timeline position for a stem playhead. Offset is the region start. */
+function pictureTimeForMixer(mixerSec: number, offsetSec: number): number {
+  const offset = Number.isFinite(offsetSec) && offsetSec > 0 ? offsetSec : 0;
+  const mixer = Number.isFinite(mixerSec) && mixerSec > 0 ? mixerSec : 0;
+  return mixer + offset;
+}
+
+/** Stem playhead for a picture time, clamped to the stem duration. */
+function mixerTimeForPicture(
+  pictureSec: number,
+  offsetSec: number,
+  durationSec: number
+): number {
+  const offset = Number.isFinite(offsetSec) && offsetSec > 0 ? offsetSec : 0;
+  const picture = Number.isFinite(pictureSec) ? pictureSec : offset;
+  const raw = picture - offset;
+  const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+  if (!(dur > 0)) return Math.max(0, raw);
+  return Math.max(0, Math.min(dur, raw));
+}
+
+const VIDEO_MIN_WIDTH = 160;
+const VIDEO_STEM_GUTTER = 160;
+const VIDEO_LAYOUT_KEY = "audiotools_stem_mixer_video_layout";
+
+type VideoLayout = {
+  placed: boolean;
+  width: number;
+  x: number;
+  y: number;
+};
+
+let videoLayout: VideoLayout = { placed: false, width: 0, x: 0, y: 0 };
+
+function clampVideoWidth(width: number, frameWidth: number): number {
+  const max = Math.max(VIDEO_MIN_WIDTH, frameWidth - VIDEO_STEM_GUTTER);
+  const w = Number.isFinite(width) ? width : VIDEO_MIN_WIDTH;
+  return Math.max(VIDEO_MIN_WIDTH, Math.min(max, w));
+}
+
+function clampVideoBox(
+  x: number,
+  y: number,
+  width: number,
+  frameWidth: number,
+  frameHeight: number,
+  boxHeight: number
+): { x: number; y: number; width: number } {
+  const w = clampVideoWidth(width, frameWidth);
+  const h =
+    Number.isFinite(boxHeight) && boxHeight > 0 ? boxHeight : (w * 9) / 16;
+  const maxX = Math.max(0, frameWidth - w);
+  const maxY = Math.max(0, frameHeight - h);
+  const nx = Number.isFinite(x) ? x : 0;
+  const ny = Number.isFinite(y) ? y : 0;
+  return {
+    width: w,
+    x: Math.max(0, Math.min(maxX, nx)),
+    y: Math.max(0, Math.min(maxY, ny)),
+  };
+}
+
+function loadVideoLayout(): void {
+  try {
+    const raw = sessionStorage.getItem(VIDEO_LAYOUT_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw) as Partial<VideoLayout>;
+    videoLayout = {
+      placed: Boolean(data.placed),
+      width: Number(data.width) > 0 ? Number(data.width) : 0,
+      x: Number(data.x) || 0,
+      y: Number(data.y) || 0,
+    };
+  } catch {
+    /* private mode */
+  }
+}
+
+function saveVideoLayout(): void {
+  try {
+    sessionStorage.setItem(VIDEO_LAYOUT_KEY, JSON.stringify(videoLayout));
+  } catch {
+    /* quota / private mode */
+  }
+}
+
+loadVideoLayout();
+
 function presetSoloMap(
   ids: string[],
   preset: Exclude<PlaybackPresetId, "custom">
@@ -594,7 +682,14 @@ let localVideoEl: HTMLVideoElement | null = null;
 let hideYoutubeVideo = false;
 let ytPlayer: YTPlayer | null = null;
 let ytMountedId = "";
+let pictureMountGen = 0;
 let videoSyncAt = 0;
+let videoOffsetSec = 0;
+let syncOrigin: "audio" | "video" | null = null;
+let suppressPictureEventsUntil = 0;
+let lastPictureObserved = -1;
+let lastMixerObserved = -1;
+let picturePollTimer: number | null = null;
 
 function ensureYoutubeApi(): Promise<void> {
   const yt = (window as unknown as { YT?: { Player?: unknown } }).YT;
@@ -616,7 +711,24 @@ function ensureYoutubeApi(): Promise<void> {
   });
 }
 
+function stopPicturePoll(): void {
+  if (picturePollTimer !== null) {
+    window.clearInterval(picturePollTimer);
+    picturePollTimer = null;
+  }
+}
+
+function startPicturePoll(): void {
+  if (picturePollTimer !== null) return;
+  picturePollTimer = window.setInterval(() => {
+    if (engine.isPlaying()) return;
+    syncPictureToStems(false);
+  }, 250);
+}
+
 function destroyYoutubePlayer(): void {
+  pictureMountGen += 1;
+  stopPicturePoll();
   try {
     ytPlayer?.destroy();
   } catch {
@@ -659,14 +771,35 @@ function showYoutubeFallback(): void {
   slot.append(box);
 }
 
-function nudgeYoutubeToAudio(): void {
-  const t = engine.currentTime();
+function markPictureCommand(): void {
+  syncOrigin = "audio";
   videoSyncAt = performance.now();
+  suppressPictureEventsUntil = videoSyncAt + 400;
+  window.setTimeout(() => {
+    if (syncOrigin === "audio") syncOrigin = null;
+  }, 400);
+}
+
+function readPictureTime(): number | null {
+  try {
+    if (ytPlayer && youtubeVideoId && !hideYoutubeVideo) return ytPlayer.getCurrentTime();
+    if (localVideoEl && localVideoUrl && !youtubeVideoId && !hideYoutubeVideo) {
+      return localVideoEl.currentTime;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function writePictureTo(pictureT: number, playing: boolean): void {
+  lastPictureObserved = pictureT;
+  lastMixerObserved = engine.currentTime();
   if (ytPlayer && !hideYoutubeVideo && youtubeVideoId) {
     try {
       ytPlayer.mute();
-      ytPlayer.seekTo(t, true);
-      if (engine.isPlaying()) ytPlayer.playVideo();
+      ytPlayer.seekTo(pictureT, true);
+      if (playing) ytPlayer.playVideo();
       else ytPlayer.pauseVideo();
     } catch {
       /* picture failed; audio remains the clock */
@@ -675,14 +808,69 @@ function nudgeYoutubeToAudio(): void {
   if (localVideoEl && !hideYoutubeVideo && localVideoUrl && !youtubeVideoId) {
     try {
       localVideoEl.muted = true;
-      if (Math.abs(localVideoEl.currentTime - t) > VIDEO_DRIFT_SEC) {
-        localVideoEl.currentTime = t;
+      if (Math.abs(localVideoEl.currentTime - pictureT) > VIDEO_DRIFT_SEC) {
+        localVideoEl.currentTime = pictureT;
       }
-      if (engine.isPlaying()) void localVideoEl.play();
+      if (playing) void localVideoEl.play();
       else localVideoEl.pause();
     } catch {
       /* picture failed; audio remains the clock */
     }
+  }
+}
+
+function nudgeYoutubeToAudio(): void {
+  markPictureCommand();
+  writePictureTo(
+    pictureTimeForMixer(engine.currentTime(), videoOffsetSec),
+    engine.isPlaying()
+  );
+}
+
+function pauseStemsFromPicture(): void {
+  if (!engine.isPlaying()) return;
+  if (syncOrigin === "audio") return;
+  if (performance.now() < suppressPictureEventsUntil) return;
+  wantPlaying = false;
+  setPlayPauseLabel(false);
+  transportPending = "pause";
+  applyTransport();
+}
+
+function syncPictureToStems(playing: boolean): void {
+  if (hideYoutubeVideo) return;
+  const picture = readPictureTime();
+  if (picture == null) return;
+  const mixerT = engine.currentTime();
+  const dur = engine.getDuration();
+  const expected = pictureTimeForMixer(mixerT, videoOffsetSec);
+  const now = performance.now();
+  const cooled = now - videoSyncAt < VIDEO_RESYNC_COOLDOWN_MS;
+  let userJump = false;
+  if (lastPictureObserved >= 0 && lastMixerObserved >= 0) {
+    const pictureMoved = picture - lastPictureObserved;
+    const mixerMoved = mixerT - lastMixerObserved;
+    userJump = Math.abs(pictureMoved - mixerMoved) > VIDEO_DRIFT_SEC;
+  }
+  lastPictureObserved = picture;
+  lastMixerObserved = mixerT;
+  if (userJump && syncOrigin !== "audio" && !cooled) {
+    syncOrigin = "video";
+    videoSyncAt = now;
+    const next = mixerTimeForPicture(picture, videoOffsetSec, dur);
+    lastMixerObserved = next;
+    void engine.seek(next).finally(() => {
+      if (syncOrigin === "video") syncOrigin = null;
+    });
+    return;
+  }
+  if (
+    playing &&
+    syncOrigin !== "video" &&
+    videoNeedsSeek(expected, picture, now, videoSyncAt)
+  ) {
+    markPictureCommand();
+    writePictureTo(expected, true);
   }
 }
 
@@ -707,6 +895,28 @@ function mountLocalVideo(): void {
   video.addEventListener("play", () => {
     if (!engine.isPlaying()) video.pause();
   });
+  video.addEventListener("pause", () => {
+    pauseStemsFromPicture();
+  });
+  video.addEventListener("seeked", () => {
+    if (syncOrigin === "audio" || performance.now() - videoSyncAt < VIDEO_RESYNC_COOLDOWN_MS) {
+      lastPictureObserved = video.currentTime;
+      lastMixerObserved = engine.currentTime();
+      return;
+    }
+    syncOrigin = "video";
+    videoSyncAt = performance.now();
+    lastPictureObserved = video.currentTime;
+    const next = mixerTimeForPicture(
+      video.currentTime,
+      videoOffsetSec,
+      engine.getDuration()
+    );
+    lastMixerObserved = next;
+    void engine.seek(next).finally(() => {
+      if (syncOrigin === "video") syncOrigin = null;
+    });
+  });
   slot.append(video);
   localVideoEl = video;
   nudgeYoutubeToAudio();
@@ -725,8 +935,10 @@ function mountYoutubePlayer(): void {
   holder.id = "yt-player";
   slot.appendChild(holder);
   const wanted = youtubeVideoId;
+  const gen = ++pictureMountGen;
   void ensureYoutubeApi()
     .then(() => {
+      if (gen !== pictureMountGen) return;
       if (hideYoutubeVideo || youtubeVideoId !== wanted) return;
       const YT = (window as unknown as {
         YT?: {
@@ -737,6 +949,7 @@ function mountYoutubePlayer(): void {
         };
       }).YT;
       if (!YT?.Player || !document.getElementById("yt-player")) return;
+      startPicturePoll();
       ytPlayer = new YT.Player("yt-player", {
         videoId: wanted,
         playerVars: {
@@ -767,6 +980,7 @@ function mountYoutubePlayer(): void {
                 /* ignore */
               }
             }
+            if (ev.data === 2) pauseStemsFromPicture();
           },
           onError: () => {
             showYoutubeFallback();
@@ -793,21 +1007,30 @@ function mountPicture(): void {
   else mountLocalVideo();
 }
 
-function applyYoutubeArgs(id: string, hide: boolean, videoUrl = ""): void {
+function applyYoutubeArgs(
+  id: string,
+  hide: boolean,
+  videoUrl = "",
+  offsetSec = 0
+): void {
   const nextId = (id || "").trim();
   const nextUrl = nextId ? "" : (videoUrl || "").trim();
   const nextHide = !(nextId || nextUrl) || hide;
+  const nextOffset = Number.isFinite(offsetSec) && offsetSec > 0 ? offsetSec : 0;
   if (nextId !== youtubeVideoId || nextHide) youtubeFallbackId = "";
   const changed =
     nextId !== youtubeVideoId ||
     nextUrl !== localVideoUrl ||
     nextHide !== hideYoutubeVideo;
+  const offsetChanged = nextOffset !== videoOffsetSec;
   youtubeVideoId = nextId;
   localVideoUrl = nextUrl;
   hideYoutubeVideo = nextHide;
+  videoOffsetSec = nextOffset;
   updateYoutubeChrome();
   if (
     !changed &&
+    !offsetChanged &&
     (ytPlayer || localVideoEl || (youtubeFallbackId && youtubeFallbackId === nextId))
   ) {
     return;
@@ -815,6 +1038,10 @@ function applyYoutubeArgs(id: string, hide: boolean, videoUrl = ""): void {
   if (nextHide || (!nextId && !nextUrl)) {
     destroyYoutubePlayer();
     destroyLocalVideo();
+    return;
+  }
+  if (!changed && offsetChanged && (ytPlayer || localVideoEl)) {
+    nudgeYoutubeToAudio();
     return;
   }
   mountPicture();
@@ -874,6 +1101,7 @@ function statePayload(): string {
     masterVolumeDb: state.masterVolumeDb,
     metronomeOptions: metroConfig ? metroOptions : null,
     hideYoutubeVideo: hideYoutubeVideo,
+    videoLayout,
   });
 }
 
@@ -901,6 +1129,7 @@ function reportState(immediate = false): void {
     if (youtubeVideoId || localVideoUrl) {
       value.hideYoutubeVideo = hideYoutubeVideo;
     }
+    value.videoLayout = { ...videoLayout };
     Streamlit.setComponentValue(value);
   };
   if (immediate) {
@@ -1003,9 +1232,117 @@ function formatTime(sec: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+function mixerFrame(): HTMLElement | null {
+  return document.querySelector(".mixer");
+}
+
+function applyVideoLayout(): void {
+  const wrap = document.getElementById("mixer-video-wrap");
+  const frame = mixerFrame();
+  if (!wrap || !frame) return;
+  const frameRect = frame.getBoundingClientRect();
+  const frameW = frameRect.width || frame.clientWidth;
+  const frameH = frameRect.height || frame.clientHeight;
+  const measurable = frameW >= VIDEO_MIN_WIDTH + VIDEO_STEM_GUTTER && frameH > 0;
+  if (videoLayout.width > 0 && measurable) {
+    videoLayout.width = clampVideoWidth(videoLayout.width, frameW);
+  }
+  wrap.classList.toggle("is-sized", videoLayout.width > 0);
+  wrap.classList.toggle("is-placed", videoLayout.placed);
+  if (!videoLayout.placed) {
+    wrap.style.left = "";
+    wrap.style.top = "";
+    wrap.style.width = videoLayout.width > 0 ? `${videoLayout.width}px` : "";
+    return;
+  }
+  wrap.style.width = `${videoLayout.width}px`;
+  if (!measurable) {
+    wrap.style.left = `${videoLayout.x}px`;
+    wrap.style.top = `${videoLayout.y}px`;
+    return;
+  }
+  const boxH = wrap.offsetHeight || (videoLayout.width * 9) / 16;
+  const clamped = clampVideoBox(
+    videoLayout.x,
+    videoLayout.y,
+    videoLayout.width,
+    frameW,
+    frameH,
+    boxH
+  );
+  videoLayout.x = clamped.x;
+  videoLayout.y = clamped.y;
+  videoLayout.width = clamped.width;
+  wrap.style.width = `${clamped.width}px`;
+  wrap.style.left = `${clamped.x}px`;
+  wrap.style.top = `${clamped.y}px`;
+}
+
+function trackVideoPointer(
+  event: PointerEvent,
+  onMove: (ev: PointerEvent) => void
+): void {
+  event.preventDefault();
+  const move = (ev: PointerEvent) => onMove(ev);
+  const up = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    saveVideoLayout();
+    reportState(true);
+    scheduleFrameHeight();
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+}
+
+function bindVideoFrameGestures(): void {
+  const drag = document.getElementById("btn-drag-video");
+  const resize = document.getElementById("btn-resize-video");
+  drag?.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    const wrap = document.getElementById("mixer-video-wrap");
+    const frame = mixerFrame();
+    if (!wrap || !frame) return;
+    const frameRect = frame.getBoundingClientRect();
+    const rect = wrap.getBoundingClientRect();
+    videoLayout.placed = true;
+    videoLayout.width = rect.width;
+    const originX = rect.left - frameRect.left;
+    const originY = rect.top - frameRect.top;
+    videoLayout.x = originX;
+    videoLayout.y = originY;
+    applyVideoLayout();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    trackVideoPointer(event, (ev) => {
+      videoLayout.x = originX + (ev.clientX - startX);
+      videoLayout.y = originY + (ev.clientY - startY);
+      applyVideoLayout();
+    });
+  });
+  resize?.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    const wrap = document.getElementById("mixer-video-wrap");
+    const frame = mixerFrame();
+    if (!wrap || !frame) return;
+    const startW = wrap.getBoundingClientRect().width;
+    const startX = event.clientX;
+    trackVideoPointer(event, (ev) => {
+      const frameRect = frame.getBoundingClientRect();
+      videoLayout.width = clampVideoWidth(
+        startW + (ev.clientX - startX),
+        frameRect.width || frame.clientWidth
+      );
+      applyVideoLayout();
+    });
+  });
+}
+
 function renderUI(theme?: Theme): void {
   const root = document.getElementById("root");
   if (!root) return;
+  destroyYoutubePlayer();
+  destroyLocalVideo();
 
   const textColor = theme?.textColor ?? "#31333F";
   const bg = theme?.backgroundColor ?? "#ffffff";
@@ -1055,8 +1392,12 @@ function renderUI(theme?: Theme): void {
       </div>
       <div class="mixer-stage">
         <div class="mixer-video-wrap" id="mixer-video-wrap" hidden>
+          <div class="mixer-video-toolbar">
+            <button type="button" class="ghost mixer-video-drag" id="btn-drag-video" aria-label="Move video">Move</button>
+            <button type="button" class="ghost" id="btn-hide-video">Hide video</button>
+          </div>
           <div class="mixer-video" id="yt-player-slot"></div>
-          <button type="button" class="ghost" id="btn-hide-video">Hide video</button>
+          <div class="mixer-video-resize" id="btn-resize-video" role="separator" aria-label="Resize video"></div>
         </div>
         <div class="mixer-stems" id="stems"></div>
       </div>
@@ -1209,9 +1550,11 @@ function renderUI(theme?: Theme): void {
   document.getElementById("btn-show-video")!.onclick = () => {
     hideYoutubeVideo = false;
     updateYoutubeChrome();
+    applyVideoLayout();
     mountPicture();
     reportState(true);
   };
+  bindVideoFrameGestures();
   updateMuteAllLabel();
   updateStemChrome();
   updateYoutubeChrome();
@@ -1220,8 +1563,8 @@ function renderUI(theme?: Theme): void {
   seek.oninput = () => {
     const dur = engine.getDuration() || 1;
     const t = (Number(seek.value) / 1000) * dur;
-    void engine.seek(t);
-    nudgeYoutubeToAudio();
+    syncOrigin = "audio";
+    void engine.seek(t).then(() => nudgeYoutubeToAudio());
     updatePlayheads(t, dur);
   };
 
@@ -1304,24 +1647,8 @@ function renderUI(theme?: Theme): void {
       }
     }
     updatePlayheads(t, dur);
-    if (playing && !hideYoutubeVideo && (ytPlayer || localVideoEl)) {
-      const now = performance.now();
-      let videoSec = t;
-      try {
-        if (ytPlayer) videoSec = ytPlayer.getCurrentTime();
-        else if (localVideoEl) videoSec = localVideoEl.currentTime;
-      } catch {
-        videoSec = t;
-      }
-      if (videoNeedsSeek(t, videoSec, now, videoSyncAt)) {
-        videoSyncAt = now;
-        try {
-          if (ytPlayer) ytPlayer.seekTo(t, true);
-          else if (localVideoEl) localVideoEl.currentTime = t;
-        } catch {
-          /* audio stays the clock */
-        }
-      }
+    if (!hideYoutubeVideo && (ytPlayer || localVideoEl)) {
+      syncPictureToStems(playing);
     }
     if (playing) clearSleepResumeHint();
     if (!transportBusy && transportPending === null) {
@@ -1333,6 +1660,8 @@ function renderUI(theme?: Theme): void {
 
   updateTrackTitleDisplay();
   scheduleFrameHeight();
+  applyVideoLayout();
+  mountPicture();
 }
 
 function updateTrackTitleDisplay(): void {
@@ -1445,8 +1774,8 @@ function seekFromWavePointer(el: HTMLElement, clientX: number): void {
   const rect = el.getBoundingClientRect();
   const ratio = rect.width > 0 ? (clientX - rect.left) / rect.width : 0;
   const t = Math.max(0, Math.min(1, ratio)) * dur;
-  void engine.seek(t);
-  nudgeYoutubeToAudio();
+  syncOrigin = "audio";
+  void engine.seek(t).then(() => nudgeYoutubeToAudio());
   updatePlayheads(t, dur);
 }
 
@@ -1765,6 +2094,7 @@ async function onRender(event: Event): Promise<void> {
     youtubeVideoId?: string;
     hideYoutubeVideo?: boolean;
     localVideoUrl?: string;
+    videoOffsetSec?: number;
   };
 
   const stems = args.stems ?? [];
@@ -1782,7 +2112,8 @@ async function onRender(event: Event): Promise<void> {
     applyYoutubeArgs(
       args.youtubeVideoId ?? "",
       Boolean(args.hideYoutubeVideo),
-      args.localVideoUrl ?? ""
+      args.localVideoUrl ?? "",
+      Number(args.videoOffsetSec) || 0
     );
     scheduleFrameHeight();
     return;
@@ -1835,7 +2166,8 @@ async function onRender(event: Event): Promise<void> {
   applyYoutubeArgs(
     String(args.youtubeVideoId ?? ""),
     Boolean(args.hideYoutubeVideo),
-    String(args.localVideoUrl ?? "")
+    String(args.localVideoUrl ?? ""),
+    Number(args.videoOffsetSec) || 0
   );
   const st = status();
   if (st) st.textContent = "Loading stems…";

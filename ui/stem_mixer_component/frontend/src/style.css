@@ -20,6 +20,7 @@ body {
   padding: 0.25rem 0.1rem 0.45rem;
   box-sizing: border-box;
   outline: none;
+  position: relative;
 }
 
 .visually-hidden {
@@ -196,11 +197,52 @@ body {
 }
 
 .mixer-video-wrap {
+  position: relative;
   flex: 0 0 280px;
   max-width: 42%;
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
+}
+
+.mixer-video-wrap.is-sized {
+  flex: 0 0 auto;
+  max-width: none;
+}
+
+.mixer-video-wrap.is-placed {
+  position: absolute;
+  z-index: 4;
+  flex: none;
+  max-width: none;
+  margin: 0;
+}
+
+.mixer-video-toolbar {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.mixer-video-drag {
+  cursor: grab;
+  touch-action: none;
+}
+
+.mixer-video-drag:active {
+  cursor: grabbing;
+}
+
+.mixer-video-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  touch-action: none;
+  z-index: 2;
+  background: linear-gradient(135deg, transparent 50%, var(--text) 50%);
+  opacity: 0.55;
 }
 
 .mixer-video,
@@ -240,7 +282,7 @@ body {
   .mixer-stage {
     flex-direction: column;
   }
-  .mixer-video-wrap {
+  .mixer-video-wrap:not(.is-sized):not(.is-placed) {
     flex-basis: auto;
     max-width: 100%;
     width: 100%;

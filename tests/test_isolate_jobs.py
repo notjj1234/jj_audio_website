@@ -36,6 +36,7 @@ from ui.isolate_jobs import (
     remove_job,
     resume_job,
     separation_in_progress,
+    video_offset_sec_for_run,
 )
 from ui.isolate_state import (
     is_stopping_previous_job,
@@ -91,6 +92,25 @@ def test_enqueue_persists_queued_status(jobs_dir: Path):
     assert any(r["id"] == "job1" for r in rows)
     assert jobs_active() is True
     assert separation_in_progress() is True
+
+
+def test_video_offset_sec_for_run_reads_spec_start(jobs_dir: Path):
+    run = jobs_dir / "out"
+    run.mkdir()
+    (jobs_dir / "a.wav").write_bytes(b"x")
+    enqueue_job(
+        IsolateJobSpec(
+            id="job-region",
+            audio_path=str(jobs_dir / "a.wav"),
+            output_dir=str(run),
+            title="Clip",
+            start_sec=12.5,
+            created_at=time.time(),
+        )
+    )
+    assert video_offset_sec_for_run(run) == 12.5
+    assert video_offset_sec_for_run(jobs_dir / "missing") == 0.0
+    assert video_offset_sec_for_run(None) == 0.0
 
 
 def test_jobs_active_false_when_idle(jobs_dir: Path):

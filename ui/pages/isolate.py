@@ -70,6 +70,7 @@ from ui.isolate_jobs import (
     requeue_job,
     resume_job,
     separation_in_progress,
+    video_offset_sec_for_run,
     worker_busy,
 )
 from ui.isolate_state import (
@@ -159,6 +160,7 @@ from ui.isolate_state import (
     load_persist_isolate_user_id,
     mixer_local_video_path,
     mixer_youtube_video_id,
+    prefer_local_mixer_picture,
     migrate_track_options,
     mixer_component_key,
     ISOLATE_METRO_ACCENT_KEY,
@@ -241,6 +243,7 @@ from audio_to_tab.ingest import (  # noqa: E402
     YouTubeDownloadError,
     YouTubeSearchError,
     download_youtube_audio,
+    download_youtube_preview_video,
     format_youtube_duration,
     is_youtube_url,
     normalize_audio,
@@ -1078,8 +1081,13 @@ def _render_live_mixer(
     key_src = str(run_dir.resolve()) if run_dir is not None else _artifact_fingerprint(stem_paths)
     mixer_key = mixer_component_key(key_src)
     metro = _metronome_payload_for_mixer(run_dir)
-    video_id = mixer_youtube_video_id(st.session_state)
-    local_url = None if video_id else _local_mixer_video_url(run_dir)
+    youtube_id, local_path = prefer_local_mixer_picture(
+        mixer_youtube_video_id(st.session_state),
+        mixer_local_video_path(run_dir),
+    )
+    local_url = _local_mixer_video_url(run_dir) if local_path is not None else None
+    if local_path is not None and not local_url:
+        youtube_id = mixer_youtube_video_id(st.session_state)
     return stem_mixer(
         stems_arg,
         initial_volumes_db={n: float(volumes.get(n, DB_DEFAULT)) for n in stem_names},
@@ -1090,9 +1098,10 @@ def _render_live_mixer(
         initial_master_volume_db=master_db,
         track_title=track_title,
         metronome=metro,
-        youtube_video_id=video_id,
+        youtube_video_id=youtube_id,
         hide_youtube_video=bool(st.session_state.get("isolate_hide_youtube_video")),
         local_video_url=local_url,
+        video_offset_sec=video_offset_sec_for_run(run_dir),
         key=mixer_key,
     )
 
@@ -3579,6 +3588,18 @@ def _resolve_audio_for_job(choice: dict) -> tuple[Path | None, str | None]:
     return None, None
 
 
+def _download_youtube_preview_into_run(output_dir: Path, youtube_url: str) -> None:
+    """Save a capped mp4 beside the stems. Separation continues if this fails."""
+    url = (youtube_url or "").strip()
+    if not is_youtube_url(url):
+        return
+    dest = output_dir / "source_video.mp4"
+    try:
+        download_youtube_preview_video(url, dest)
+    except Exception:
+        logger.warning("YouTube preview video skipped for %s", url, exc_info=True)
+
+
 def _copy_source_video_into_run(output_dir: Path) -> None:
     """Keep an uploaded video beside the stems so the mixer can play it muted."""
     fp = str(st.session_state.get("isolate_pending_fp") or "")
@@ -3690,6 +3711,10 @@ def _enqueue_confirmed_job(choice: dict, audio_path: Path) -> None:
     output_dir = run_output_dir()
     _copy_source_video_into_run(output_dir)
     source_fp = st.session_state.get("isolate_pending_fp") or st.session_state.get("isolate_upload_fp")
+    youtube_preview_url = (choice.get("youtube_url") or "").strip()
+    if not youtube_preview_url and str(source_fp or "").startswith("youtube:"):
+        youtube_preview_url = str(source_fp)[len("youtube:") :]
+    _download_youtube_preview_into_run(output_dir, youtube_preview_url)
     staged_before = st.session_state.get("isolate_pending_audio_path")
     staged_fp = str(source_fp) if source_fp else None
     if staged_fp and staged_fp.startswith("youtube:"):

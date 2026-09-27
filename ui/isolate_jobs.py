@@ -615,6 +615,37 @@ def delete_library_run(run_dir: str) -> bool:
     return ok
 
 
+def video_offset_sec_for_run(run_dir: str | Path | None) -> float:
+    """Region start saved on the job spec for this run. Missing spec means 0."""
+    if not run_dir:
+        return 0.0
+    try:
+        wanted = Path(run_dir).resolve()
+    except OSError:
+        wanted = Path(str(run_dir))
+    root = jobs_root()
+    if not root.is_dir():
+        return 0.0
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        spec = _read_json(child / "spec.json") or {}
+        out = str(spec.get("output_dir") or "")
+        if not out:
+            continue
+        try:
+            same = Path(out).resolve() == wanted
+        except OSError:
+            same = Path(out) == wanted
+        if not same:
+            continue
+        try:
+            return max(0.0, float(spec.get("start_sec") or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
 def list_jobs(*, limit: int = 20) -> list[dict[str, Any]]:
     """Newest-first job status rows (queued / running / done / failed)."""
     root = jobs_root()

@@ -135,6 +135,7 @@ from ui.isolate_state import (
     youtube_video_id,
     mixer_local_video_path,
     mixer_youtube_video_id,
+    prefer_local_mixer_picture,
     sync_output_name_on_upload,
     sync_output_name_on_youtube,
     upload_fingerprint,
@@ -1204,6 +1205,24 @@ def test_home_upload_accepts_video_and_extracts_with_ffmpeg():
     assert "normalize_audio" in page
     assert 'output_dir / f"source_video{src.suffix.lower()}"' in page
     assert "st.error(err or \"Could not read this file.\")" in page
+
+
+def test_prefer_local_mixer_picture_over_youtube_id(tmp_path):
+    video = tmp_path / "source_video.mp4"
+    video.write_bytes(b"video")
+    assert prefer_local_mixer_picture("BaW_jenozKc", video) == (None, video)
+    assert prefer_local_mixer_picture("BaW_jenozKc", None) == ("BaW_jenozKc", None)
+    assert prefer_local_mixer_picture("  ", None) == (None, None)
+
+
+def test_live_mixer_passes_local_picture_and_offset():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    mixer = source[source.find("def _render_live_mixer") : source.find("def _init_track_picker_session")]
+    assert "prefer_local_mixer_picture(" in mixer
+    assert "video_offset_sec=video_offset_sec_for_run(run_dir)" in mixer
+    enqueue = source[source.find("def _enqueue_confirmed_job") : source.find("def _library_status_row")]
+    assert "_download_youtube_preview_into_run(" in enqueue
 
 
 def test_mixer_youtube_video_id_only_for_loaded_youtube_mix():

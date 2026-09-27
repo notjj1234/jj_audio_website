@@ -61,6 +61,7 @@ def stem_mixer(
     youtube_video_id: str | None = None,
     hide_youtube_video: bool = False,
     local_video_url: str | None = None,
+    video_offset_sec: float = 0.0,
     key: str | None = None,
 ) -> dict[str, Any] | None:
     """
@@ -95,6 +96,7 @@ def stem_mixer(
         youtubeVideoId=(youtube_video_id or "").strip(),
         hideYoutubeVideo=bool(hide_youtube_video),
         localVideoUrl=(local_video_url or "").strip(),
+        videoOffsetSec=max(0.0, float(video_offset_sec or 0.0)),
         key=key,
         default=None,
     )

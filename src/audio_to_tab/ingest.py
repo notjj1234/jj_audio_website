@@ -35,6 +35,9 @@ _YOUTUBE_PLAYER_CLIENTS = (
     "web_safari,tv_embedded,-android_sdkless",
 )
 
+# Mixer slot is ~280px wide. 480p is enough for the picture and stays small on disk.
+_PREVIEW_MAX_HEIGHT = 480
+
 
 class YouTubeDownloadError(RuntimeError):
     """User-facing failure downloading public YouTube audio."""
@@ -160,6 +163,29 @@ def _youtube_ydl_opts(
         opts["logger"] = _YoutubeFileLogger(log_path)
     if ffmpeg:
         opts["ffmpeg_location"] = str(Path(ffmpeg).resolve().parent)
+    return opts
+
+
+def _youtube_preview_ydl_opts(
+    *,
+    template: str,
+    player_client: str,
+    verbose: bool = False,
+    log_path: Path | None = None,
+) -> dict:
+    """yt-dlp options for a short muted-preview mp4. No wav extract."""
+    opts = _youtube_ydl_opts(
+        template=template,
+        player_client=player_client,
+        verbose=verbose,
+        log_path=log_path,
+    )
+    height = _PREVIEW_MAX_HEIGHT
+    opts["format"] = (
+        f"bv*[height<={height}]+ba/b[height<={height}]/best[height<={height}]"
+    )
+    opts["merge_output_format"] = "mp4"
+    opts["postprocessors"] = []
     return opts
 
 
@@ -405,6 +431,76 @@ def download_youtube_audio(url: str, output_dir: str | Path) -> Path:
             continue
 
     raise _user_facing_youtube_error(last_exc)
+
+
+def download_youtube_preview_video(url: str, dest: str | Path) -> Path:
+    """Download a height-capped mp4 for the mixer picture.
+
+    The file is the full video so a trimmed stem region can seek with an offset.
+    Raises ``ValueError`` or ``YouTubeDownloadError``. Callers that only need
+    the picture may catch and continue without it.
+    """
+    if not is_youtube_url(url):
+        raise ValueError("Only YouTube URLs are allowed")
+    import yt_dlp
+
+    target = Path(dest)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    template = str(target.parent / f".{target.stem}.download.%(ext)s")
+    verbose = _youtube_debug_enabled()
+    log_path = _youtube_log_path()
+    last_exc: BaseException | None = None
+
+    for index, player_client in enumerate(_YOUTUBE_PLAYER_CLIENTS):
+        if index > 0:
+            _clear_ytdlp_cache()
+            for stale in target.parent.glob(f".{target.stem}.download.*"):
+                _unlink_quiet(stale)
+        opts = _youtube_preview_ydl_opts(
+            template=template,
+            player_client=player_client,
+            verbose=verbose,
+            log_path=log_path,
+        )
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.extract_info(url, download=True)
+            downloaded = _take_preview_download(target)
+            return downloaded
+        except ValueError:
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if log_path is not None:
+                try:
+                    with log_path.open("a", encoding="utf-8") as log:
+                        log.write(f"{url}\npreview\n{player_client}\n{exc}\n\n")
+                except OSError:
+                    pass
+            if not _is_403_error(exc) or index == len(_YOUTUBE_PLAYER_CLIENTS) - 1:
+                raise _user_facing_youtube_error(exc) from exc
+            continue
+
+    raise _user_facing_youtube_error(last_exc)
+
+
+def _take_preview_download(target: Path) -> Path:
+    """Move the yt-dlp preview file onto ``target`` (mp4)."""
+    matches = [
+        path
+        for path in target.parent.glob(f".{target.stem}.download.*")
+        if path.is_file() and not path.name.endswith(".part")
+    ]
+    mp4s = [path for path in matches if path.suffix.lower() == ".mp4"]
+    picked = mp4s[0] if mp4s else (matches[0] if matches else None)
+    if picked is None:
+        raise FileNotFoundError(f"Preview video was not written for {target.name}")
+    _unlink_quiet(target)
+    picked.replace(target)
+    for stale in matches:
+        if stale != picked:
+            _unlink_quiet(stale)
+    return target
 
 
 def _unlink_quiet(path: Path) -> None:
