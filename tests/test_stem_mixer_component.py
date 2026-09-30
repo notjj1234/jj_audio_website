@@ -83,6 +83,45 @@ def test_load_stems_creates_context_without_resume():
     assert "createContextForDecode(): AudioContext" in text
 
 
+def test_mixer_keeps_playing_when_the_context_suspends():
+    text = _mixer_main_ts()
+    bind = text[text.find("private bindContextState") : text.find("private rebuildGraphKeepingBuffers")]
+    assert "softPauseFromInterrupt" not in bind
+    assert "continueAfterInterrupt" in bind
+    play = text[text.find("async play()") : text.find("async pause()")]
+    assert "this.keepPlaying = true" in play
+    assert "startStreamOutput" in play
+    pause = text[text.find("async pause()") : text.find("async seek(")]
+    assert "this.keepPlaying = false" in pause
+    assert "stopStreamOutput" in pause
+    hooks = text[text.find("installWakeHooks(): void") : text.find("getDuration()")]
+    assert 'addEventListener("focus"' in hooks
+    wake = text[text.find("async handleWake()") : text.find("private async continueAfterInterrupt")]
+    assert "softPauseFromInterrupt" not in wake
+    assert "this.keepPlaying" in wake
+    soft = text[
+        text.find("engine.setSoftPauseCallback") : text.find("function mediaSessionArtwork")
+    ]
+    assert "wantPlaying = false" not in soft
+    assert "SLEEP_RESUME_HINT" not in soft
+    assert "function publishMediaSession" in text
+    assert "navigator.mediaSession" in text
+    assert 'artist: "Audio Tools"' in text
+    assert "hqdefault.jpg" in text
+    assert "setActionHandler(\"play\"" in text or 'setActionHandler("play"' in text
+    assert "setPositionState" in text
+    assert "createMediaStreamDestination" in text
+    assert "claimAudioSessionPlayback" in text
+    assert 'audioSession.type = "playback"' in text
+    ensure = text[text.find("async ensureContext()") : text.find("private ensureMasterBus")]
+    assert "if (!this.keepPlaying)" in ensure
+    bus = text[text.find("private ensureMasterBus") : text.find("private ensureOutputElement")]
+    assert "createMediaStreamDestination" in bus
+    assert "this.ctx.destination" not in bus or bus.find("createMediaStreamDestination") < bus.find(
+        "this.ctx.destination"
+    )
+
+
 def test_restore_transport_does_not_auto_play():
     text = _mixer_main_ts()
     restore = text[text.find("function restoreTransport") : text.find("function statePayload")]
@@ -274,4 +313,176 @@ def test_mixer_video_size_and_position_stay_inside_frame():
     x2, y2, _w2 = clamp_video_box(-20, -10, 200, 800, 400, 112.5)
     assert x2 == 0
     assert y2 == 0
+
+
+def test_mixer_video_dock_and_snaps():
+    text = _mixer_main_ts()
+    assert 'id="btn-dock-video"' in text
+    assert 'data-snap="left"' in text
+    assert 'data-snap="right"' in text
+    assert 'data-snap="above"' in text
+    assert 'data-snap="below"' in text
+    assert "function dockedVideoLayout" in text
+    assert "function videoSnap" in text
+    dock = text[text.find("function dockedVideoLayout") : text.find("let videoLayout")]
+    assert "placed: false" in dock
+    snap = text[text.find("function videoSnap") : text.find("function dockedVideoLayout")]
+    assert 'return "left"' in snap
+    handler = text[text.find('id="btn-dock-video"') :]
+    assert "dockedVideoLayout(videoLayout)" in handler
+    assert "videoLayout.placed = false" in handler
+    layout = text[text.find("function applyVideoLayout") : text.find("function trackVideoPointer")]
+    docked_at = layout.find("if (!videoLayout.placed)")
+    docked = layout[docked_at : layout.find("return;", docked_at)]
+    assert "scheduleFrameHeight()" in docked
+    render = text[text.find("function renderUI") : text.find("function updateTrackTitleDisplay")]
+    assert render.rfind("applyVideoLayout()") < render.rfind("scheduleFrameHeight()")
+    assert render.rfind("mountPicture()") < render.rfind("scheduleFrameHeight()")
+
+    def docked_video_layout(layout: dict) -> dict:
+        snap_name = layout["snap"] if layout["snap"] in {"right", "above", "below"} else "left"
+        return {
+            "placed": False,
+            "snap": snap_name,
+            "width": layout["width"],
+            "x": layout["x"],
+            "y": layout["y"],
+        }
+
+    docked = docked_video_layout(
+        {"placed": True, "snap": "right", "width": 240, "x": 12, "y": 8}
+    )
+    assert docked["placed"] is False
+    assert docked["snap"] == "right"
+    assert docked["width"] == 240
+    unknown = docked_video_layout(
+        {"placed": True, "snap": "floating", "width": 180, "x": 1, "y": 2}
+    )
+    assert unknown["snap"] == "left"
+    assert unknown["width"] == 180
+
+
+def test_mixer_picture_play_starts_stems_after_metadata():
+    text = _mixer_main_ts()
+    play = text[
+        text.find('video.addEventListener("play"') : text.find('video.addEventListener("pause"')
+    ]
+    assert "video.pause()" not in play
+    assert "localPlayFromUs" in play
+    assert "startStemsFromPicture()" in play
+
+    start = text[
+        text.find("function startStemsFromPicture") : text.find("function playLocalVideo")
+    ]
+    assert "wantPlaying = true" in start
+    assert 'transportPending = "play"' in start
+    assert "applyTransport()" in start
+
+    write = text[text.find("function writePictureTo") : text.find("function nudgeYoutubeToAudio")]
+    assert "HAVE_METADATA" in write
+    assert "readyState < HAVE_METADATA" in write
+    assert "loadedmetadata" in write
+    assert write.find("readyState < HAVE_METADATA") < write.find("video.currentTime = pictureT")
+
+    local_play = text[text.find("function playLocalVideo") : text.find("function playYoutubeVideo")]
+    assert ".catch(" in local_play
+    assert "video.pause()" not in local_play
+
+    yt = text[text.find("onStateChange:") : text.find("onError:")]
+    assert "pauseVideo()" not in yt
+    assert "youtubePlayFromUsUntil" in yt
+    assert "startStemsFromPicture()" in yt
+
+    def picture_action(ready_state: int, playing: bool) -> str:
+        if ready_state < 1:
+            return "wait"
+        return "play" if playing else "pause"
+
+    assert picture_action(0, True) == "wait"
+    assert picture_action(1, True) == "play"
+    assert picture_action(1, False) == "pause"
+
+
+def test_mixer_local_preview_error_mounts_youtube():
+    text = _mixer_main_ts()
+    apply = text[text.find("function applyYoutubeArgs") : text.find("const SLEEP_RESUME_HINT")]
+    assert 'nextId ? ""' not in apply
+    assert "localVideoFailedUrl" in apply
+    mount = text[text.find("function mountPicture") : text.find("function applyYoutubeArgs")]
+    assert mount.find("mountLocalVideo()") < mount.find("mountYoutubePlayer()")
+    local = text[text.find("function mountLocalVideo") : text.find("function mountYoutubePlayer")]
+    guard_at = local.find("if (!slot")
+    guard = local[guard_at : local.find("{", guard_at)]
+    assert "youtubeVideoId" not in guard
+    assert 'video.addEventListener("error"' in local
+    abandon = text[
+        text.find("function abandonUnplayableLocalVideo") : text.find("function mountLocalVideo")
+    ]
+    assert "localVideoFailedUrl = localVideoUrl" in abandon
+    assert "mountYoutubePlayer()" in abandon
+    assert "!youtubeVideoId" in abandon
+
+
+def test_mixer_floating_video_is_an_opaque_panel():
+    css = (
+        Path(__file__).resolve().parents[1]
+        / "ui"
+        / "stem_mixer_component"
+        / "frontend"
+        / "src"
+        / "style.css"
+    ).read_text(encoding="utf-8")
+    placed = css[css.find(".mixer-video-wrap.is-placed {") : css.find(".mixer-video-toolbar {")]
+    assert "background: var(--bg)" in placed
+    assert "padding:" in placed
+    assert "border:" in placed or "box-shadow:" in placed
+    assert "z-index: 20" in placed
+    assert "overflow: hidden" not in placed
+    toolbar = css[
+        css.find(".mixer-video-wrap.is-placed .mixer-video-toolbar") : css.find(
+            ".mixer-video-wrap.is-placed .mixer-video-resize"
+        )
+    ]
+    assert "z-index: 2" in toolbar
+    assert "background: var(--bg)" in toolbar
+    picture_at = css.find(".mixer-video-wrap.is-placed .mixer-video {")
+    picture = css[picture_at : css.find(".mixer-video-toolbar {", picture_at)]
+    assert "overflow: hidden" in picture
+
+
+def test_mixer_stem_wave_height_when_video_present():
+    text = _mixer_main_ts()
+    assert "STEM_WAVE_DEFAULT = 52" in text
+    assert "STEM_WAVE_MIN = 32" in text
+    assert "STEM_WAVE_MAX = 120" in text
+    assert "function clampStemWaveHeight" in text
+    assert "function applyStemWaveHeight" in text
+    assert 'id="btn-resize-stems"' in text
+    assert "function bindStemWaveGestures" in text
+    assert "pictureIsVisible()" in text
+    chrome = text[text.find("function updateYoutubeChrome") : text.find("function mountPicture")]
+    assert "applyStemWaveHeight()" in chrome
+    apply = text[text.find("function applyStemWaveHeight") : text.find("function presetSoloMap")]
+    assert "--stem-wave-height" in apply
+    assert "handle.hidden = !pictureIsVisible()" in apply
+
+    def clamp_stem_wave_height(height: float) -> float:
+        return max(32.0, min(120.0, height if height == height else 52.0))
+
+    assert clamp_stem_wave_height(20) == 32
+    assert clamp_stem_wave_height(200) == 120
+    assert clamp_stem_wave_height(64) == 64
+
+    css = (
+        Path(__file__).resolve().parents[1]
+        / "ui"
+        / "stem_mixer_component"
+        / "frontend"
+        / "src"
+        / "style.css"
+    ).read_text(encoding="utf-8")
+    wave = css[css.find(".waveform-svg {") : css.find(".waveform-svg .wave-baseline")]
+    assert "var(--stem-wave-height" in wave
+    assert "mixer-stems-resize" in css
+    assert "ns-resize" in css
 

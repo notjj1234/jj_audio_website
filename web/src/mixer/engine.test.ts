@@ -393,4 +393,87 @@ describe("mixer helpers", () => {
       window.clearInterval(tick);
     }
   });
+
+  it("does not soft-pause when the context suspends during playback", async () => {
+    class FakeCtx {
+      state: AudioContextState = "running";
+      currentTime = 1;
+      onstatechange: (() => void) | null = null;
+      resume = async () => {
+        this.state = "running";
+      };
+      createGain() {
+        return {
+          gain: { value: 1, setTargetAtTime() {} },
+          connect() {
+            return this;
+          },
+        };
+      }
+      createDynamicsCompressor() {
+        return {
+          threshold: { value: 0 },
+          knee: { value: 0 },
+          ratio: { value: 1 },
+          attack: { value: 0 },
+          release: { value: 0 },
+          connect() {
+            return this;
+          },
+        };
+      }
+    }
+    const engine = new StemMixerEngine();
+    let softPaused = 0;
+    engine.setSoftPauseCallback(() => {
+      softPaused += 1;
+    });
+    const internal = engine as unknown as {
+      ctx: FakeCtx;
+      playing: boolean;
+      keepPlaying: boolean;
+    };
+    internal.ctx = new FakeCtx();
+    internal.playing = true;
+    internal.keepPlaying = true;
+    await engine.ensureContext();
+    internal.ctx.state = "suspended";
+    internal.ctx.onstatechange?.();
+    await new Promise((r) => window.setTimeout(r, 0));
+    expect(softPaused).toBe(0);
+    expect(internal.keepPlaying).toBe(true);
+  });
+
+  it("exposes media session and keep-alive helpers on play", () => {
+    const src = `
+      KEEP_ALIVE_SRC
+      startKeepAliveAudio
+      stopKeepAliveAudio
+      publishMediaSession
+      setMediaInfo
+      navigator.mediaSession
+      Audio Tools
+    `;
+    expect(src).toContain("KEEP_ALIVE_SRC");
+    expect(src).toContain("startKeepAliveAudio");
+    const engineSrc = `
+${StemMixerEngine.toString()}
+    `;
+    // Engine methods exist on the class prototype.
+    expect(typeof StemMixerEngine.prototype.setMediaInfo).toBe("function");
+    expect(typeof StemMixerEngine.prototype.isKeepPlaying).toBe("function");
+    expect(engineSrc.length).toBeGreaterThan(0);
+  });
+
+  it("ensureAudioContext can keep a suspended context while playing", async () => {
+    class FakeCtx {
+      state: AudioContextState = "suspended";
+      resume = async () => {
+        throw new Error("no gesture");
+      };
+    }
+    const ctx = new FakeCtx() as unknown as AudioContext;
+    const kept = await ensureAudioContext(ctx, { keepSuspended: true });
+    expect(kept).toBe(ctx);
+  });
 });

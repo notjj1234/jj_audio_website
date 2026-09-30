@@ -69,6 +69,56 @@ function effectiveGains(
   return gains;
 }
 
+/** Tiny silent wav so the OS treats the mixer as active media. */
+const KEEP_ALIVE_SRC =
+  "data:audio/wav;base64,UklGRnoAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoAAAAAAAAAAAAAAAA=";
+
+let keepAliveEl: HTMLAudioElement | null = null;
+let keepAliveResume: (() => void) | null = null;
+
+function startKeepAliveAudio(onPlay?: () => void): void {
+  if (typeof document === "undefined") return;
+  keepAliveResume = onPlay ?? keepAliveResume;
+  if (!keepAliveEl) {
+    const el = document.createElement("audio");
+    el.src = KEEP_ALIVE_SRC;
+    el.loop = true;
+    el.muted = true;
+    el.playsInline = true;
+    el.setAttribute("playsinline", "true");
+    el.preload = "auto";
+    el.setAttribute("aria-hidden", "true");
+    el.style.display = "none";
+    el.addEventListener("play", () => {
+      keepAliveResume?.();
+    });
+    document.body.appendChild(el);
+    keepAliveEl = el;
+  }
+  void keepAliveEl.play()?.catch(() => {
+    /* gesture already used for stems; retry on next wake */
+  });
+}
+
+function stopKeepAliveAudio(): void {
+  if (!keepAliveEl) return;
+  try {
+    keepAliveEl.pause();
+    keepAliveEl.currentTime = 0;
+  } catch {
+    /* element already gone */
+  }
+}
+
+function claimAudioSessionPlayback(): void {
+  const nav = navigator as Navigator & { audioSession?: { type: string } };
+  try {
+    if (nav.audioSession) nav.audioSession.type = "playback";
+  } catch {
+    /* Safari/WKWebView only */
+  }
+}
+
 class StemMixerEngine {
   private ctx: AudioContext | null = null;
   private buffers = new Map<string, AudioBuffer>();
@@ -76,6 +126,8 @@ class StemMixerEngine {
   private sources = new Map<string, AudioBufferSourceNode>();
   private masterGain: GainNode | null = null;
   private limiter: DynamicsCompressorNode | null = null;
+  private streamDest: MediaStreamAudioDestinationNode | null = null;
+  private outputEl: HTMLAudioElement | null = null;
   private stemIds: string[] = [];
   private playing = false;
   private startedAt = 0;
@@ -87,6 +139,10 @@ class StemMixerEngine {
   private onSoftPause: (() => void) | null = null;
   private raf = 0;
   private wakeHooked = false;
+  /** User pressed Play. Window blur and sleep must not clear this. */
+  private keepPlaying = false;
+  private resumeInFlight = false;
+  private resumeAttemptAt = 0;
 
   setTimeCallback(
     cb: (t: number, dur: number, playing: boolean) => void
@@ -99,10 +155,8 @@ class StemMixerEngine {
   }
 
   /**
-   * Recover zombie/closed AudioContext after sleep/idle. No auto-resume.
-   * Do not soft-pause on document hide — keep playing across app/window switches.
-   * Some browsers still suspend Web Audio while fully backgrounded; that surfaces
-   * via AudioContext statechange, not visibility alone.
+   * Keep a Play press alive across window switches and sleep.
+   * The browser may suspend the context; that is not a user pause.
    */
   installWakeHooks(): void {
     if (this.wakeHooked || typeof window === "undefined") return;
@@ -113,6 +167,9 @@ class StemMixerEngine {
       }
     });
     window.addEventListener("pageshow", () => {
+      void this.handleWake();
+    });
+    window.addEventListener("focus", () => {
       void this.handleWake();
     });
   }
@@ -127,6 +184,10 @@ class StemMixerEngine {
 
   isPlaying(): boolean {
     return this.playing;
+  }
+
+  isKeepPlaying(): boolean {
+    return this.keepPlaying;
   }
 
   currentTime(): number {
@@ -159,7 +220,8 @@ class StemMixerEngine {
       try {
         await this.ctx!.resume();
       } catch {
-        this.rebuildGraphKeepingBuffers();
+        // While Play is held, do not wipe sources — resume() often fails without a gesture.
+        if (!this.keepPlaying) this.rebuildGraphKeepingBuffers();
       }
     }
     if (this.ctx!.state === "closed") {
@@ -170,7 +232,11 @@ class StemMixerEngine {
     return this.ctx!;
   }
 
-  /** Master gain → DynamicsCompressor (−1 dBTP-ish) → destination. */
+  /**
+   * Master gain → limiter → MediaStreamDestination → HTMLAudioElement.
+   * Routing through a media element keeps WKWebView/WebView2 from treating
+   * the mix as silent Web Audio that can suspend on window blur.
+   */
   private ensureMasterBus(): void {
     if (!this.ctx) return;
     if (this.masterGain && this.limiter) return;
@@ -184,18 +250,73 @@ class StemMixerEngine {
     this.limiter.attack.value = 0.003;
     this.limiter.release.value = 0.1;
     this.masterGain.connect(this.limiter);
-    this.limiter.connect(this.ctx.destination);
+    if (typeof this.ctx.createMediaStreamDestination === "function") {
+      this.streamDest = this.ctx.createMediaStreamDestination();
+      this.limiter.connect(this.streamDest);
+      this.ensureOutputElement();
+    } else {
+      this.limiter.connect(this.ctx.destination);
+    }
+  }
+
+  private ensureOutputElement(): void {
+    if (!this.streamDest || typeof document === "undefined") return;
+    if (!this.outputEl) {
+      const el = document.createElement("audio");
+      el.playsInline = true;
+      el.setAttribute("playsinline", "true");
+      el.preload = "auto";
+      el.setAttribute("aria-hidden", "true");
+      el.style.display = "none";
+      el.addEventListener("play", () => {
+        void this.continueAfterInterrupt();
+      });
+      document.body.appendChild(el);
+      this.outputEl = el;
+    }
+    if (this.outputEl.srcObject !== this.streamDest.stream) {
+      this.outputEl.srcObject = this.streamDest.stream;
+    }
+  }
+
+  private async startStreamOutput(): Promise<void> {
+    claimAudioSessionPlayback();
+    this.ensureMasterBus();
+    this.ensureOutputElement();
+    if (this.outputEl) {
+      try {
+        await this.outputEl.play();
+        return;
+      } catch {
+        /* fall through to silent keep-alive */
+      }
+    }
+    startKeepAliveAudio(() => {
+      void this.continueAfterInterrupt();
+    });
+  }
+
+  private stopStreamOutput(): void {
+    if (this.outputEl) {
+      try {
+        this.outputEl.pause();
+      } catch {
+        /* */
+      }
+    }
+    stopKeepAliveAudio();
   }
 
   private bindContextState(): void {
     if (!this.ctx) return;
     this.ctx.onstatechange = () => {
       const st = this.ctx?.state as string | undefined;
-      if (st === "interrupted" || st === "closed" || st === "suspended") {
-        if (this.playing) {
-          void this.softPauseFromInterrupt();
-        }
-      }
+      if (st !== "interrupted" && st !== "closed" && st !== "suspended") return;
+      if (!this.keepPlaying) return;
+      const now = performance.now();
+      if (now - this.resumeAttemptAt < 500) return;
+      this.resumeAttemptAt = now;
+      void this.continueAfterInterrupt();
     };
   }
 
@@ -228,6 +349,7 @@ class StemMixerEngine {
     this.gains.clear();
     this.masterGain = null;
     this.limiter = null;
+    this.streamDest = null;
     const old = this.ctx;
     this.ctx = null;
     if (old) {
@@ -251,9 +373,8 @@ class StemMixerEngine {
   }
 
   private async softPauseFromInterrupt(): Promise<void> {
-    await this.stopSources(true);
-    this.tick();
-    this.onSoftPause?.();
+    // Blur/sleep must not clear Play. Retry when the context can run again.
+    await this.continueAfterInterrupt();
   }
 
   private async contextLooksZombie(): Promise<boolean> {
@@ -266,19 +387,28 @@ class StemMixerEngine {
 
   async handleWake(): Promise<void> {
     if (!this.ctx) return;
-    // Only repair dead graphs. Healthy background playback must keep running.
-    if (this.ctx.state === "closed") {
-      if (this.playing) {
-        await this.softPauseFromInterrupt();
-      }
-      this.rebuildGraphKeepingBuffers();
-      return;
-    }
-    if (await this.contextLooksZombie()) {
-      if (this.playing) {
-        await this.softPauseFromInterrupt();
-      }
-      this.rebuildGraphKeepingBuffers();
+    const dead = this.ctx.state === "closed" || (await this.contextLooksZombie());
+    if (dead) this.rebuildGraphKeepingBuffers();
+    if (this.keepPlaying) await this.continueAfterInterrupt();
+  }
+
+  /** Resume the same Play press after the browser suspends the context. */
+  private async continueAfterInterrupt(): Promise<void> {
+    if (!this.keepPlaying || this.resumeInFlight) return;
+    this.resumeInFlight = true;
+    try {
+      if (this.playing && this.ctx) this.offset = this.currentTime();
+      if (this.ctx?.state === "closed") this.rebuildGraphKeepingBuffers();
+      await this.ensureContext();
+      if (!this.ctx || (this.ctx.state as string) !== "running") return;
+      await this.startStreamOutput();
+      if (this.playing && this.sources.size > 0) return;
+      if (this.offset >= this.duration) this.offset = 0;
+      this.startSources(this.offset);
+    } catch {
+      /* keepPlaying stays set; the next focus or wake retries */
+    } finally {
+      this.resumeInFlight = false;
     }
   }
 
@@ -295,7 +425,9 @@ class StemMixerEngine {
     this.stemIds = stems.map((s) => s.id);
     this.offset = 0;
     this.playing = false;
+    this.keepPlaying = false;
     this.duration = 0;
+    stopKeepAliveAudio();
 
     // Decode without starting playback. Create context but don't resume until Play —
     // pywebview/WKWebView leaves output silent if resume() runs without a user gesture.
@@ -459,19 +591,26 @@ class StemMixerEngine {
   }
 
   async play(): Promise<void> {
+    this.keepPlaying = true;
     await this.ensureContext();
     // After sleep, playing may stay true with dead sources — force restart.
     if (this.playing) {
       const healthy =
         this.ctx?.state === "running" && this.sources.size > 0;
-      if (healthy) return;
+      if (healthy) {
+        await this.startStreamOutput();
+        return;
+      }
       await this.stopSources(true);
     }
     if (this.offset >= this.duration) this.offset = 0;
     this.startSources(this.offset);
+    await this.startStreamOutput();
   }
 
   async pause(): Promise<void> {
+    this.keepPlaying = false;
+    this.stopStreamOutput();
     await this.stopSources(true);
     this.tick();
   }
@@ -494,6 +633,8 @@ class StemMixerEngine {
   }
 
   async stop(): Promise<void> {
+    this.keepPlaying = false;
+    this.stopStreamOutput();
     await this.pause();
     await this.seek(0);
   }
@@ -501,6 +642,8 @@ class StemMixerEngine {
   private tick = (): void => {
     const t = this.currentTime();
     if (this.playing && t >= this.duration - 0.02) {
+      this.keepPlaying = false;
+      this.stopStreamOutput();
       void this.stopSources(false);
       this.offset = this.duration;
     }
@@ -542,6 +685,7 @@ let activePreset: PlaybackPresetId = "all";
 
 const VIDEO_DRIFT_SEC = 0.4;
 const VIDEO_RESYNC_COOLDOWN_MS = 2000;
+const HAVE_METADATA = 1;
 
 function videoNeedsSeek(
   audioSec: number,
@@ -578,14 +722,38 @@ const VIDEO_MIN_WIDTH = 160;
 const VIDEO_STEM_GUTTER = 160;
 const VIDEO_LAYOUT_KEY = "audiotools_stem_mixer_video_layout";
 
+type VideoSnap = "left" | "right" | "above" | "below";
+
 type VideoLayout = {
   placed: boolean;
+  snap: VideoSnap;
   width: number;
   x: number;
   y: number;
 };
 
-let videoLayout: VideoLayout = { placed: false, width: 0, x: 0, y: 0 };
+function videoSnap(value: unknown): VideoSnap {
+  if (value === "right" || value === "above" || value === "below") return value;
+  return "left";
+}
+
+function dockedVideoLayout(layout: VideoLayout): VideoLayout {
+  return {
+    placed: false,
+    snap: videoSnap(layout.snap),
+    width: layout.width,
+    x: layout.x,
+    y: layout.y,
+  };
+}
+
+let videoLayout: VideoLayout = {
+  placed: false,
+  snap: "left",
+  width: 0,
+  x: 0,
+  y: 0,
+};
 
 function clampVideoWidth(width: number, frameWidth: number): number {
   const max = Math.max(VIDEO_MIN_WIDTH, frameWidth - VIDEO_STEM_GUTTER);
@@ -622,6 +790,7 @@ function loadVideoLayout(): void {
     const data = JSON.parse(raw) as Partial<VideoLayout>;
     videoLayout = {
       placed: Boolean(data.placed),
+      snap: videoSnap(data.snap),
       width: Number(data.width) > 0 ? Number(data.width) : 0,
       x: Number(data.x) || 0,
       y: Number(data.y) || 0,
@@ -640,6 +809,57 @@ function saveVideoLayout(): void {
 }
 
 loadVideoLayout();
+
+const STEM_WAVE_DEFAULT = 52;
+const STEM_WAVE_MIN = 32;
+const STEM_WAVE_MAX = 120;
+const STEM_WAVE_KEY = "audiotools_stem_mixer_stem_wave";
+
+let stemWaveHeight = STEM_WAVE_DEFAULT;
+
+function clampStemWaveHeight(height: number): number {
+  const h = Number.isFinite(height) ? height : STEM_WAVE_DEFAULT;
+  return Math.max(STEM_WAVE_MIN, Math.min(STEM_WAVE_MAX, h));
+}
+
+function loadStemWaveHeight(): void {
+  try {
+    const raw = sessionStorage.getItem(STEM_WAVE_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw) as { height?: number };
+    if (Number(data.height) > 0) {
+      stemWaveHeight = clampStemWaveHeight(Number(data.height));
+    }
+  } catch {
+    /* private mode */
+  }
+}
+
+function saveStemWaveHeight(): void {
+  try {
+    sessionStorage.setItem(
+      STEM_WAVE_KEY,
+      JSON.stringify({ height: stemWaveHeight })
+    );
+  } catch {
+    /* quota / private mode */
+  }
+}
+
+loadStemWaveHeight();
+
+function pictureIsVisible(): boolean {
+  return Boolean(youtubeVideoId || localVideoUrl) && !hideYoutubeVideo;
+}
+
+function applyStemWaveHeight(): void {
+  const mixer = mixerFrame();
+  const handle = document.getElementById("btn-resize-stems");
+  if (mixer) {
+    mixer.style.setProperty("--stem-wave-height", `${stemWaveHeight}px`);
+  }
+  if (handle) handle.hidden = !pictureIsVisible();
+}
 
 function presetSoloMap(
   ids: string[],
@@ -690,6 +910,10 @@ let suppressPictureEventsUntil = 0;
 let lastPictureObserved = -1;
 let lastMixerObserved = -1;
 let picturePollTimer: number | null = null;
+let localVideoApplyToken = 0;
+let localPlayFromUs = false;
+let youtubePlayFromUsUntil = 0;
+let localVideoFailedUrl = "";
 
 function ensureYoutubeApi(): Promise<void> {
   const yt = (window as unknown as { YT?: { Player?: unknown } }).YT;
@@ -739,6 +963,7 @@ function destroyYoutubePlayer(): void {
 }
 
 function destroyLocalVideo(): void {
+  localVideoApplyToken += 1;
   if (!localVideoEl) return;
   try {
     localVideoEl.pause();
@@ -782,10 +1007,10 @@ function markPictureCommand(): void {
 
 function readPictureTime(): number | null {
   try {
-    if (ytPlayer && youtubeVideoId && !hideYoutubeVideo) return ytPlayer.getCurrentTime();
-    if (localVideoEl && localVideoUrl && !youtubeVideoId && !hideYoutubeVideo) {
+    if (localVideoEl && localVideoUrl && !hideYoutubeVideo) {
       return localVideoEl.currentTime;
     }
+    if (ytPlayer && youtubeVideoId && !hideYoutubeVideo) return ytPlayer.getCurrentTime();
   } catch {
     return null;
   }
@@ -795,24 +1020,40 @@ function readPictureTime(): number | null {
 function writePictureTo(pictureT: number, playing: boolean): void {
   lastPictureObserved = pictureT;
   lastMixerObserved = engine.currentTime();
+  if (localVideoEl && !hideYoutubeVideo && localVideoUrl) {
+    const video = localVideoEl;
+    video.muted = true;
+    if (video.readyState < HAVE_METADATA) {
+      const token = ++localVideoApplyToken;
+      const onMeta = () => {
+        video.removeEventListener("loadedmetadata", onMeta);
+        if (token !== localVideoApplyToken || localVideoEl !== video) return;
+        markPictureCommand();
+        writePictureTo(
+          pictureTimeForMixer(engine.currentTime(), videoOffsetSec),
+          engine.isPlaying() || wantPlaying
+        );
+      };
+      video.addEventListener("loadedmetadata", onMeta);
+      return;
+    }
+    try {
+      if (Math.abs(video.currentTime - pictureT) > VIDEO_DRIFT_SEC) {
+        video.currentTime = pictureT;
+      }
+      if (playing) playLocalVideo(video);
+      else video.pause();
+    } catch {
+      /* picture failed; audio remains the clock */
+    }
+    return;
+  }
   if (ytPlayer && !hideYoutubeVideo && youtubeVideoId) {
     try {
       ytPlayer.mute();
       ytPlayer.seekTo(pictureT, true);
-      if (playing) ytPlayer.playVideo();
+      if (playing) playYoutubeVideo();
       else ytPlayer.pauseVideo();
-    } catch {
-      /* picture failed; audio remains the clock */
-    }
-  }
-  if (localVideoEl && !hideYoutubeVideo && localVideoUrl && !youtubeVideoId) {
-    try {
-      localVideoEl.muted = true;
-      if (Math.abs(localVideoEl.currentTime - pictureT) > VIDEO_DRIFT_SEC) {
-        localVideoEl.currentTime = pictureT;
-      }
-      if (playing) void localVideoEl.play();
-      else localVideoEl.pause();
     } catch {
       /* picture failed; audio remains the clock */
     }
@@ -835,6 +1076,37 @@ function pauseStemsFromPicture(): void {
   setPlayPauseLabel(false);
   transportPending = "pause";
   applyTransport();
+}
+
+function startStemsFromPicture(): void {
+  if (engine.isPlaying() || wantPlaying) return;
+  wantPlaying = true;
+  setPlayPauseLabel(true);
+  transportPending = "play";
+  applyTransport();
+}
+
+function playLocalVideo(video: HTMLVideoElement): void {
+  localPlayFromUs = true;
+  queueMicrotask(() => {
+    localPlayFromUs = false;
+  });
+  try {
+    const started = video.play();
+    if (started) {
+      void started.catch(() => {
+        /* rejected; the next Play can try again */
+      });
+    }
+  } catch {
+    localPlayFromUs = false;
+  }
+}
+
+function playYoutubeVideo(): void {
+  if (!ytPlayer) return;
+  youtubePlayFromUsUntil = performance.now() + 400;
+  ytPlayer.playVideo();
 }
 
 function syncPictureToStems(playing: boolean): void {
@@ -874,9 +1146,17 @@ function syncPictureToStems(playing: boolean): void {
   }
 }
 
+function abandonUnplayableLocalVideo(): void {
+  if (!localVideoUrl || !youtubeVideoId) return;
+  localVideoFailedUrl = localVideoUrl;
+  localVideoUrl = "";
+  destroyLocalVideo();
+  mountYoutubePlayer();
+}
+
 function mountLocalVideo(): void {
   const slot = document.getElementById("yt-player-slot");
-  if (!slot || !localVideoUrl || hideYoutubeVideo || youtubeVideoId) {
+  if (!slot || !localVideoUrl || hideYoutubeVideo) {
     destroyLocalVideo();
     return;
   }
@@ -890,10 +1170,18 @@ function mountLocalVideo(): void {
   video.muted = true;
   video.playsInline = true;
   video.preload = "metadata";
+  video.addEventListener("error", () => {
+    if (localVideoEl !== video) return;
+    abandonUnplayableLocalVideo();
+  });
+  slot.append(video);
+  localVideoEl = video;
   video.src = localVideoUrl;
   video.dataset.src = localVideoUrl;
   video.addEventListener("play", () => {
-    if (!engine.isPlaying()) video.pause();
+    video.muted = true;
+    if (localPlayFromUs) return;
+    startStemsFromPicture();
   });
   video.addEventListener("pause", () => {
     pauseStemsFromPicture();
@@ -917,8 +1205,6 @@ function mountLocalVideo(): void {
       if (syncOrigin === "video") syncOrigin = null;
     });
   });
-  slot.append(video);
-  localVideoEl = video;
   nudgeYoutubeToAudio();
 }
 
@@ -973,12 +1259,14 @@ function mountYoutubePlayer(): void {
             nudgeYoutubeToAudio();
           },
           onStateChange: (ev: { data: number }) => {
-            if (ev.data === 1 && !engine.isPlaying()) {
+            if (ev.data === 1) {
               try {
-                ytPlayer?.pauseVideo();
+                ytPlayer?.mute();
               } catch {
-                /* ignore */
+                /* audio remains the clock */
               }
+              if (performance.now() < youtubePlayFromUsUntil) return;
+              startStemsFromPicture();
             }
             if (ev.data === 2) pauseStemsFromPicture();
           },
@@ -1000,11 +1288,16 @@ function updateYoutubeChrome(): void {
   const hasVideo = Boolean(youtubeVideoId || localVideoUrl);
   if (wrap) wrap.hidden = !hasVideo || hideYoutubeVideo;
   if (showBtn) showBtn.hidden = !hasVideo || !hideYoutubeVideo;
+  applyStemWaveHeight();
 }
 
 function mountPicture(): void {
-  if (youtubeVideoId) mountYoutubePlayer();
-  else mountLocalVideo();
+  if (localVideoUrl) mountLocalVideo();
+  else if (youtubeVideoId) mountYoutubePlayer();
+  else {
+    destroyYoutubePlayer();
+    destroyLocalVideo();
+  }
 }
 
 function applyYoutubeArgs(
@@ -1014,7 +1307,9 @@ function applyYoutubeArgs(
   offsetSec = 0
 ): void {
   const nextId = (id || "").trim();
-  const nextUrl = nextId ? "" : (videoUrl || "").trim();
+  const rawUrl = (videoUrl || "").trim();
+  if (rawUrl !== localVideoFailedUrl) localVideoFailedUrl = "";
+  const nextUrl = rawUrl === localVideoFailedUrl ? "" : rawUrl;
   const nextHide = !(nextId || nextUrl) || hide;
   const nextOffset = Number.isFinite(offsetSec) && offsetSec > 0 ? offsetSec : 0;
   if (nextId !== youtubeVideoId || nextHide) youtubeFallbackId = "";
@@ -1050,12 +1345,117 @@ function applyYoutubeArgs(
 const SLEEP_RESUME_HINT = "Tap Play to resume after sleep";
 
 engine.setSoftPauseCallback(() => {
-  wantPlaying = false;
-  setPlayPauseLabel(false);
-  const el = document.getElementById("status");
-  if (el) el.textContent = SLEEP_RESUME_HINT;
-  saveTransport();
+  /* Blur and sleep are not a user Pause — keepPlaying recovery handles them. */
 });
+
+function mediaSessionArtwork(): MediaImage[] {
+  const id = (youtubeVideoId || "").trim();
+  if (!id) return [];
+  return [
+    {
+      src: `https://i.ytimg.com/vi/${encodeURIComponent(id)}/hqdefault.jpg`,
+      sizes: "480x360",
+      type: "image/jpeg",
+    },
+  ];
+}
+
+function clearMediaSession(): void {
+  stopKeepAliveAudio();
+  const ms = navigator.mediaSession;
+  if (!ms) return;
+  try {
+    ms.metadata = null;
+    ms.playbackState = "none";
+    for (const action of [
+      "play",
+      "pause",
+      "seekto",
+      "seekbackward",
+      "seekforward",
+    ] as MediaSessionAction[]) {
+      try {
+        ms.setActionHandler(action, null);
+      } catch {
+        /* unsupported action */
+      }
+    }
+  } catch {
+    /* Media Session unavailable */
+  }
+}
+
+function bindMediaSessionHandlers(): void {
+  const ms = navigator.mediaSession;
+  if (!ms) return;
+  try {
+    ms.setActionHandler("play", () => {
+      wantPlaying = true;
+      setPlayPauseLabel(true);
+      transportPending = "play";
+      applyTransport();
+    });
+    ms.setActionHandler("pause", () => {
+      wantPlaying = false;
+      setPlayPauseLabel(false);
+      transportPending = "pause";
+      applyTransport();
+    });
+    ms.setActionHandler("seekto", (details) => {
+      if (details.seekTime == null || !Number.isFinite(details.seekTime)) return;
+      syncOrigin = "audio";
+      void engine.seek(details.seekTime).then(() => nudgeYoutubeToAudio());
+    });
+    ms.setActionHandler("seekbackward", (details) => {
+      const delta = details.seekOffset ?? 10;
+      syncOrigin = "audio";
+      void engine
+        .seek(Math.max(0, engine.currentTime() - delta))
+        .then(() => nudgeYoutubeToAudio());
+    });
+    ms.setActionHandler("seekforward", (details) => {
+      const delta = details.seekOffset ?? 10;
+      syncOrigin = "audio";
+      void engine
+        .seek(engine.currentTime() + delta)
+        .then(() => nudgeYoutubeToAudio());
+    });
+  } catch {
+    /* Media Session actions unavailable */
+  }
+}
+
+function publishMediaSession(playing: boolean): void {
+  const ms = navigator.mediaSession;
+  if (!ms) return;
+  try {
+    bindMediaSessionHandlers();
+    ms.metadata = new MediaMetadata({
+      title: trackTitle.trim() || "Stem mix",
+      artist: "Audio Tools",
+      artwork: mediaSessionArtwork(),
+    });
+    ms.playbackState = playing ? "playing" : "paused";
+  } catch {
+    /* Media Session unavailable */
+  }
+}
+
+function updateMediaSessionPosition(): void {
+  const ms = navigator.mediaSession;
+  if (!ms?.setPositionState) return;
+  const dur = engine.getDuration();
+  if (!(dur > 0)) return;
+  try {
+    ms.setPositionState({
+      duration: dur,
+      playbackRate: 1,
+      position: Math.min(dur, Math.max(0, engine.currentTime())),
+    });
+  } catch {
+    /* position not accepted yet */
+  }
+}
 
 const TRANSPORT_STORAGE_KEY = "audiotools_stem_mixer_transport";
 
@@ -1102,6 +1502,7 @@ function statePayload(): string {
     metronomeOptions: metroConfig ? metroOptions : null,
     hideYoutubeVideo: hideYoutubeVideo,
     videoLayout,
+    stemWaveHeight,
   });
 }
 
@@ -1130,6 +1531,7 @@ function reportState(immediate = false): void {
       value.hideYoutubeVideo = hideYoutubeVideo;
     }
     value.videoLayout = { ...videoLayout };
+    value.stemWaveHeight = stemWaveHeight;
     Streamlit.setComponentValue(value);
   };
   if (immediate) {
@@ -1168,6 +1570,7 @@ function applyTransport(): void {
     void engine
       .stop()
       .finally(() => {
+        clearMediaSession();
         transportBusy = false;
         nudgeYoutubeToAudio();
         if (transportPending) applyTransport();
@@ -1176,6 +1579,12 @@ function applyTransport(): void {
     return;
   }
   if (wantPlaying === engine.isPlaying()) {
+    if (wantPlaying) {
+      publishMediaSession(true);
+      updateMediaSessionPosition();
+    } else {
+      clearMediaSession();
+    }
     saveTransport();
     return;
   }
@@ -1186,7 +1595,13 @@ function applyTransport(): void {
       const playingNow = engine.isPlaying();
       wantPlaying = playingNow;
       setPlayPauseLabel(playingNow);
-      if (playingNow) clearSleepResumeHint();
+      if (playingNow) {
+        clearSleepResumeHint();
+        publishMediaSession(true);
+        updateMediaSessionPosition();
+      } else {
+        clearMediaSession();
+      }
     })
     .catch(() => {
       wantPlaying = engine.isPlaying();
@@ -1195,6 +1610,7 @@ function applyTransport(): void {
       if (el && wantPlaying === false) {
         el.textContent = "Tap Play again to start audio";
       }
+      if (!wantPlaying) clearMediaSession();
     })
     .finally(() => {
       transportBusy = false;
@@ -1236,10 +1652,25 @@ function mixerFrame(): HTMLElement | null {
   return document.querySelector(".mixer");
 }
 
+function updateSnapChrome(): void {
+  const dock = document.getElementById("btn-dock-video");
+  if (dock) dock.hidden = !videoLayout.placed;
+  document.querySelectorAll<HTMLButtonElement>(".mixer-video-toolbar [data-snap]").forEach((el) => {
+    const on = el.dataset.snap === videoLayout.snap;
+    el.classList.toggle("active", on);
+    el.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+}
+
 function applyVideoLayout(): void {
   const wrap = document.getElementById("mixer-video-wrap");
   const frame = mixerFrame();
+  const stage = document.querySelector(".mixer-stage");
   if (!wrap || !frame) return;
+  const snap = videoSnap(videoLayout.snap);
+  videoLayout.snap = snap;
+  wrap.dataset.snap = snap;
+  if (stage instanceof HTMLElement) stage.dataset.snap = snap;
   const frameRect = frame.getBoundingClientRect();
   const frameW = frameRect.width || frame.clientWidth;
   const frameH = frameRect.height || frame.clientHeight;
@@ -1253,12 +1684,15 @@ function applyVideoLayout(): void {
     wrap.style.left = "";
     wrap.style.top = "";
     wrap.style.width = videoLayout.width > 0 ? `${videoLayout.width}px` : "";
+    updateSnapChrome();
+    scheduleFrameHeight();
     return;
   }
   wrap.style.width = `${videoLayout.width}px`;
   if (!measurable) {
     wrap.style.left = `${videoLayout.x}px`;
     wrap.style.top = `${videoLayout.y}px`;
+    updateSnapChrome();
     return;
   }
   const boxH = wrap.offsetHeight || (videoLayout.width * 9) / 16;
@@ -1276,6 +1710,7 @@ function applyVideoLayout(): void {
   wrap.style.width = `${clamped.width}px`;
   wrap.style.left = `${clamped.x}px`;
   wrap.style.top = `${clamped.y}px`;
+  updateSnapChrome();
 }
 
 function trackVideoPointer(
@@ -1338,6 +1773,31 @@ function bindVideoFrameGestures(): void {
   });
 }
 
+function bindStemWaveGestures(): void {
+  const resize = document.getElementById("btn-resize-stems");
+  resize?.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    if (!pictureIsVisible()) return;
+    event.preventDefault();
+    const startH = stemWaveHeight;
+    const startY = event.clientY;
+    const move = (ev: PointerEvent) => {
+      stemWaveHeight = clampStemWaveHeight(startH + (ev.clientY - startY));
+      applyStemWaveHeight();
+      scheduleFrameHeight();
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      saveStemWaveHeight();
+      reportState(true);
+      scheduleFrameHeight();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  });
+}
+
 function renderUI(theme?: Theme): void {
   const root = document.getElementById("root");
   if (!root) return;
@@ -1394,12 +1854,20 @@ function renderUI(theme?: Theme): void {
         <div class="mixer-video-wrap" id="mixer-video-wrap" hidden>
           <div class="mixer-video-toolbar">
             <button type="button" class="ghost mixer-video-drag" id="btn-drag-video" aria-label="Move video">Move</button>
+            <button type="button" class="ghost" id="btn-dock-video" hidden>Dock</button>
+            <button type="button" class="ghost" data-snap="left" aria-pressed="true">Left</button>
+            <button type="button" class="ghost" data-snap="right" aria-pressed="false">Right</button>
+            <button type="button" class="ghost" data-snap="above" aria-pressed="false">Above</button>
+            <button type="button" class="ghost" data-snap="below" aria-pressed="false">Below</button>
             <button type="button" class="ghost" id="btn-hide-video">Hide video</button>
           </div>
           <div class="mixer-video" id="yt-player-slot"></div>
           <div class="mixer-video-resize" id="btn-resize-video" role="separator" aria-label="Resize video"></div>
         </div>
-        <div class="mixer-stems" id="stems"></div>
+        <div class="mixer-stems-wrap">
+          <div class="mixer-stems" id="stems"></div>
+          <div class="mixer-stems-resize" id="btn-resize-stems" role="separator" aria-label="Resize stem waveforms" hidden></div>
+        </div>
       </div>
     </div>
   `;
@@ -1540,6 +2008,25 @@ function renderUI(theme?: Theme): void {
     };
   });
 
+  document.getElementById("btn-dock-video")!.onclick = () => {
+    videoLayout = dockedVideoLayout(videoLayout);
+    videoLayout.placed = false;
+    applyVideoLayout();
+    saveVideoLayout();
+    reportState(true);
+  };
+  document.querySelectorAll<HTMLButtonElement>(".mixer-video-toolbar [data-snap]").forEach((el) => {
+    el.onclick = () => {
+      const snap = videoSnap(el.dataset.snap);
+      videoLayout = dockedVideoLayout(videoLayout);
+      videoLayout.placed = false;
+      videoLayout.snap = snap;
+      applyVideoLayout();
+      saveVideoLayout();
+      reportState(true);
+    };
+  });
+
   document.getElementById("btn-hide-video")!.onclick = () => {
     hideYoutubeVideo = true;
     destroyYoutubePlayer();
@@ -1552,12 +2039,15 @@ function renderUI(theme?: Theme): void {
     updateYoutubeChrome();
     applyVideoLayout();
     mountPicture();
+    scheduleFrameHeight();
     reportState(true);
   };
   bindVideoFrameGestures();
+  bindStemWaveGestures();
   updateMuteAllLabel();
   updateStemChrome();
   updateYoutubeChrome();
+  applyStemWaveHeight();
 
   const seek = document.getElementById("seek") as HTMLInputElement;
   seek.oninput = () => {
@@ -1650,18 +2140,25 @@ function renderUI(theme?: Theme): void {
     if (!hideYoutubeVideo && (ytPlayer || localVideoEl)) {
       syncPictureToStems(playing);
     }
-    if (playing) clearSleepResumeHint();
+    if (playing) {
+      clearSleepResumeHint();
+      publishMediaSession(true);
+      updateMediaSessionPosition();
+    } else if (!wantPlaying && !engine.isKeepPlaying()) {
+      clearMediaSession();
+    }
     if (!transportBusy && transportPending === null) {
-      wantPlaying = playing;
-      setPlayPauseLabel(playing);
+      const hold = playing || engine.isKeepPlaying();
+      wantPlaying = hold;
+      setPlayPauseLabel(hold);
     }
     saveTransport();
   });
 
   updateTrackTitleDisplay();
-  scheduleFrameHeight();
   applyVideoLayout();
   mountPicture();
+  scheduleFrameHeight();
 }
 
 function updateTrackTitleDisplay(): void {
@@ -2161,6 +2658,7 @@ async function onRender(event: Event): Promise<void> {
   destroyLocalVideo();
   youtubeVideoId = "";
   localVideoUrl = "";
+  localVideoFailedUrl = "";
   hideYoutubeVideo = true;
   renderUI(data.theme);
   applyYoutubeArgs(

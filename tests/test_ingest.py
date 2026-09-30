@@ -67,6 +67,8 @@ def test_download_youtube_preview_video_uses_capped_mp4(tmp_path):
     assert dest.read_bytes() == b"mp4"
     opts = seen["opts"]
     assert "480" in opts["format"]
+    assert "avc1" in opts["format"]
+    assert "mp4a" in opts["format"]
     assert opts["merge_output_format"] == "mp4"
     assert opts["postprocessors"] == []
     assert not any(
@@ -88,6 +90,8 @@ def test_youtube_preview_ydl_opts_drops_wav_extract():
     assert opts["postprocessors"] == []
     assert opts["merge_output_format"] == "mp4"
     assert "height<=480" in opts["format"]
+    assert "avc1" in opts["format"]
+    assert "mp4a" in opts["format"]
 
 
 def test_youtube_ydl_opts_sets_noplaylist_and_client():

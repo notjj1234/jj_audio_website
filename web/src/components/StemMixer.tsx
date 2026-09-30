@@ -55,9 +55,11 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
     const engine = engineRef.current;
     engine.installWakeHooks();
     engine.setSoftPauseCallback(() => {
-      setPlaying(false);
-      setStatus(SLEEP_RESUME_HINT);
+      /* Blur and sleep are not a user Pause — keepPlaying recovery handles them. */
     });
+    engine.setMediaInfo(
+      stems.map((s) => s.label).filter(Boolean).join(" · ") || "Stem mix"
+    );
     const next: MixerState = {
       volumesDb: {},
       muted: {},
@@ -89,9 +91,9 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
     engine.setTimeCallback((t, dur, isPlaying) => {
       setCurrentTime(t);
       setDuration(dur);
-      setPlaying(isPlaying);
+      setPlaying(isPlaying || engine.isKeepPlaying());
       setSeek(dur > 0 ? Math.round((t / dur) * 1000) : 0);
-      if (isPlaying) {
+      if (isPlaying || engine.isKeepPlaying()) {
         setStatus((prev) => (prev === SLEEP_RESUME_HINT ? "Playing" : prev));
       }
     });

@@ -1210,7 +1210,7 @@ def test_home_upload_accepts_video_and_extracts_with_ffmpeg():
 def test_prefer_local_mixer_picture_over_youtube_id(tmp_path):
     video = tmp_path / "source_video.mp4"
     video.write_bytes(b"video")
-    assert prefer_local_mixer_picture("BaW_jenozKc", video) == (None, video)
+    assert prefer_local_mixer_picture("BaW_jenozKc", video) == ("BaW_jenozKc", video)
     assert prefer_local_mixer_picture("BaW_jenozKc", None) == ("BaW_jenozKc", None)
     assert prefer_local_mixer_picture("  ", None) == (None, None)
 
@@ -1220,6 +1220,8 @@ def test_live_mixer_passes_local_picture_and_offset():
     source = page.read_text(encoding="utf-8")
     mixer = source[source.find("def _render_live_mixer") : source.find("def _init_track_picker_session")]
     assert "prefer_local_mixer_picture(" in mixer
+    assert "youtube_video_id=youtube_id" in mixer
+    assert "local_video_url=local_url" in mixer
     assert "video_offset_sec=video_offset_sec_for_run(run_dir)" in mixer
     enqueue = source[source.find("def _enqueue_confirmed_job") : source.find("def _library_status_row")]
     assert "_download_youtube_preview_into_run(" in enqueue

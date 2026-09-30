@@ -143,7 +143,8 @@ export function resetMuteSolo(stemIds: string[], state: MixerState): MixerState 
 
 /** Create/resume AudioContext only on user gesture (mobile-safe). */
 export async function ensureAudioContext(
-  existing: AudioContext | null
+  existing: AudioContext | null,
+  opts?: { keepSuspended?: boolean }
 ): Promise<AudioContext> {
   if (!existing || existing.state === "closed") {
     return new AudioContext();
@@ -153,6 +154,8 @@ export async function ensureAudioContext(
     try {
       await existing.resume();
     } catch {
+      // While Play is held, keep the graph — resume often fails without a gesture.
+      if (opts?.keepSuspended) return existing;
       return new AudioContext();
     }
   }
@@ -162,6 +165,56 @@ export async function ensureAudioContext(
   return existing;
 }
 
+/** Tiny silent wav fallback when MediaStream routing is unavailable. */
+const KEEP_ALIVE_SRC =
+  "data:audio/wav;base64,UklGRnoAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoAAAAAAAAAAAAAAAA=";
+
+let keepAliveEl: HTMLAudioElement | null = null;
+let keepAliveResume: (() => void) | null = null;
+
+function startKeepAliveAudio(onPlay?: () => void): void {
+  if (typeof document === "undefined") return;
+  keepAliveResume = onPlay ?? keepAliveResume;
+  if (!keepAliveEl) {
+    const el = document.createElement("audio");
+    el.src = KEEP_ALIVE_SRC;
+    el.loop = true;
+    el.muted = true;
+    el.playsInline = true;
+    el.setAttribute("playsinline", "true");
+    el.preload = "auto";
+    el.setAttribute("aria-hidden", "true");
+    el.style.display = "none";
+    el.addEventListener("play", () => {
+      keepAliveResume?.();
+    });
+    document.body.appendChild(el);
+    keepAliveEl = el;
+  }
+  void keepAliveEl.play()?.catch(() => {
+    /* gesture already used for stems; retry on next wake */
+  });
+}
+
+function stopKeepAliveAudio(): void {
+  if (!keepAliveEl) return;
+  try {
+    keepAliveEl.pause();
+    keepAliveEl.currentTime = 0;
+  } catch {
+    /* element already gone */
+  }
+}
+
+function claimAudioSessionPlayback(): void {
+  const nav = navigator as Navigator & { audioSession?: { type: string } };
+  try {
+    if (nav.audioSession) nav.audioSession.type = "playback";
+  } catch {
+    /* Safari/WKWebView only */
+  }
+}
+
 export class StemMixerEngine {
   private ctx: AudioContext | null = null;
   private buffers = new Map<string, AudioBuffer>();
@@ -169,6 +222,8 @@ export class StemMixerEngine {
   private sources = new Map<string, AudioBufferSourceNode>();
   private masterGain: GainNode | null = null;
   private limiter: DynamicsCompressorNode | null = null;
+  private streamDest: MediaStreamAudioDestinationNode | null = null;
+  private outputEl: HTMLAudioElement | null = null;
   private stemIds: string[] = [];
   private playing = false;
   private startedAt = 0;
@@ -180,6 +235,13 @@ export class StemMixerEngine {
   private onSoftPause: (() => void) | null = null;
   private raf = 0;
   private wakeHooked = false;
+  /** User pressed Play. Window blur and sleep must not clear this. */
+  private keepPlaying = false;
+  private resumeInFlight = false;
+  private resumeAttemptAt = 0;
+  private sessionTitle = "Stem mix";
+  private sessionArtworkUrl = "";
+  private mediaSessionBound = false;
 
   setTimeCallback(cb: (t: number, dur: number, playing: boolean) => void): void {
     this.onTimeUpdate = cb;
@@ -189,11 +251,19 @@ export class StemMixerEngine {
     this.onSoftPause = cb;
   }
 
+  setMediaInfo(title: string, artworkUrl = ""): void {
+    this.sessionTitle = (title || "").trim() || "Stem mix";
+    this.sessionArtworkUrl = (artworkUrl || "").trim();
+    if (this.playing || this.keepPlaying) this.publishMediaSession(this.playing);
+  }
+
+  isKeepPlaying(): boolean {
+    return this.keepPlaying;
+  }
+
   /**
-   * Recover zombie/closed AudioContext after sleep/idle. No auto-resume.
-   * Do not soft-pause on document hide — keep playing across app/window switches.
-   * Some browsers still suspend Web Audio while fully backgrounded; that surfaces
-   * via AudioContext statechange, not visibility alone.
+   * Keep a Play press alive across window switches and sleep.
+   * The browser may suspend the context; that is not a user pause.
    */
   installWakeHooks(): void {
     if (this.wakeHooked || typeof window === "undefined") return;
@@ -204,6 +274,9 @@ export class StemMixerEngine {
       }
     });
     window.addEventListener("pageshow", () => {
+      void this.handleWake();
+    });
+    window.addEventListener("focus", () => {
       void this.handleWake();
     });
   }
@@ -223,11 +296,14 @@ export class StemMixerEngine {
   }
 
   async ensureContext(): Promise<AudioContext> {
-    const next = await ensureAudioContext(this.ctx);
+    const next = await ensureAudioContext(this.ctx, {
+      keepSuspended: this.keepPlaying,
+    });
     if (next !== this.ctx) {
       this.ctx = next;
       this.masterGain = null;
       this.limiter = null;
+      this.streamDest = null;
       this.reattachGainsToBus();
     } else {
       this.ctx = next;
@@ -237,6 +313,10 @@ export class StemMixerEngine {
     return this.ctx;
   }
 
+  /**
+   * Master gain → limiter → MediaStreamDestination → HTMLAudioElement.
+   * Keeps WKWebView/WebView2 from suspending silent Web Audio on blur.
+   */
   private ensureMasterBus(): void {
     if (!this.ctx) return;
     if (this.masterGain && this.limiter) return;
@@ -249,18 +329,73 @@ export class StemMixerEngine {
     this.limiter.attack.value = 0.003;
     this.limiter.release.value = 0.1;
     this.masterGain.connect(this.limiter);
-    this.limiter.connect(this.ctx.destination);
+    if (typeof this.ctx.createMediaStreamDestination === "function") {
+      this.streamDest = this.ctx.createMediaStreamDestination();
+      this.limiter.connect(this.streamDest);
+      this.ensureOutputElement();
+    } else {
+      this.limiter.connect(this.ctx.destination);
+    }
+  }
+
+  private ensureOutputElement(): void {
+    if (!this.streamDest || typeof document === "undefined") return;
+    if (!this.outputEl) {
+      const el = document.createElement("audio");
+      el.playsInline = true;
+      el.setAttribute("playsinline", "true");
+      el.preload = "auto";
+      el.setAttribute("aria-hidden", "true");
+      el.style.display = "none";
+      el.addEventListener("play", () => {
+        void this.continueAfterInterrupt();
+      });
+      document.body.appendChild(el);
+      this.outputEl = el;
+    }
+    if (this.outputEl.srcObject !== this.streamDest.stream) {
+      this.outputEl.srcObject = this.streamDest.stream;
+    }
+  }
+
+  private async startStreamOutput(): Promise<void> {
+    claimAudioSessionPlayback();
+    this.ensureMasterBus();
+    this.ensureOutputElement();
+    if (this.outputEl) {
+      try {
+        await this.outputEl.play();
+        return;
+      } catch {
+        /* fall through */
+      }
+    }
+    startKeepAliveAudio(() => {
+      void this.continueAfterInterrupt();
+    });
+  }
+
+  private stopStreamOutput(): void {
+    if (this.outputEl) {
+      try {
+        this.outputEl.pause();
+      } catch {
+        /* */
+      }
+    }
+    stopKeepAliveAudio();
   }
 
   private bindContextState(): void {
     if (!this.ctx) return;
     this.ctx.onstatechange = () => {
       const st = this.ctx?.state as string | undefined;
-      if (st === "interrupted" || st === "closed" || st === "suspended") {
-        if (this.playing) {
-          void this.softPauseFromInterrupt();
-        }
-      }
+      if (st !== "interrupted" && st !== "closed" && st !== "suspended") return;
+      if (!this.keepPlaying) return;
+      const now = performance.now();
+      if (now - this.resumeAttemptAt < 500) return;
+      this.resumeAttemptAt = now;
+      void this.continueAfterInterrupt();
     };
   }
 
@@ -312,6 +447,7 @@ export class StemMixerEngine {
     this.gains.clear();
     this.masterGain = null;
     this.limiter = null;
+    this.streamDest = null;
     const old = this.ctx;
     this.ctx = null;
     if (old) {
@@ -335,9 +471,7 @@ export class StemMixerEngine {
   }
 
   private async softPauseFromInterrupt(): Promise<void> {
-    await this.stopSources(true);
-    this.tick();
-    this.onSoftPause?.();
+    await this.continueAfterInterrupt();
   }
 
   private async contextLooksZombie(): Promise<boolean> {
@@ -350,19 +484,28 @@ export class StemMixerEngine {
 
   async handleWake(): Promise<void> {
     if (!this.ctx) return;
-    // Only repair dead graphs. Healthy background playback must keep running.
-    if (this.ctx.state === "closed") {
-      if (this.playing) {
-        await this.softPauseFromInterrupt();
-      }
-      this.rebuildGraphKeepingBuffers();
-      return;
-    }
-    if (await this.contextLooksZombie()) {
-      if (this.playing) {
-        await this.softPauseFromInterrupt();
-      }
-      this.rebuildGraphKeepingBuffers();
+    const dead = this.ctx.state === "closed" || (await this.contextLooksZombie());
+    if (dead) this.rebuildGraphKeepingBuffers();
+    if (this.keepPlaying) await this.continueAfterInterrupt();
+  }
+
+  /** Resume the same Play press after the browser suspends the context. */
+  private async continueAfterInterrupt(): Promise<void> {
+    if (!this.keepPlaying || this.resumeInFlight) return;
+    this.resumeInFlight = true;
+    try {
+      if (this.playing && this.ctx) this.offset = this.currentTime();
+      if (this.ctx?.state === "closed") this.rebuildGraphKeepingBuffers();
+      await this.ensureContext();
+      if (!this.ctx || (this.ctx.state as string) !== "running") return;
+      await this.startStreamOutput();
+      if (this.playing && this.sources.size > 0) return;
+      if (this.offset >= this.duration) this.offset = 0;
+      this.startSources(this.offset);
+    } catch {
+      /* keepPlaying stays set; the next focus or wake retries */
+    } finally {
+      this.resumeInFlight = false;
     }
   }
 
@@ -378,7 +521,10 @@ export class StemMixerEngine {
     this.stemIds = stems.map((s) => s.id);
     this.offset = 0;
     this.playing = false;
+    this.keepPlaying = false;
     this.duration = 0;
+    this.stopStreamOutput();
+    this.clearMediaSession();
 
     // Decode without starting playback; create context lazily unless asked.
     // Some browsers need a context to decode — create but don't resume until Play.
@@ -482,17 +628,29 @@ export class StemMixerEngine {
   }
 
   async play(): Promise<void> {
+    this.keepPlaying = true;
     await this.ensureContext();
     if (this.playing) {
       const healthy = this.ctx?.state === "running" && this.sources.size > 0;
-      if (healthy) return;
+      if (healthy) {
+        await this.startStreamOutput();
+        this.publishMediaSession(true);
+        this.updateMediaSessionPosition();
+        return;
+      }
       await this.stopSources(true);
     }
     if (this.offset >= this.duration) this.offset = 0;
     this.startSources(this.offset);
+    await this.startStreamOutput();
+    this.publishMediaSession(true);
+    this.updateMediaSessionPosition();
   }
 
   async pause(): Promise<void> {
+    this.keepPlaying = false;
+    this.stopStreamOutput();
+    this.clearMediaSession();
     await this.stopSources(true);
     this.tick();
   }
@@ -554,11 +712,112 @@ export class StemMixerEngine {
     return audioBufferToWav(rendered);
   }
 
+  private clearMediaSession(): void {
+    stopKeepAliveAudio();
+    const ms = typeof navigator !== "undefined" ? navigator.mediaSession : undefined;
+    if (!ms) return;
+    try {
+      ms.metadata = null;
+      ms.playbackState = "none";
+      for (const action of [
+        "play",
+        "pause",
+        "seekto",
+        "seekbackward",
+        "seekforward",
+      ] as MediaSessionAction[]) {
+        try {
+          ms.setActionHandler(action, null);
+        } catch {
+          /* unsupported */
+        }
+      }
+      this.mediaSessionBound = false;
+    } catch {
+      /* Media Session unavailable */
+    }
+  }
+
+  private bindMediaSessionHandlers(): void {
+    const ms = typeof navigator !== "undefined" ? navigator.mediaSession : undefined;
+    if (!ms || this.mediaSessionBound) return;
+    this.mediaSessionBound = true;
+    try {
+      ms.setActionHandler("play", () => {
+        void this.play();
+      });
+      ms.setActionHandler("pause", () => {
+        void this.pause();
+      });
+      ms.setActionHandler("seekto", (details) => {
+        if (details.seekTime == null || !Number.isFinite(details.seekTime)) return;
+        void this.seek(details.seekTime);
+      });
+      ms.setActionHandler("seekbackward", (details) => {
+        const delta = details.seekOffset ?? 10;
+        void this.seek(Math.max(0, this.currentTime() - delta));
+      });
+      ms.setActionHandler("seekforward", (details) => {
+        const delta = details.seekOffset ?? 10;
+        void this.seek(this.currentTime() + delta);
+      });
+    } catch {
+      /* Media Session actions unavailable */
+    }
+  }
+
+  private publishMediaSession(playing: boolean): void {
+    const ms = typeof navigator !== "undefined" ? navigator.mediaSession : undefined;
+    if (!ms) return;
+    try {
+      this.bindMediaSessionHandlers();
+      const artwork = this.sessionArtworkUrl
+        ? [
+            {
+              src: this.sessionArtworkUrl,
+              sizes: "480x360",
+              type: "image/jpeg",
+            },
+          ]
+        : [];
+      ms.metadata = new MediaMetadata({
+        title: this.sessionTitle,
+        artist: "Audio Tools",
+        artwork,
+      });
+      ms.playbackState = playing ? "playing" : "paused";
+    } catch {
+      /* Media Session unavailable */
+    }
+  }
+
+  private updateMediaSessionPosition(): void {
+    const ms = typeof navigator !== "undefined" ? navigator.mediaSession : undefined;
+    if (!ms?.setPositionState) return;
+    if (!(this.duration > 0)) return;
+    try {
+      ms.setPositionState({
+        duration: this.duration,
+        playbackRate: 1,
+        position: Math.min(this.duration, Math.max(0, this.currentTime())),
+      });
+    } catch {
+      /* position not accepted yet */
+    }
+  }
+
   private tick = (): void => {
     const t = this.currentTime();
     if (this.playing && t >= this.duration - 0.02) {
+      this.keepPlaying = false;
+      this.stopStreamOutput();
+      this.clearMediaSession();
       void this.stopSources(false);
       this.offset = this.duration;
+    }
+    if (this.playing || this.keepPlaying) {
+      this.publishMediaSession(this.playing);
+      this.updateMediaSessionPosition();
     }
     this.onTimeUpdate?.(this.currentTime(), this.duration, this.playing);
     if (this.playing) {

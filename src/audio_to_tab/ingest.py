@@ -181,8 +181,13 @@ def _youtube_preview_ydl_opts(
         log_path=log_path,
     )
     height = _PREVIEW_MAX_HEIGHT
+    # H.264 + AAC first. The desktop webview cannot play the AV1 stream
+    # YouTube often picks for "best" at this height.
     opts["format"] = (
-        f"bv*[height<={height}]+ba/b[height<={height}]/best[height<={height}]"
+        f"bv*[vcodec^=avc1][height<={height}]+ba[acodec^=mp4a]"
+        f"/bv*[vcodec^=avc1][height<={height}]+ba"
+        f"/b[vcodec^=avc1][height<={height}]"
+        f"/bv*[height<={height}]+ba/b[height<={height}]/best[height<={height}]"
     )
     opts["merge_output_format"] = "mp4"
     opts["postprocessors"] = []

@@ -1024,10 +1024,10 @@ def prefer_local_mixer_picture(
     youtube_id: str | None,
     local_video: Path | None,
 ) -> tuple[str | None, Path | None]:
-    """Local file wins so the mixer does not drop it when a YouTube id is set."""
-    if local_video is not None:
-        return None, local_video
+    """Keep both. The mixer tries the file first and can fall back to the id."""
     vid = (youtube_id or "").strip() or None
+    if local_video is not None:
+        return vid, local_video
     return vid, None
 
 

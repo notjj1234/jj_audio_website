@@ -17,7 +17,7 @@ Both products import `src/audio_to_tab/` (isolate, YouTube ingest, tab PDF pipel
    - Hosted processing modes Auto / `lite` / fast_cpu / etc. live in `backend/capabilities.py`. **That “lite” is not desktop Interface Lite.** Operators: `DEPLOY.md`.
 
 Shared: isolate engine, mixer math (`src/audio_to_tab/mixer.py`), ingest, tab pipeline.
-Not shared: Streamlit pages vs React pages; desktop disk queue vs API `JobManager`; desktop iframe mixer vs website Web Audio mixer (same wake/background-play policy in both).
+Not shared: Streamlit pages vs React pages; desktop disk queue vs API `JobManager`; desktop iframe mixer vs website Web Audio mixer (same wake/background-play policy in both). The desktop mixer also shows a synced picture (YouTube or a local source video) and can resize stem waveforms while that picture is visible. The website mixer is audio-only.
 
 ## Guitar isolation status (important context)
 
@@ -43,18 +43,20 @@ The **Tab PDF path (`pipeline.py`) and the Isolate path (`isolate.py`)** are bot
 | Job retry / failed strip | `ui/isolate_jobs.py` (`requeue_job`, status JSON on disk), `ui/isolate_state.py` (`should_show_failed_job`, dismiss TTL), strip UI in `ui/pages/isolate.py` |
 | Bundled Satoshi font | `ui/satoshi_font.py` + `ui/fonts/` (woff2); injected from `ui/app.py` (no CDN). Website copy: `web/public/fonts/` |
 | Guitar fix-up post-separation (desktop Mixer) | `ui/guitar_fixup.py` (low-end recovery, pre/refined switch), `ui/pages/isolate.py` |
-| Isolation UI (website) | `web/src/pages/IsolatePage.tsx`, `web/src/api.ts`, `web/src/trackOptions.ts`, isolate routes in `backend/main.py`. **File upload only** (no YouTube URL/search on hosted). |
+| Isolation UI (website) | `web/src/pages/IsolatePage.tsx`, `web/src/api.ts`, `web/src/trackOptions.ts`, isolate routes in `backend/main.py`. SPA is **file upload only** (no YouTube URL/search). API `POST /v1/jobs` can take `youtube_url` only when `allow_youtube` is on (`backend/config.py`); default is off. |
 | Guitar stem engine | `src/audio_to_tab/isolate.py` (`IsolateConfig`, `separate_stems`, fold, bass-bleed, low-end recovery, pre/refined), `src/audio_to_tab/separate.py` (Demucs / guitar-ft), `src/audio_to_tab/roformer.py`, `src/audio_to_tab/scnet.py` |
 | SCNet backend | `src/audio_to_tab/scnet.py`; dispatch in `isolate.py` / CLI `cli/isolate.py`; tests `tests/test_scnet.py` |
-| Live mixer (desktop iframe) | Edit `ui/stem_mixer_component/frontend/src/main.ts` + `metronomeClicks.ts` + `style.css`, then `make mixer-build`. Live click-track Accent/rate/sound on the metronome row (hot-swap; no full stem reload). **Background play:** `installWakeHooks` recovers on visible/pageshow only — does **not** soft-pause on document hide. Loader: `ui/stem_mixer_component/__init__.py`. Preview encode: `ui/media.py`. Downloads: build mix **on Save**, not on every mute/solo. |
+| Live mixer (desktop iframe) | Edit `ui/stem_mixer_component/frontend/src/main.ts` + `metronomeClicks.ts` + `style.css`, then `make mixer-build`. Live click-track Accent/rate/sound on the metronome row (hot-swap; no full stem reload). **Background play:** `installWakeHooks` recovers on visible/pageshow only — does **not** soft-pause on document hide. Loader: `ui/stem_mixer_component/__init__.py` (`youtube_video_id`, `local_video_url`, `video_offset_sec`, `hide_youtube_video`). Preview encode: `ui/media.py`. Downloads: build mix **on Save**, not on every mute/solo. |
 | Region picker (desktop iframe) | Edit `ui/region_picker_component/frontend/src/main.ts` + `style.css`, then `make region-picker-build`. Loader: `ui/region_picker_component/__init__.py`. Wired in `ui/pages/isolate.py` (`_render_region_controls`) |
 | Mix tabs (desktop iframe) | Edit `ui/mix_tabs_component/frontend/src/main.ts` + `style.css`, then `make mix-tabs-build`. Loader: `ui/mix_tabs_component/__init__.py`. Moises-style Home\|mix\|+ strip on Isolate |
-| Live mixer (website) | `web/src/mixer/engine.ts`, `web/src/components/StemMixer.tsx` — same wake/background-play policy as desktop; tests in `web/src/mixer/engine.test.ts` |
+| Mixer picture (desktop) | YouTube iframe or local `source_video` beside the stems, synced to mixer time. Wiring: `ui/pages/isolate.py`, `ui/isolate_state.py` (`mixer_youtube_video_id`, `mixer_local_video_path`, `prefer_local_mixer_picture`), offset `ui/isolate_jobs.py` (`video_offset_sec_for_run`), preview file `download_youtube_preview_video` in `src/audio_to_tab/ingest.py`. In the iframe: move/resize, snaps left/right/above/below, free-float (`videoLayout` in `sessionStorage`). Local file is tried first and can fall back to the YouTube id. |
+| Stem wave height (desktop, picture visible) | Drag `#btn-resize-stems` on `#stems` while a picture is showing (not hidden). `stemWaveHeight` default 52, clamp 32–120, `sessionStorage` key `audiotools_stem_mixer_stem_wave`. CSS `--stem-wave-height` on `.waveform-svg` (metro waves scale with it). Handle hides with the picture. Does not change seek, mute/solo, or video layout. Tests: `tests/test_stem_mixer_component.py`. |
+| Live mixer (website) | `web/src/mixer/engine.ts`, `web/src/components/StemMixer.tsx` — same wake/background-play policy as desktop; Media Session + `keepPlaying` across blur (blur is not Pause). No picture. Tests: `web/src/mixer/engine.test.ts` |
 | Metronome click stem | `src/audio_to_tab/metronome.py` (adaptive tempo curve + local `beat_track`; `click_times_1x` / optional `bpm_curve` diagnostics; rebake). Desktop attach/wiring: `ui/pages/isolate.py`. Live options: mixer `metronomeClicks.ts`. Tests: `tests/test_metronome.py` |
-| YouTube ingest | `src/audio_to_tab/ingest.py` (shared: `download_youtube_audio`, `search_youtube_videos`, `is_youtube_url`). Surfaces: `ui/pages/isolate.py`, `ui/pages/youtube_audio.py`, `ui/pages/tab_pdf.py`. Hosted SPA has **no** YouTube path. Tests: `tests/test_ingest.py` |
+| YouTube ingest | `src/audio_to_tab/ingest.py` (shared: `download_youtube_audio`, `download_youtube_preview_video`, `search_youtube_videos`, `is_youtube_url`, `format_youtube_duration`). Surfaces: `ui/pages/isolate.py`, `ui/pages/youtube_audio.py`, `ui/pages/tab_pdf.py`. Hosted SPA has **no** YouTube UI. `POST /v1/jobs` accepts `youtube_url` only if `allow_youtube` (`backend/config.py`, `backend/main.py`); default off. `POST /v1/isolate/jobs` is upload-based. Tests: `tests/test_ingest.py` |
 | YouTube to MP3 (desktop) | **Save file only** (not separate/mix). `ui/pages/youtube_audio.py` (paste/search → format → native folder save). Export: `ui/desktop_export.py` (`EXPORT_FORMATS`, `choose_export_dir`, `export_mix_to_folder`, `open_path_in_os`). Caveats: picker may sit behind pywebview; Linux needs zenity; overwrite same name; auto-reveal folder. Nav: `ui/app.py`. Freeze: `packaging/audio_tools.spec` (`ui.pages.youtube_audio`). Tester copy: `DESKTOP.md`. Tests: `tests/test_ui_pages.py`, nav order in `tests/test_desktop_paths.py` |
 | Isolate job queue (desktop) | `ui/isolate_jobs.py` (serial worker, status on disk, `requeue_job`), queue UI in `ui/pages/isolate.py`. Notifications: `ui/desktop_notify.py`. Export/download: `ui/desktop_export.py` |
-| Isolate jobs (API/worker) | `backend/jobs/manager.py`, `backend/jobs/runner.py` (`separate_stems`), `backend/worker.py`, `POST /v1/isolate/jobs` in `backend/main.py`. Single-flight: `backend/jobs/single_flight.py` |
+| Isolate jobs (API/worker) | `backend/jobs/manager.py`, `backend/jobs/runner.py` (`separate_stems`), `backend/worker.py`, `POST /v1/jobs` and `POST /v1/isolate/jobs` in `backend/main.py`. Single-flight: `backend/jobs/single_flight.py` |
 | Tab PDF | Engine: `src/audio_to_tab/pipeline.py` (model/refine/debleed/restore), `transcribe.py`, `tab_generate.py`, `pdf_render.py`. Desktop: `ui/pages/tab_pdf.py` (Lite hides engine/advanced; Pro exposes them). Website: `web/src/pages/TabPage.tsx` + tab job in `backend/jobs/runner.py` |
 | Desktop packaging / launcher | `packaging/launcher.py`, `packaging/audio_tools.spec`, freeze helpers in `src/audio_to_tab/edition.py`. Runbook: `DESKTOP.md`. CI: `.github/workflows/desktop-release.yml` |
 | CI (pytest / ruff) | `.github/workflows/ci.yml` (push/PR). Distinct from desktop release packaging. |
@@ -86,8 +88,10 @@ Lead/rhythm split (`src/audio_to_tab/lead_rhythm.py`) exists; it is **not** the 
 - `.env.lite.example` — lite compose env template.
 - `.python-version` — `3.11`.
 - `.gitattributes` — LF normalization.
-- `.gitignore` — venvs, `.env`, wavs, internal docs (`CONTEXT_TREE.md`, `docs/oracle-free-memory-spike.md`).
+- `.gitignore` — venvs, `.env`, wavs, eval lead/rhythm clips and local notes (`eval/lead_rhythm/clips/`, `out/`, `manifest.json`, `RESEARCH.md`, `RESULTS.md`), internal docs (`CONTEXT_TREE.md`, `docs/oracle-free-memory-spike.md`).
 - `PROJECT_TREE.md` — this file (tracked). Canonical in-repo tree. (`CONTEXT_TREE.md` is a gitignored internal name, not present in a clean clone.)
+- `.opencode/plans/fix-plan-2026-09-02.md` — tracked historical desktop fix plan (not a runbook; product docs are `DESKTOP.md` / `DEPLOY.md`).
+- `.superpowers/` — local agent scratch; gitignored. Not product code.
 - `docs/` — `issues.md` (I-xxx history; I-500 isolation audit); `ui-issues.md` (I-600+ UI/UX register; does not replace `issues.md`).
 
 ### `src/`
@@ -99,7 +103,7 @@ Shared engine. Import as `audio_to_tab`.
 - `audio_to_tab/separate.py` — Demucs subprocess / frozen in-process; `separate_guitar_stem` (model/guitar-ft/roformer/refine/debleed/restore); guitar-ft weights download + SHA256 verify (`run_demucs_guitar_ft_inprocess`).
 - `audio_to_tab/roformer.py` — BS-RoFormer-SW (6-stem) + MelBand-RoFormer Guitar specialist; urllib + SHA256 downloads; bs-roformer-infer / audio-separator backends; `run_guitar_refine` (residual-aware).
 - `audio_to_tab/scnet.py` — optional SCNet (`guitar_scnet`) 4-stem MUSDB18 backend; urllib + SHA256 checkpoint; `.[scnet]` extra. Not the default first-stage separator.
-- `audio_to_tab/ingest.py` — file normalize + YouTube download/search (`yt-dlp`: `download_youtube_audio`, `search_youtube_videos`, `is_youtube_url`).
+- `audio_to_tab/ingest.py` — file normalize + YouTube download/search (`yt-dlp`: `download_youtube_audio`, `download_youtube_preview_video` for the mixer picture, `search_youtube_videos`, `is_youtube_url`, `format_youtube_duration`).
 - `audio_to_tab/mixer.py` — stem mix / waveform helpers used by desktop downloads; metronome sorts last and starts muted.
 - `audio_to_tab/hardware.py` — RAM/GPU/chip probe (`HostProbe.cpu_brand`, Apple Silicon label e.g. `Apple M2 Pro`); desktop speed recommendations (**GPU-first** for CUDA / eligible MPS); MPS gated at ≥12 GB; Lite helpers (`lite_accelerator_available`, `lite_auto_choice`, Detected/Using captions).
 - `audio_to_tab/edition.py` — Windows CPU vs NVIDIA freeze flavor.
@@ -127,12 +131,13 @@ Desktop Streamlit only.
 
 - `__init__.py` — empty package marker.
 - `app.py` — multipage router (Audio Isolation, YouTube to MP3, Tab PDF); Lite↔Pro sidebar (`UI_MODE_*`, persist to disk; mainly Isolation/Tab PDF); nav-only global loading overlay (`should_show_global_loading`); injects Satoshi via `satoshi_font.py`.
-- `pages/isolate.py` — Audio Isolation (**separate/mix**). Sticky Home\|mix\|+ strip; Home form (upload/YouTube search, outcomes/stems, section); mix tab = live mixer + Downloads (export on Save); Queue below. Lite: outcome cards + hardware Detected/Using + auto speed/device/guitar; Pro: Speed / Engine / This computer / stem checkboxes. Status strip owns running/failed jobs (retry, dismiss).
+- `pages/isolate.py` — Audio Isolation (**separate/mix**). Sticky Home\|mix\|+ strip; Home form (upload/YouTube search, outcomes/stems, section); mix tab = live mixer (optional synced picture) + Downloads (export on Save); Queue below. Lite: outcome cards + hardware Detected/Using + auto speed/device/guitar; Pro: Speed / Engine / This computer / stem checkboxes. Status strip owns running/failed jobs (retry, dismiss).
 - `pages/youtube_audio.py` — YouTube to MP3 (**save file only**, not separate/mix). Paste or search a public URL, pick format (default MP3), native folder save via `choose_export_dir`. Pure helper `save_youtube_audio_to_folder`. Ignores Lite/Pro. Caveats: see `desktop_export.py` / `DESKTOP.md`.
 - `pages/tab_pdf.py` — Tab PDF demo page. Lite: simpler convert path (hides engine/advanced). Pro: guitar refine, guitar-ft, low-end restore, sub-bass de-bleed, Advanced transcription. Upload cap caption from `ui/common.py` (`max_upload_caption`).
+- `pages/__init__.py` — empty package marker.
 - `guitar_fixup.py` — post-separation guitar stem fix-up for the mix-tab Mixer (low-end recovery, pre/refined switch, diagnostics).
-- `isolate_jobs.py` — serial Demucs/RoFormer worker; job status JSON under app data dir; `requeue_job`, `separation_in_progress`, `format_job_error`.
-- `isolate_state.py` — Lite outcome cards, Pro track options, progress stages, UI mode helpers (`is_pro_mode`, persist settings), failed-strip TTL/dismiss, guitar selection (`prefer_roformer` for Lite CPU-only hosts), Home/mix shell tab helpers.
+- `isolate_jobs.py` — serial Demucs/RoFormer worker; job status JSON under app data dir; `requeue_job`, `separation_in_progress`, `format_job_error`; `video_offset_sec_for_run` (region start for mixer picture sync).
+- `isolate_state.py` — Lite outcome cards, Pro track options, progress stages, UI mode helpers (`is_pro_mode`, persist settings), failed-strip TTL/dismiss, guitar selection (`prefer_roformer` for Lite CPU-only hosts), Home/mix shell tab helpers, mixer picture helpers (`mixer_youtube_video_id`, `mixer_local_video_path`, `prefer_local_mixer_picture`).
 - `stem_icons.py` — Lucide-style line-art icons for Lite/Pro stem and outcome tiles.
 - `satoshi_font.py` — `@font-face` CSS for bundled Satoshi (used by `app.py`).
 - `fonts/` — Satoshi `.woff2` + `satoshi.css` + `satoshi/README.txt` (local, no CDN).
@@ -141,56 +146,58 @@ Desktop Streamlit only.
 - `common.py` — run listing, uploads, data dir, edition labels, `max_upload_mb` / `max_upload_caption`, `should_show_global_loading` (nav-only).
 - `media.py` — Streamlit media URLs, preview encode, mix cleanup.
 - `icon.png` — window / tab icon.
-- `stem_mixer_component/__init__.py` — iframe component; serves `frontend/build/`.
-- `stem_mixer_component/frontend/src/main.ts` — live mixer (Web Audio) source; metronome row live controls; wake hooks keep playback across app/window hide (soft-pause only on dead/interrupted context).
+- `stem_mixer_component/__init__.py` — iframe component; serves `frontend/build/` when `mixer_build_is_complete`. Args include `youtube_video_id`, `local_video_url`, `video_offset_sec`, `hide_youtube_video`.
+- `stem_mixer_component/frontend/src/main.ts` — live mixer (Web Audio) source; metronome row live controls; wake hooks keep playback across app/window hide (soft-pause only on dead/interrupted context). Picture: YouTube or local video, move/resize, snaps, free-float. Stem wave drag (`stemWaveHeight`, `#btn-resize-stems`) only while the picture is visible.
 - `stem_mixer_component/frontend/src/metronomeClicks.ts` — click synthesis / rate / peaks (parity with Python metronome render).
-- `stem_mixer_component/frontend/src/style.css` — mixer styles (incl. metro toolbar).
+- `stem_mixer_component/frontend/src/style.css` — mixer styles (metro toolbar, video frame, `--stem-wave-height`).
 - `stem_mixer_component/frontend/src/vite-env.d.ts` — Vite typings for the mixer iframe.
-- `stem_mixer_component/frontend/package.json`, `vite.config.ts`, `tsconfig.json`, `index.html` — Vite build for the iframe.
+- `stem_mixer_component/frontend/package.json`, `package-lock.json`, `vite.config.ts`, `tsconfig.json`, `index.html` — Vite build for the iframe.
 - `region_picker_component/__init__.py` — waveform region iframe; serves `frontend/build/`.
 - `region_picker_component/frontend/src/main.ts` — wavesurfer + Regions plugin source.
 - `region_picker_component/frontend/src/style.css` — region picker styles.
-- `region_picker_component/frontend/package.json`, `vite.config.ts`, `tsconfig.json`, `index.html` — Vite build.
+- `region_picker_component/frontend/package.json`, `package-lock.json`, `vite.config.ts`, `tsconfig.json`, `index.html` — Vite build.
 - `mix_tabs_component/__init__.py` — Moises-style Home|mix|+ strip; serves `frontend/build/`.
 - `mix_tabs_component/frontend/src/main.ts` — tab strip UI source.
 - `mix_tabs_component/frontend/src/style.css` — tab strip styles.
-- `mix_tabs_component/frontend/package.json`, `vite.config.ts`, `tsconfig.json`, `index.html` — Vite build.
+- `mix_tabs_component/frontend/package.json`, `package-lock.json`, `vite.config.ts`, `tsconfig.json`, `index.html` — Vite build.
 
 ### `web/`
 
 Hosted SPA (Vite + React). Dev: `make web` (proxies API). Paths below are repo-rooted.
 
-- `web/index.html` — SPA shell (may reference favicon paths not present under `web/public/`).
-- `web/package.json` / `web/vite.config.ts` / `web/tsconfig.json` — build; Vitest for mixer engine.
+- `web/index.html` — SPA shell; icons `/favicon.ico`, `/favicon-32x32.png`, `/apple-touch-icon.png`; Satoshi from `/fonts/satoshi.css`.
+- `web/package.json` / `web/package-lock.json` / `web/vite.config.ts` / `web/tsconfig.json` — build; Vitest for mixer engine and `App.test.ts`.
 - `web/netlify.toml`, `web/vercel.json` — SPA fallback hosting.
 - `web/.env.example` — optional `VITE_API_BASE_URL` (same-origin Caddy leaves unset).
-- `web/public/fonts/` — Satoshi `.woff2` + `satoshi.css` (bundled; favicon/apple-touch assets are **not** currently under `web/public/`).
+- `web/public/fonts/` — Satoshi `.woff2` + `satoshi.css`.
+- `web/public/favicon.ico`, `web/public/favicon-32x32.png`, `web/public/apple-touch-icon.png`, `web/public/icon-512.png` — site icons.
 - `web/src/main.tsx` — React mount.
-- `web/src/App.tsx` — routes `/isolate`, `/tab`; catch-all `*` → isolate. Does not mount a login route.
-- `web/src/api.ts` — REST/WebSocket client for jobs, uploads, stems.
+- `web/src/App.tsx` — routes `/login`, `/isolate`, `/tab`; catch-all `*` → isolate. Shell sign-in / sign-out.
+- `web/src/App.test.ts` — source-level routing checks (`/login` → `LoginPage`, post-login navigate to `/isolate`).
+- `web/src/api.ts` — REST/WebSocket client for jobs, uploads, stems. Capabilities include `allow_youtube` (SPA isolate UI does not offer a YouTube field).
 - `web/src/auth.tsx` — session / JWT.
 - `web/src/styles.css` — global styles.
 - `web/src/trackOptions.ts` — stem / track option labels shared by isolate UI.
 - `web/src/vite-env.d.ts` — Vite typings.
-- `web/src/pages/IsolatePage.tsx` — website isolation UI.
+- `web/src/pages/IsolatePage.tsx` — website isolation UI (file upload).
 - `web/src/pages/TabPage.tsx` — website tab PDF UI.
-- `web/src/pages/LoginPage.tsx` — login form UI; present on disk but not imported or routed from `App.tsx` (session via `auth.tsx` / demo JWT).
+- `web/src/pages/LoginPage.tsx` — login form; routed at `/login`; after sign-in navigates to `/isolate`.
 - `web/src/components/RegionPicker.tsx` — wavesurfer region trim for section mode.
-- `web/src/components/StemMixer.tsx` — website mixer UI.
+- `web/src/components/StemMixer.tsx` — website mixer UI (audio only; blur does not pause).
 - `web/src/components/JobProgress.tsx` — job status display.
 - `web/src/components/ProcessingModeSelect.tsx` — auto/fast/balanced from capabilities API.
 - `web/src/components/ProcessingModeSelect.test.ts` — Vitest for processing-mode select.
-- `web/src/mixer/engine.ts` — Web Audio mix engine (same background-play / wake policy as desktop iframe).
-- `web/src/mixer/engine.test.ts` — mixer unit tests (incl. hide-while-playing does not soft-pause).
+- `web/src/mixer/engine.ts` — Web Audio mix engine (same background-play / wake policy as desktop iframe; Media Session + `keepPlaying`).
+- `web/src/mixer/engine.test.ts` — mixer unit tests (incl. hide-while-playing does not soft-pause; `keepPlaying` / Media Session).
 
 ### `backend/`
 
 Hosted API.
 
 - `__init__.py` — package marker.
-- `main.py` — FastAPI routes: auth, upload, isolate/tab jobs (incl. guitar model/refine/debleed/restore fields), stem/mix download, WS events.
-- `config.py` — `ATT_*` settings.
-- `contracts.py` — Pydantic request/response models (incl. `low_end_restore_db`, `sub_bass_debleed`, guitar model/refine fields).
+- `main.py` — FastAPI routes: auth, upload, `POST /v1/jobs` (optional `youtube_url` when `allow_youtube`), `POST /v1/isolate/jobs`, tab jobs (incl. guitar model/refine/debleed/restore fields), stem/mix download, WS events.
+- `config.py` — `ATT_*` settings. `allow_youtube` defaults false.
+- `contracts.py` — Pydantic request/response models (incl. `youtube_url` on job create, `low_end_restore_db`, `sub_bass_debleed`, guitar model/refine fields).
 - `auth.py` — JWT, bootstrap admin, demo session.
 - `models.py` — SQLAlchemy User / Job / Upload.
 - `db.py` — engine + sessions.
@@ -200,8 +207,8 @@ Hosted API.
 - `limits.py` — upload size/type checks.
 - `worker.py` — arq worker entry.
 - `jobs/__init__.py` — jobs package marker.
-- `jobs/manager.py` — persist jobs, artifacts, cancel (incl. guitar option fields).
-- `jobs/runner.py` — runs `separate_stems` / `run_pipeline` (passes guitar options).
+- `jobs/manager.py` — persist jobs, artifacts, cancel (guitar option fields; optional `youtube_url` on `POST /v1/jobs`).
+- `jobs/runner.py` — runs `separate_stems` / `run_pipeline` (guitar options; YouTube source when the job has `youtube_url`).
 - `jobs/single_flight.py` — one heavy job at a time on small hosts.
 
 ### `packaging/`
@@ -242,7 +249,7 @@ Desktop freeze + installers. How-to: `DESKTOP.md`.
 - `test_ingest.py` — YouTube ingest (network opt-in).
 - `test_mixer.py` — mix helpers.
 - `test_metronome.py` — adaptive metronome (curve helpers, vocal-intro pulse, steady-tempo regression, 48 kHz, talking-intro gate) + render/rebake / `bpm_curve` diagnostics.
-- `test_stem_mixer_component.py` — desktop mixer build packaging + live metronome wiring smoke.
+- `test_stem_mixer_component.py` — desktop mixer build packaging, live metronome wiring, picture layout, and stem-wave height smoke.
 - `test_region_picker_component.py` — desktop region picker build packaging.
 - `test_mix_tabs_component.py` — desktop mix-tabs build packaging.
 - `test_media.py` — preview / cleanup.
@@ -269,8 +276,9 @@ Desktop freeze + installers. How-to: `DESKTOP.md`.
 
 ### `eval/`
 
-Offline scoring. Clips/results under `eval/lead_rhythm/` are mostly gitignored.
+Offline scoring. Gitignored under `eval/lead_rhythm/`: `clips/`, `out/`, `manifest.json`, `RESEARCH.md`, `RESULTS.md`. Those may exist locally and are not in a clean clone. `eval/results.json` is also gitignored.
 
+- `eval/__init__.py`, `eval/lead_rhythm/__init__.py` — empty package markers.
 - `generate_fixtures.py` — synthetic MIDI/WAV fixtures.
 - `score_transcription.py` — mir_eval vs ground-truth MIDI.
 - `fixtures/manifest.json` — fixture list; `*.mid` + allowed `*.wav` here.
@@ -322,4 +330,4 @@ One line each; do not hand-edit:
 
 ## Last verified
 
-2026-09-18 — metronome adaptive tempo map (`metronome.py` + `tests/test_metronome.py`); mixer background play (desktop `main.ts` + web `engine.ts` / `engine.test.ts`); README / DESKTOP / AGENTS / issues registers updated for 0.1.4 + those behaviors. Prior 2026-09-13 pass: hosted routing (`App.tsx` `/isolate`, `/tab`, catch-all → isolate; `LoginPage.tsx` unwired), mixer `vite-env.d.ts`, YouTube to MP3 paths, packaging hiddenimports.
+2026-09-30 — desktop mixer picture (YouTube or local `source_video`, move/resize, snaps, free-float) and stem-wave height while that picture is visible; website `/login` route + `App.test.ts`; favicons under `web/public/`; `POST /v1/jobs` `youtube_url` behind `allow_youtube` (SPA isolate stays upload-only); `download_youtube_preview_video`. Prior 2026-09-18 pass: metronome adaptive tempo map; mixer background play (desktop `main.ts` + web `engine.ts` / `engine.test.ts`).
