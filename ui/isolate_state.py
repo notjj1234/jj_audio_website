@@ -15,7 +15,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
-from audio_to_tab.hardware import HostProbe, resolve_desktop_speed
+from audio_to_tab.hardware import HostProbe, desktop_recommend, resolve_desktop_speed
 from audio_to_tab.isolate import (
     DEMUCS_MODELS,
     FOLD_OTHER_MODES,
@@ -723,6 +723,29 @@ def resolve_speed_preset(
         "device": resolved["device"],
         "help": resolved.get("help", ""),
     }
+
+
+def default_isolate_device(
+    probe: HostProbe | None,
+    allowed_devices: Sequence[str],
+    current: str | None = None,
+    *,
+    platform: str | None = None,
+) -> str | None:
+    """Seed the persisted ``isolate_device`` key from the host recommendation.
+
+    Positional order is wrong on the ``both`` edition: ``cuda`` is listed first even when
+    the machine has no NVIDIA GPU, so ``allowed_devices[0]`` would persist a CUDA default
+    that the run gate then rejects. An existing, still-valid choice always wins so a
+    deliberate user pick survives a restart.
+    """
+    if current and current in allowed_devices:
+        return current
+    if probe is not None and allowed_devices:
+        recommended = str(desktop_recommend(probe, platform=platform)["device"])
+        if recommended in allowed_devices:
+            return recommended
+    return allowed_devices[0] if allowed_devices else current
 
 
 LITE_MAX_DURATION_SEC = 90.0

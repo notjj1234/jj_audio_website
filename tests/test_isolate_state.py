@@ -47,6 +47,7 @@ from ui.isolate_state import (
     DEFAULT_SEPARATION_PRESET,
     DEFAULT_SPEED_PRESET,
     DEFAULT_TRACK_OPTIONS,
+    default_isolate_device,
     CUSTOM_STEM_CHOICES,
     ISOLATE_OUTPUT_NAME_KEY,
     ISOLATE_OUTPUT_NAME_PENDING_KEY,
@@ -821,7 +822,7 @@ def test_lite_new_cta_captions_chosen_outcome_and_source():
         source.find("def _render_new_workspace") : source.find("def _render_mixer_region_caption")
     ]
     assert 'key="isolate_separate"' in new_ws
-    assert "_enqueue_confirmed_job(choice, audio_path)" in new_ws
+    assert "_try_enqueue_choice(choice)" in new_ws
     assert "OUTCOME_CARD_KEY" in new_ws
     assert "_has_source_for_job(choice)" in new_ws
     assert "Custom ·" in new_ws
@@ -3516,3 +3517,51 @@ def test_failed_delete_run_does_not_detach_mix(tmp_path: Path, monkeypatch):
     assert calls == []
     assert st.session_state["isolate_flash"] == page._DELETE_FAILED_FLASH
 
+
+
+def test_default_isolate_device_prefers_recommendation_over_position(monkeypatch):
+    from audio_to_tab.hardware import HostProbe
+
+    monkeypatch.setenv("AUDIO_TOOLS_EDITION", "both")
+    cpu_only = HostProbe(cuda=False, mps=False, ram_gb=12.0)
+    assert (
+        default_isolate_device(cpu_only, ["cuda", "cpu"], None, platform="win32")
+        == "cpu"
+    )
+
+
+def test_default_isolate_device_keeps_persisted_choice(monkeypatch):
+    from audio_to_tab.hardware import HostProbe
+
+    monkeypatch.setenv("AUDIO_TOOLS_EDITION", "both")
+    cpu_only = HostProbe(cuda=False, mps=False, ram_gb=12.0)
+    assert (
+        default_isolate_device(cpu_only, ["cuda", "cpu"], "cpu", platform="win32")
+        == "cpu"
+    )
+
+
+def test_default_isolate_device_respects_stale_persisted_choice(monkeypatch):
+    """A persisted device no longer offered must be replaced, not kept."""
+    from audio_to_tab.hardware import HostProbe
+
+    monkeypatch.setenv("AUDIO_TOOLS_EDITION", "both")
+    cpu_only = HostProbe(cuda=False, mps=False, ram_gb=12.0)
+    assert (
+        default_isolate_device(cpu_only, ["cpu"], "cuda", platform="win32") == "cpu"
+    )
+
+
+def test_default_isolate_device_with_nvidia_prefers_cuda(monkeypatch):
+    from audio_to_tab.hardware import HostProbe
+
+    monkeypatch.setenv("AUDIO_TOOLS_EDITION", "both")
+    nvidia = HostProbe(cuda=True, mps=False, ram_gb=24.0)
+    assert (
+        default_isolate_device(nvidia, ["cuda", "cpu"], None, platform="win32")
+        == "cuda"
+    )
+
+
+def test_default_isolate_device_empty_options_returns_current():
+    assert default_isolate_device(None, [], None) is None

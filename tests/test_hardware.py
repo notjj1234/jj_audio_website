@@ -510,3 +510,53 @@ def test_refuse_long_roformer_audio(tmp_path, monkeypatch):
         _refuse_long_roformer_audio(audio)
     with pytest.raises(RuntimeError, match="90"):
         run_roformer_model(audio, tmp_path, model="bs_roformer_sw", device="cpu")
+
+
+def test_both_edition_recommends_cpu_when_no_nvidia_gpu(monkeypatch):
+    """A friend with no NVIDIA GPU must not default to CUDA on the both edition."""
+    monkeypatch.setenv("AUDIO_TOOLS_EDITION", "both")
+    rec = desktop_recommend(CPU_MID, platform="win32")
+    assert rec["device"] == "cpu"
+
+
+def test_both_edition_still_recommends_cuda_with_nvidia_gpu(monkeypatch):
+    monkeypatch.setenv("AUDIO_TOOLS_EDITION", "both")
+    rec = desktop_recommend(CUDA_HIGH, platform="win32")
+    assert rec["device"] == "cuda"
+
+
+def test_both_edition_faster_speed_uses_cpu_when_no_nvidia_gpu(monkeypatch):
+    monkeypatch.setenv("AUDIO_TOOLS_EDITION", "both")
+    resolved = resolve_desktop_speed("faster", CPU_MID, platform="win32")
+    assert resolved["device"] == "cpu"
+
+
+def test_both_edition_balanced_speed_uses_cpu_when_no_nvidia_gpu(monkeypatch):
+    monkeypatch.setenv("AUDIO_TOOLS_EDITION", "both")
+    resolved = resolve_desktop_speed("balanced", CPU_MID, platform="win32")
+    assert resolved["device"] == "cpu"
+
+
+def test_both_edition_offers_cuda_even_without_gpu(monkeypatch):
+    """Options are unchanged: a real NVIDIA GPU user can still pick CUDA by hand."""
+    monkeypatch.setenv("AUDIO_TOOLS_EDITION", "both")
+    assert desktop_device_options(CPU_MID, platform="win32") == ["cuda", "cpu"]
+
+
+def test_low_ram_both_edition_without_gpu_recommends_cpu(monkeypatch):
+    monkeypatch.setenv("AUDIO_TOOLS_EDITION", "both")
+    rec = desktop_recommend(CPU_LOW, platform="win32")
+    assert rec["device"] == "cpu"
+    assert rec["quality"] == "fast"
+
+
+def test_cuda_only_edition_ignores_probe_because_cpu_is_not_offered(monkeypatch):
+    """The NVIDIA freeze has no CPU option, so it keeps trusting its edition.
+
+    Guards the accelerator-only branch of ``_preferred_gpu``: a probe that fails to
+    report a GPU must not push a CUDA-only install onto a device it cannot offer.
+    """
+    monkeypatch.setenv("AUDIO_TOOLS_EDITION", "cuda")
+    assert desktop_device_options(CPU_MID, platform="win32") == ["cuda"]
+    assert resolve_desktop_speed("faster", CPU_MID, platform="win32")["device"] == "cuda"
+    assert desktop_recommend(CPU_MID, platform="win32")["device"] == "cuda"

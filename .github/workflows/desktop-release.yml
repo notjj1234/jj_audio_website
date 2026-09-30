@@ -26,7 +26,21 @@ permissions:
   contents: write
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      # Read the version out of the source rather than importing the package: this job
+      # runs before any `pip install`, and __init__.py is just a docstring + __version__.
+      - name: Read version
+        id: read
+        run: |
+          sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/audio_to_tab/__init__.py > version.txt
+          echo "version=$(cat version.txt)" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -183,20 +197,37 @@ jobs:
         run: |
           $version = python -c "from audio_to_tab import __version__; print(__version__)"
           powershell -ExecutionPolicy Bypass -File packaging/make_windows_installer.ps1 -AppVersion $version -Flavor ${{ matrix.edition }}
-          Copy-Item -Path "dist/AudioTools-$version-windows-x64-${{ matrix.edition }}-setup.exe" -Destination ${{ matrix.artifact }} -Force
+          # No rename. make_windows_installer.ps1 already emits the versioned name that
+          # DESKTOP.md and the release notes link to.
+          Get-ChildItem -Path dist -Filter "AudioTools-$version-windows-x64-${{ matrix.edition }}-setup.exe"
 
       - name: Package macOS pkg
         if: runner.os == 'macOS'
         run: |
           chmod +x packaging/make_pkg.sh packaging/make_app.sh packaging/pkg_scripts/postinstall
           export AUDIO_TOOLS_VERSION="$(python -c 'from audio_to_tab import __version__; print(__version__)')"
-          AUDIO_TOOLS_OUTPUT_DIR="$PWD" AUDIO_TOOLS_PKG_NAME="${{ matrix.artifact }}" ./packaging/make_pkg.sh
+          # No AUDIO_TOOLS_PKG_NAME override: make_pkg.sh picks the versioned name itself.
+          AUDIO_TOOLS_OUTPUT_DIR="$PWD" ./packaging/make_pkg.sh
+          ls -1 AudioTools-*-macos-*.pkg
 
-      - name: Upload artifact
+      # The Actions artifact *name* stays unique per matrix job, but the uploaded
+      # *filename* must be the script-generated one — GitHub derives each release
+      # asset's name from the filename, not from the artifact name.
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          path: dist/AudioTools-${{ needs.version.outputs.version }}-windows-x64-${{ matrix.edition }}-setup.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload artifact (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: AudioTools-${{ needs.version.outputs.version }}-macos-*.pkg
           if-no-files-found: error
           retention-days: 14
 
@@ -221,11 +252,11 @@ jobs:
 
             Pick **one** file for your machine (not a universal installer). Windows testers pick CPU **or** NVIDIA (or install both side by side):
 
-            - **Windows 10 / 11 (x64) CPU:** `AudioTools-windows-x64-cpu-setup.exe` (~300 MB class). Default for machines without an NVIDIA GPU.
-            - **Windows 10 / 11 (x64) NVIDIA CUDA:** `AudioTools-windows-x64-cuda-setup.exe` (large). Isolation is faster on an NVIDIA GPU + drivers. Same app, separate Start Menu name so it can sit beside the CPU edition.
+            - **Windows 10 / 11 (x64) CPU:** `AudioTools-0.1.4-windows-x64-cpu-setup.exe` (~300 MB class). Default for machines without an NVIDIA GPU.
+            - **Windows 10 / 11 (x64) NVIDIA CUDA:** `AudioTools-0.1.4-windows-x64-cuda-setup.exe` (large). Isolation is faster on an NVIDIA GPU + drivers. Same app, separate Start Menu name so it can sit beside the CPU edition.
             - Both are **64-bit only** (not 32-bit Windows 10, not native ARM). SmartScreen: More info → Run anyway. Needs [WebView2](https://go.microsoft.com/fwlink/p/?LinkId=2124703) (built into Windows 11 and recent Windows 10).
-            - **Apple Silicon Mac (M1–M4):** `AudioTools-macos-arm64-silicon.pkg` — macOS 12+. Isolation runs on **CPU**.
-            - **Intel Mac:** `AudioTools-macos-x64-intel.pkg` — same install steps. Isolation runs on **CPU**.
+            - **Apple Silicon Mac (M1–M4):** `AudioTools-0.1.4-macos-arm64-silicon.pkg` — macOS 12+. Isolation runs on **CPU**.
+            - **Intel Mac:** `AudioTools-0.1.4-macos-x64-intel.pkg` — same install steps. Isolation runs on **CPU**.
 
             First launch downloads Demucs weights (needs internet once; Windows CPU and NVIDIA editions share `%LOCALAPPDATA%\AudioTools\models`). Prefer 16 GB RAM; on 8 GB use a short clip (≤90 s) and leave speed on **Auto** (or **Faster**).
 

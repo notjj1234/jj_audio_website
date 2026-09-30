@@ -91,44 +91,44 @@ These are **four separate builds**. Send testers only the file that matches thei
 
 | Tester machine | File | Notes |
 |----------------|------|--------|
-| Apple Silicon Mac (M1–M4) | `AudioTools-macos-arm64-silicon.pkg` | macOS **12+**. Double-click → **Install**. The app launches when install finishes. If Finder blocks: Terminal `xattr -cr` + `sudo installer`, or **System Settings → Privacy & Security → Open Anyway**. |
-| Intel Mac | `AudioTools-macos-x64-intel.pkg` | Same install steps. An arm64 pkg will not launch here. |
+| Apple Silicon Mac (M1–M4) | `AudioTools-0.1.4-macos-arm64-silicon.pkg` | macOS **12+**. Double-click → **Install**. The app launches when install finishes. If Finder blocks: Terminal `xattr -cr` + `sudo installer`, or **System Settings → Privacy & Security → Open Anyway**. |
+| Intel Mac | `AudioTools-0.1.4-macos-x64-intel.pkg` | Same install steps. An arm64 pkg will not launch here. |
 | Windows 10 or 11 (x64), no NVIDIA GPU | `AudioTools-0.1.4-windows-x64-cpu-setup.exe` | **64-bit only.** Small Setup. Start Menu: **Audio Tools (CPU)**. Needs [WebView2](https://go.microsoft.com/fwlink/p/?LinkId=2124703). |
 | Windows 10 or 11 (x64) with NVIDIA GPU | `AudioTools-0.1.4-windows-x64-cuda-setup.exe` | **64-bit only.** Large Setup. Start Menu: **Audio Tools (NVIDIA)**. Isolation is faster on NVIDIA + drivers. Can be installed next to the CPU edition. |
 
-This is a **0.1.4 demo**. macOS builds are signed and notarized when Developer ID certificates are available on the build Mac. Windows SmartScreen will warn. The PyInstaller onedir is not obfuscated (Python is extractable); the freeze ships **no** hosted-site code, `.env`, or cloud credentials. No 32-bit Windows 10 build. No native Windows ARM build. No App Store.
+This is a **0.1.4 demo**. **Downloaded builds are unsigned** — macOS shows the "Apple could not verify" Gatekeeper warning and Windows shows SmartScreen "Unknown publisher". Both are expected; the Terminal commands below handle macOS. The PyInstaller onedir is not obfuscated (Python is extractable); the freeze ships **no** hosted-site code, `.env`, or cloud credentials. No 32-bit Windows 10 build. No native Windows ARM build. No App Store.
 
 The previous unlabeled `AudioTools-0.1.0-windows-x64-setup.exe` (all-in-one CUDA) used the CPU AppId and `C:\Program Files\AudioTools`. Installing the new **CPU** Setup **replaces** that tree. Uninstall it first if you want a clean split, then install CPU and/or NVIDIA.
 
-Published under a `desktop-v*` GitHub Release (draft until a maintainer publishes). `workflow_dispatch` also produces the four artifacts without a tag.
+Published under a `desktop-v*` GitHub Release. The download URLs below are pinned to the `desktop-v0.1.4` tag so they always resolve to these exact files, and are unaffected by the release being a draft or a pre-release. `workflow_dispatch` also produces the four artifacts without a tag.
 
 ## Download & install (terminal)
 
-Use the file that matches your OS. Windows has two 0.1.4 Setups: **`AudioTools-0.1.4-windows-x64-cpu-setup.exe`** (default) and **`AudioTools-0.1.4-windows-x64-cuda-setup.exe`** (NVIDIA). GitHub Release assets use the unversioned names `AudioTools-windows-x64-cpu-setup.exe` and `AudioTools-windows-x64-cuda-setup.exe`.
+Use the file that matches your OS. Windows has two 0.1.4 Setups: **`AudioTools-0.1.4-windows-x64-cpu-setup.exe`** (default) and **`AudioTools-0.1.4-windows-x64-cuda-setup.exe`** (NVIDIA). GitHub Release assets carry the same versioned filenames as the table above.
 
 ### Apple Silicon Mac (M1–M4)
 
 ```bash
-curl -fL -o ~/Downloads/AudioTools-macos-arm64-silicon.pkg \
-  "https://github.com/notjj1234/jj_audio_website/releases/latest/download/AudioTools-macos-arm64-silicon.pkg"
+curl -fL -o ~/Downloads/AudioTools-0.1.4-macos-arm64-silicon.pkg \
+  "https://github.com/notjj1234/jj_audio_website/releases/download/desktop-v0.1.4/AudioTools-0.1.4-macos-arm64-silicon.pkg"
 
-xattr -cr ~/Downloads/AudioTools-macos-arm64-silicon.pkg
-sudo installer -pkg ~/Downloads/AudioTools-macos-arm64-silicon.pkg -target /
+xattr -cr ~/Downloads/AudioTools-0.1.4-macos-arm64-silicon.pkg
+sudo installer -pkg ~/Downloads/AudioTools-0.1.4-macos-arm64-silicon.pkg -target /
 open /Applications/AudioTools.app
 ```
 
 Finder: double-click the `.pkg` → **Install**. The app should launch when install finishes.
 
-If Finder shows “Apple could not verify…”, use the Terminal block above, or **System Settings → Privacy & Security → Open Anyway**.
+If Finder shows “Apple could not verify…”, that is the expected unsigned-build warning — not a corrupt download. Use the Terminal block above, or **System Settings → Privacy & Security → Open Anyway**.
 
 ### Intel Mac
 
 ```bash
-curl -fL -o ~/Downloads/AudioTools-macos-x64-intel.pkg \
-  "https://github.com/notjj1234/jj_audio_website/releases/latest/download/AudioTools-macos-x64-intel.pkg"
+curl -fL -o ~/Downloads/AudioTools-0.1.4-macos-x64-intel.pkg \
+  "https://github.com/notjj1234/jj_audio_website/releases/download/desktop-v0.1.4/AudioTools-0.1.4-macos-x64-intel.pkg"
 
-xattr -cr ~/Downloads/AudioTools-macos-x64-intel.pkg
-sudo installer -pkg ~/Downloads/AudioTools-macos-x64-intel.pkg -target /
+xattr -cr ~/Downloads/AudioTools-0.1.4-macos-x64-intel.pkg
+sudo installer -pkg ~/Downloads/AudioTools-0.1.4-macos-x64-intel.pkg -target /
 open /Applications/AudioTools.app
 ```
 
@@ -136,7 +136,7 @@ open /Applications/AudioTools.app
 
 ```powershell
 curl.exe -fL -o "$env:USERPROFILE\Downloads\AudioTools-0.1.4-windows-x64-cpu-setup.exe" `
-  "https://github.com/notjj1234/jj_audio_website/releases/latest/download/AudioTools-windows-x64-cpu-setup.exe"
+  "https://github.com/notjj1234/jj_audio_website/releases/download/desktop-v0.1.4/AudioTools-0.1.4-windows-x64-cpu-setup.exe"
 
 Start-Process "$env:USERPROFILE\Downloads\AudioTools-0.1.4-windows-x64-cpu-setup.exe"
 ```
@@ -145,10 +145,12 @@ Start-Process "$env:USERPROFILE\Downloads\AudioTools-0.1.4-windows-x64-cpu-setup
 
 ```powershell
 curl.exe -fL -o "$env:USERPROFILE\Downloads\AudioTools-0.1.4-windows-x64-cuda-setup.exe" `
-  "https://github.com/notjj1234/jj_audio_website/releases/latest/download/AudioTools-windows-x64-cuda-setup.exe"
+  "https://github.com/notjj1234/jj_audio_website/releases/download/desktop-v0.1.4/AudioTools-0.1.4-windows-x64-cuda-setup.exe"
 
 Start-Process "$env:USERPROFILE\Downloads\AudioTools-0.1.4-windows-x64-cuda-setup.exe"
 ```
+
+The two Windows Setups install to separate Start Menu entries and can sit side by side.
 
 **Windows 10 and 11 (x64):** `MinVersion` is 10.0. Not 32-bit, not native ARM. **WebView2** is required (built into Windows 11 and recent 10; older 10 must install Evergreen). CPU Setup is the small default. NVIDIA Setup is large and only speeds isolation on an NVIDIA GPU + drivers; the wizard warns if no NVIDIA adapter is seen (install still allowed).
 
@@ -183,7 +185,7 @@ Installer data dirs (not the same as `make tester`):
 | Win10 x64 NVIDIA | cuda-setup.exe | Native window **Audio Tools (NVIDIA)**; Balanced can use CUDA; wizard may warn if no NVIDIA adapter |
 | Win11 x64 | cpu-setup.exe and/or cuda-setup.exe | Same as Win10 rows |
 
-Known limitations to tell testers: macOS Gatekeeper blocks a downloaded `.pkg` unless it was Developer ID signed and notarized; first-run model download; **16 GB RAM preferred** (8 GB: short clips + Balanced/Faster; Mac MPS needs ≥12 GB). GPU acceleration is **NVIDIA CUDA on Windows** and **Apple GPU (MPS) on capable Macs**.
+Known limitations to tell testers: macOS Gatekeeper blocks a downloaded `.pkg` because CI builds are **unsigned** (the runners have no Developer ID cert or notary secret) — the Terminal `xattr -cr` + `sudo installer` steps above are the intended path, not a workaround; first-run model download; **16 GB RAM preferred** (8 GB: short clips + Balanced/Faster; Mac MPS needs ≥12 GB). GPU acceleration is **NVIDIA CUDA on Windows** and **Apple GPU (MPS) on capable Macs**.
 
 ## Model cache path (run from source)
 

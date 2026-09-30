@@ -192,6 +192,7 @@ from ui.isolate_state import (
     recent_runs_with_owner_fallback,
     reset_new_tab_source,
     adopt_audio_into_run,
+    default_isolate_device,
     discard_youtube_staging,
     resolve_outcome_card,
     resolve_speed_preset,
@@ -2434,8 +2435,9 @@ def _render_separation_controls() -> dict:
         for device_id in lite_device_choice_ids(probe):
             if device_id not in allowed_devices:
                 allowed_devices.append(device_id)
-    if st.session_state.get("isolate_device") not in allowed_devices:
-        st.session_state["isolate_device"] = allowed_devices[0]
+    st.session_state["isolate_device"] = default_isolate_device(
+        probe, allowed_devices, st.session_state.get("isolate_device")
+    )
 
     quality = st.session_state.get("isolate_quality", speed["quality"])
     device = st.session_state.get("isolate_device", speed["device"])

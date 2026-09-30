@@ -516,11 +516,22 @@ def is_low_ram(probe: HostProbe) -> bool:
     return probe.ram_gb is not None and probe.ram_gb < LOW_RAM_GB
 
 
-def _preferred_gpu(options: list[str]) -> str:
-    """First GPU id in ``options``, else ``cpu``."""
-    if "cuda" in options:
+def _preferred_gpu(options: list[str], probe: HostProbe | None = None) -> str:
+    """First usable GPU id in ``options``, else ``cpu``.
+
+    When ``probe`` is supplied, an accelerator is only auto-selected if the host actually
+    reports it — that is what stops the combined Windows build from defaulting a
+    CPU-only friend to a GPU they do not have. Without a probe the old behaviour is
+    kept: the first GPU id listed wins.
+
+    An accelerator-only freeze (the NVIDIA edition offers ``cuda`` and nothing else) keeps
+    trusting its edition, since there is no CPU option to fall back to.
+    """
+    if "cpu" not in options:
+        return "cuda" if "cuda" in options else ("mps" if "mps" in options else "cpu")
+    if "cuda" in options and (probe is None or probe.cuda):
         return "cuda"
-    if "mps" in options:
+    if "mps" in options and (probe is None or probe.mps):
         return "mps"
     return "cpu"
 
@@ -547,7 +558,7 @@ def desktop_recommend(probe: HostProbe, *, platform: str | None = None) -> dict[
             "notes": "Recommended: Balanced on NVIDIA GPU.",
         }
     options = desktop_device_options(probe, platform=platform)
-    gpu_dev = _preferred_gpu(options)
+    gpu_dev = _preferred_gpu(options, probe)
     if is_low_ram(probe):
         if gpu_dev == "cuda":
             return {
@@ -599,7 +610,7 @@ def resolve_desktop_speed(
 ) -> dict[str, Any]:
     """Map a desktop speed radio id to quality + device for this host."""
     options = desktop_device_options(probe, platform=platform)
-    gpu = "cuda" if "cuda" in options else ("mps" if "mps" in options else "cpu")
+    gpu = _preferred_gpu(options, probe)
 
     if speed_id not in ("faster", "balanced", "best"):
         return {
