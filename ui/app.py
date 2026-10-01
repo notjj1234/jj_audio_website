@@ -820,6 +820,14 @@ st.sidebar.radio(
 )
 st.sidebar.caption(_DEMO_BLURB)
 
+# Once per process, before the first page paints. Streamlit re-runs this
+# file on every interaction; prune_jobs_on_app_start no-ops after the first
+# call. Importing the module (pytest) must not delete job folders.
+if __name__ == "__main__":
+    from ui.isolate_jobs import prune_jobs_on_app_start
+
+    prune_jobs_on_app_start()
+
 _pages = Path(__file__).parent / "pages"
 _nav = [
     st.Page(str(_pages / "isolate.py"), title="Audio Isolation", default=True),
