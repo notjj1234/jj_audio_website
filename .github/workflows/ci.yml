@@ -1,6 +1,6 @@
 # Desktop-first test/lint gate (see docs/issues.md I-072).
 # Runs on every push/PR:
-#   - pytest across Linux, Windows, macOS (Intel runner: macos-15-intel)
+#   - pytest across Linux, Windows, macOS (Apple Silicon runner: macos-15)
 #   - ruff lint over src/audio_to_tab (the engine shipped in the desktop build)
 # Install profile mirrors `make install`: CPU torch + the Demucs extra. Tests
 # mock torch/demucs availability, but a few integration tests (e.g.
@@ -10,7 +10,12 @@
 # macOS leg: basic-pitch excludes tensorflow on Darwin (no wheel), and its
 # ICASSP model path imports tensorflow, so the hosted-backend job test
 # (parked backend scope, tests/test_api.py::test_upload_and_job) is deselected
-# on macOS only.
+# on macOS only. The runner is Apple Silicon (`macos-15`), not `macos-15-intel`:
+# torchcodec 0.14 (the demucs extra) publishes macOS wheels only for arm64
+# (`macosx_14_0_arm64`). Intel macOS has no matching distribution.
+#
+# Ubuntu and Windows do not ship ffmpeg. `test_upload_and_job` calls ingest,
+# which requires `ffmpeg` on PATH. Install it before pytest on those runners.
 name: ci
 
 on:
@@ -23,8 +28,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-13 is retired; macos-15-intel matches desktop-release Intel Mac jobs.
-        os: [ubuntu-latest, windows-latest, macos-15-intel]
+        # Apple Silicon: torchcodec 0.14 has macosx_14_0_arm64 wheels only.
+        # macos-15-intel (x86_64) cannot resolve the demucs extra.
+        os: [ubuntu-latest, windows-latest, macos-15]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -47,6 +53,18 @@ jobs:
           python -m pip install -U pip
           python -m pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio
           python -m pip install -e ".[dev,demucs]"
+
+      - name: Install ffmpeg
+        if: runner.os != 'macOS'
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          elif [ "$RUNNER_OS" = "Windows" ]; then
+            choco install ffmpeg -y --no-progress
+          fi
+          command -v ffmpeg
+          ffmpeg -version
 
       - name: Run tests
         if: runner.os != 'macOS'
