@@ -27,6 +27,7 @@ _QUEUE_LOCK = threading.Lock()
 _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
 _WORKER_THREAD: threading.Thread | None = None
+_WORKER_STOP = threading.Event()
 _ACTIVE_JOB_ID: str | None = None
 _ACTIVE_PROCESS: multiprocessing.Process | None = None
 
@@ -1114,7 +1115,7 @@ def _reconcile_orphaned_jobs() -> None:
 def _worker_loop() -> None:
     global _ACTIVE_JOB_ID, _ACTIVE_PROCESS
     _reconcile_orphaned_jobs()
-    while True:
+    while not _WORKER_STOP.is_set():
         try:
             with _QUEUE_LOCK:
                 queued = _queued_job_ids()
@@ -1122,7 +1123,7 @@ def _worker_loop() -> None:
                 if job_id is None:
                     _ACTIVE_JOB_ID = None
             if job_id is None:
-                time.sleep(0.4)
+                _WORKER_STOP.wait(0.4)
                 continue
             current = read_status(job_id)
             if current and current.get("status") == "cancelled":
@@ -1139,7 +1140,33 @@ def _worker_loop() -> None:
                     if _ACTIVE_PROCESS is not None and not _ACTIVE_PROCESS.is_alive():
                         _ACTIVE_PROCESS = None
         except Exception:
-            time.sleep(1.0)
+            _WORKER_STOP.wait(1.0)
+
+
+def _stop_worker_thread() -> None:
+    """Join the serial worker so a later test cannot inherit a live thread.
+
+    Tests reset ``_WORKER_THREAD`` with monkeypatch, which restores the old
+    value on teardown and orphans the thread the test started. That thread
+    keeps polling ``DATA_DIR`` and races the next case (status flips to
+    ``failed`` / ``running`` under the test's own writes).
+    """
+    global _WORKER_STARTED, _WORKER_THREAD, _ACTIVE_JOB_ID, _ACTIVE_PROCESS
+    thread = _WORKER_THREAD
+    _WORKER_STOP.set()
+    if (
+        thread is not None
+        and thread.is_alive()
+        and thread is not threading.current_thread()
+    ):
+        thread.join(timeout=2.0)
+    with _WORKER_LOCK:
+        if _WORKER_THREAD is thread:
+            _WORKER_THREAD = None
+            _WORKER_STARTED = False
+    _ACTIVE_JOB_ID = None
+    _ACTIVE_PROCESS = None
+    _WORKER_STOP.clear()
 
 
 def ensure_worker_started() -> None:

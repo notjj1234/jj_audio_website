@@ -64,13 +64,18 @@ def jobs_dir(tmp_path, monkeypatch):
     import ui.common as common
     import ui.isolate_jobs as jobs
 
+    # Stop any worker the previous test orphaned before DATA_DIR moves.
+    jobs._stop_worker_thread()
     monkeypatch.setattr(common, "DATA_DIR", tmp_path)
     monkeypatch.setattr(jobs, "DATA_DIR", tmp_path)
     monkeypatch.setattr(jobs, "_WORKER_STARTED", False)
     monkeypatch.setattr(jobs, "_ACTIVE_JOB_ID", None)
     monkeypatch.setattr(jobs, "_ACTIVE_PROCESS", None)
     monkeypatch.setattr(jobs, "_WORKER_THREAD", None)
-    return tmp_path
+    yield tmp_path
+    # Teardown runs before monkeypatch restores _WORKER_THREAD, so the
+    # thread this test started is still visible and can be joined.
+    jobs._stop_worker_thread()
 
 
 def test_enqueue_persists_queued_status(jobs_dir: Path):
@@ -262,11 +267,16 @@ def test_stop_on_slow_job_starts_next_queued(jobs_dir: Path, monkeypatch):
 
     def slow_separate(*, audio_path, output_dir, config, on_progress, should_abort=None, **kwargs):
         calls.append(str(audio_path))
+        first = len(calls) == 1
         started.set()
-        for _ in range(200):
-            if should_abort and should_abort():
-                raise JobAborted("stop")
-            time.sleep(0.02)
+        # Only the in-flight job needs to stay cancellable. The follow-up job
+        # used to sleep the same ~4s, and on the 3-vCPU macOS runner that
+        # second sleep was still in "Preparing audio…" when the 8s deadline hit.
+        if first:
+            for _ in range(200):
+                if should_abort and should_abort():
+                    raise JobAborted("stop")
+                time.sleep(0.02)
         on_progress("separate", "mock")
         dest = Path(output_dir) / "vocals.wav"
         dest.write_bytes(b"v")
@@ -305,7 +315,7 @@ def test_stop_on_slow_job_starts_next_queued(jobs_dir: Path, monkeypatch):
     assert started.wait(timeout=5), "slow job did not start"
     assert remove_job("slow") is True
 
-    deadline = time.time() + 8
+    deadline = time.time() + 15
     while time.time() < deadline:
         status = read_status("next")
         if status and status.get("status") == "succeeded":
