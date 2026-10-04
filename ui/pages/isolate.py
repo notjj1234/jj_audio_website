@@ -4490,9 +4490,13 @@ def _render_mixer_workspace(browser_id: str | None) -> None:
     if pro:
         _render_guitar_fixup_panel(stem_paths, run_dir, artifacts_map or {}, bass_bleed)
         _render_reseparate_panel(stem_paths, run_dir)
+    else:
+        # Lite: single expander (the inner one from _render_guitar_fixup_panel)
+        # Auto-opens when bass bleed is flagged. No re-separate panel.
+        _render_guitar_fixup_panel(stem_paths, run_dir, artifacts_map or {}, bass_bleed)
 
     source_audio_path = st.session_state.get("isolate_source_audio_path")
-    if pro and source_audio_path and Path(source_audio_path).exists():
+    if source_audio_path and Path(source_audio_path).exists():
         st.divider()
         st.caption("Other tools")
         if st.button("Make a tab PDF from this →"):

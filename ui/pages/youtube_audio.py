@@ -45,6 +45,7 @@ YT_AUDIO_PICKER_NOTE_KEY = "yt_audio_picker_note"
 YT_AUDIO_ERROR_KEY = "yt_audio_error"
 YT_AUDIO_SUCCESS_KEY = "yt_audio_success"
 YT_AUDIO_DOWNLOADING_KEY = "yt_audio_downloading"
+YT_AUDIO_FLASH_KEY = "yt_audio_flash"
 
 _DEFAULT_FMT = "mp3"
 _PICKER_CANCEL_COPY = "Folder picker was cancelled or is not available."
@@ -225,10 +226,21 @@ def _youtube_search_dialog() -> None:
                     key=f"yt_audio_pick_{vid}",
                     disabled=not url,
                     width="stretch",
-                    help="Fill the YouTube URL so you can save audio to a folder.",
+                    help="Download this track and prepare to save it to a folder.",
                 ):
                     _queue_url(url)
                     st.session_state.pop(YT_AUDIO_SEARCH_ERROR_KEY, None)
+                    # Download to staging so main page can save directly
+                    title = hit.get("title", "YouTube audio")
+                    with st.status(f"Downloading \"{title}\"…", expanded=True) as status:
+                        st.write("Fetching audio from YouTube. This can take a minute.")
+                        path, err = _download_wav(url, title=title)
+                        if err:
+                            status.update(label="Download failed", state="error")
+                            st.session_state[YT_AUDIO_SEARCH_ERROR_KEY] = err
+                        else:
+                            status.update(label=f"Ready: {Path(path).stem}", state="complete")
+                            st.session_state[YT_AUDIO_FLASH_KEY] = f"Downloaded **{title}**. Click **Save to folder**."
                     _close_search_dialog()
                     st.rerun()
             with st.expander(
@@ -364,7 +376,7 @@ def main() -> None:
 
     busy = bool(st.session_state.get(YT_AUDIO_DOWNLOADING_KEY))
     save_clicked = st.button(
-        "Save audio to folder",
+        "Save to folder",
         type="primary",
         disabled=not url_ok or busy,
         help="Download if needed, then choose a folder in Explorer or Finder." if pro else None,
@@ -375,15 +387,6 @@ def main() -> None:
         elif not url_ok:
             st.session_state[YT_AUDIO_ERROR_KEY] = "Only YouTube URLs are allowed."
         else:
-            _run_save_flow(url, fmt, already_staged=staged)
-            st.rerun()
-
-    if staged is not None and not save_clicked:
-        if st.button(
-            "Choose folder",
-            key="yt_audio_choose_folder",
-            help="Audio is already downloaded. Pick a folder to save it." if pro else None,
-        ):
             _run_save_flow(url, fmt, already_staged=staged)
             st.rerun()
 
@@ -398,6 +401,8 @@ def main() -> None:
             if st.button("Show in folder", key="yt_audio_show_folder"):
                 if not open_path_in_os(Path(last)):
                     st.caption("Could not open the folder.")
+    if flash := st.session_state.pop(YT_AUDIO_FLASH_KEY, None):
+        st.success(str(flash))
 
 
 if __name__ == "__main__":

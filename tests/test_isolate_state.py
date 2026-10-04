@@ -2864,9 +2864,10 @@ def test_mixer_workspace_lite_shares_fixup_and_tab_pdf_carry_over():
     assert "Fix the guitar track" not in mixer_ws
     assert "_render_guitar_fixup_panel(" in mixer_ws
     assert "Make a tab PDF from this" in mixer_ws
-    assert "if pro and source_audio_path" in mixer_ws
+    assert "if source_audio_path" in mixer_ws
     assert "_request_loading_overlay()" in mixer_ws
-    assert mixer_ws.find("if pro:") < mixer_ws.find("_render_guitar_fixup_panel(")
+    # Guitar fix-up panel called for both Lite (else branch) and Pro (if branch)
+    assert mixer_ws.count("_render_guitar_fixup_panel(") == 2
 
 
 def test_file_ready_banner_points_at_home_not_new():

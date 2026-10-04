@@ -45,10 +45,13 @@ export function helperText(
   if (mode === "auto") {
     return `Detected: ${detected}${ram}. Auto will use ${using}${capBit}.`;
   }
+  if (mode === "lite") {
+    return `Detected: ${detected}${ram}. Low RAM mode: CPU only, max 60 s per job.`;
+  }
   if (caps.detected_device === "mps" && mode === "balanced") {
     return `Detected: ${detected}${ram}. Balanced may use MPS.`;
   }
-  return `Detected: ${detected}${ram}. This job will use ${using}.`;
+  return `Detected: ${detected}${ram}. This job will use ${using}${capBit}.`;
 }
 
 export function ProcessingModeSelect({ value, onChange }: Props) {
