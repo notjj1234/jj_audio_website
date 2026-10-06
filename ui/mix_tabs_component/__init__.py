@@ -51,6 +51,7 @@ def mix_tabs(
     home_label: str = "Home",
     home_active: bool = True,
     show_plus: bool = True,
+    theme_vars: dict[str, str] | None = None,
     key: str | None = None,
 ) -> dict[str, Any] | None:
     """
@@ -60,6 +61,9 @@ def mix_tabs(
     ``busy`` / ``progress`` (0–1) paint an in-tab loading bar while a draft
     slot is separating.
     Returns ``{action: "home"|"focus"|"close"|"plus", id?, seq}`` or None.
+
+    ``theme_vars`` (optional): CSS custom properties for theming the iframe.
+    Pass the result of ``get_iframe_theme_vars()`` from isolate_state.
     """
     if _mix_tabs is None:
         raise RuntimeError(
@@ -71,6 +75,7 @@ def mix_tabs(
         homeActive=bool(home_active),
         showPlus=bool(show_plus),
         tabs=tabs,
+        themeVars=theme_vars or {},
         key=key,
         default=None,
     )

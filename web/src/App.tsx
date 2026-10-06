@@ -3,6 +3,7 @@ import { AuthProvider, useAuth } from "./auth";
 import { IsolatePage } from "./pages/IsolatePage";
 import { LoginPage } from "./pages/LoginPage";
 import { TabPage } from "./pages/TabPage";
+import { SettingsPage } from "./pages/SettingsPage";
 
 function Shell() {
   const { loading, sessionError, retrySession, email, logout } = useAuth();
@@ -52,6 +53,12 @@ function Shell() {
           >
             Isolate
           </NavLink>
+          <NavLink
+            to="/settings"
+            className={({ isActive }) => (isActive ? "active" : "")}
+          >
+            Settings
+          </NavLink>
           <span className="user-info">
             {email ? `Signed in as ${email}` : "Anonymous"}
           </span>
@@ -86,6 +93,7 @@ export function App() {
           <Route path="/login" element={<LoginPage />} />
           <Route path="/tab" element={<TabPage />} />
           <Route path="/isolate" element={<IsolatePage />} />
+          <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/isolate" replace />} />
         </Route>
       </Routes>

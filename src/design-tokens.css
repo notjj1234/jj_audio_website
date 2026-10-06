@@ -1,0 +1,143 @@
+/* src/design-tokens.css — Single source of truth for all color values */
+/* Used by: web (React), desktop (Streamlit), iframe components */
+
+/* ═══════════════════════════════════════════════════════════════
+   SEMANTIC BASE LAYERS (Tonal Depth — WCAG AAA Contrast)
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Dark mode base (default for desktop, opt-in for web) */
+:root[data-theme="dark"],
+:root:not([data-theme="light"]) {
+  --color-bg-deepest:    #0a0f0a;  /* Near-black green - master canvas */
+  --color-bg-deep:       #141a14;  /* Primary panels */
+  --color-bg-raised:     #1e261e;  /* Hover/focus states */
+  --color-bg-highlight:  #2a342a;  /* Active interaction */
+  
+  --color-text-primary:   #e8efe6;  /* High contrast - matches --paper */
+  --color-text-secondary: #9aa0a6;  /* Muted labels, units */
+  --color-text-muted:     #5f6368;  /* Disabled, hints */
+  
+  --color-border-subtle:  rgba(232, 239, 230, 0.08);
+  --color-border-focus:   var(--color-accent-primary);
+  
+  --color-waveform-bg:    #0f150f;
+  --color-waveform-fill:  var(--color-accent-primary);
+  --color-waveform-progress: var(--color-accent-secondary);
+}
+
+/* Light mode (web default, desktop opt-in) */
+:root[data-theme="light"] {
+  --color-bg-deepest:    #f0f2f5;
+  --color-bg-deep:       #e4e7eb;
+  --color-bg-raised:     #ffffff;
+  --color-bg-highlight:  #f7f8fa;
+  
+  --color-text-primary:   #1a1f1c;
+  --color-text-secondary: #5f6368;
+  --color-text-muted:     #9aa0a6;
+  
+  --color-border-subtle:  rgba(26, 31, 28, 0.1);
+  --color-waveform-bg:    #e8efe6;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   ACCENT PALETTES — Swapped via [data-accent="preset-id"]
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Preset 1: Forest Green (original brand — DEFAULT) */
+:root[data-accent="forest"],
+:root:not([data-accent]) {
+  --color-accent-primary:       #2f6b4f;  /* --moss */
+  --color-accent-primary-hover: #255840;
+  --color-accent-secondary:     #d4c4a8;  /* --sand */
+  --color-accent-secondary-hover: #c4b498;
+  --color-accent-tertiary:      #1e4533;  /* --moss-deep */
+  --color-accent-tertiary-hover: #163626;
+}
+
+/* Preset 2: Studio Teal (industry standard — Waves, Native Instruments) */
+:root[data-accent="teal"] {
+  --color-accent-primary:       #4ecdc4;
+  --color-accent-primary-hover: #3abdb4;
+  --color-accent-secondary:     #ffcc53;  /* Gold for warnings/solo */
+  --color-accent-secondary-hover: #e6b84a;
+  --color-accent-tertiary:      #3aa8a0;
+  --color-accent-tertiary-hover: #2f8f87;
+}
+
+/* Preset 3: Purple/Gold (colorblind-safe — Psysonic, Eurorack) */
+:root[data-accent="purple-gold"] {
+  --color-accent-primary:       #8b5cf6;  /* Purple */
+  --color-accent-primary-hover: #7c3aed;
+  --color-accent-secondary:     #fbbf24;  /* Gold/amber */
+  --color-accent-secondary-hover: #f59e0b;
+  --color-accent-tertiary:      #a855f7;
+  --color-accent-tertiary-hover: #9333ea;
+}
+
+/* Preset 4: Ocean Blue (accessible alternative) */
+:root[data-accent="ocean"] {
+  --color-accent-primary:       #0ea5e9;  /* Sky blue */
+  --color-accent-primary-hover: #0284c7;
+  --color-accent-secondary:     #fbbf24;  /* Gold */
+  --color-accent-secondary-hover: #f59e0b;
+  --color-accent-tertiary:      #0369a1;
+  --color-accent-tertiary-hover: #075985;
+}
+
+/* Preset 5: Custom (user-defined via Theme Builder) */
+:root[data-accent="custom"] {
+  --color-accent-primary:       var(--custom-accent-primary, #2f6b4f);
+  --color-accent-primary-hover: var(--custom-accent-primary-hover, #255840);
+  --color-accent-secondary:     var(--custom-accent-secondary, #d4c4a8);
+  --color-accent-secondary-hover: var(--custom-accent-secondary-hover, #c4b498);
+  --color-accent-tertiary:      var(--custom-accent-tertiary, #1e4533);
+  --color-accent-tertiary-hover: var(--custom-accent-tertiary-hover, #163626);
+  
+  /* Custom base layers (optional overrides) */
+  --color-bg-deepest:    var(--custom-bg-deepest, #0a0f0a);
+  --color-bg-deep:       var(--custom-bg-deep, #141a14);
+  --color-bg-raised:     var(--custom-bg-raised, #1e261e);
+  --color-bg-highlight:  var(--custom-bg-highlight, #2a342a);
+  
+  --color-text-primary:   var(--custom-text-primary, #e8efe6);
+  --color-text-secondary: var(--custom-text-secondary, #9aa0a6);
+  --color-text-muted:     var(--custom-text-muted, #5f6368);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SEMANTIC SIGNALS (Colorblind-Safe — Blue/Yellow axis)
+   These NEVER change across presets — used for metering, status
+   ═══════════════════════════════════════════════════════════════ */
+:root {
+  --color-signal-low:    #4ecdc4;   /* Teal — replaces green */
+  --color-signal-mid:    #ffcc53;   /* Gold — replaces yellow */
+  --color-signal-high:   #ff6b6b;   /* Coral — replaces red */
+  --color-danger:        #e85d5d;   /* Error (not pure red) */
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   COMPONENT SEMANTIC ALIASES (for easy migration)
+   ═══════════════════════════════════════════════════════════════ */
+:root {
+  /* Legacy aliases — map to semantic tokens */
+  --ink:           var(--color-text-primary);
+  --paper:         var(--color-bg-deepest);
+  --moss:          var(--color-accent-primary);
+  --moss-deep:     var(--color-accent-tertiary);
+  --sand:          var(--color-accent-secondary);
+  --haze:          var(--color-border-subtle);
+  --danger:        var(--color-danger);
+  
+  /* Mixer/component aliases */
+  --bg:            var(--color-bg-deep);
+  --text:          var(--color-text-primary);
+  --primary:       var(--color-accent-primary);
+  --primary-hover: var(--color-accent-primary-hover);
+  --secondary:     var(--color-accent-secondary);
+  --secondary-hover: var(--color-accent-secondary-hover);
+  --muted:         var(--color-text-muted);
+  --border:        var(--color-border-subtle);
+  --waveform-fill: var(--color-waveform-fill);
+  --waveform-progress: var(--color-waveform-progress);
+}

@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import base64
 
-# Coral on unselected tiles; white baked into selected labels (Streamlit primary
-# button DOM does not reliably accept a CSS filter on Markdown <img>).
-_PRIMARY = "#ff4b4b"
-_ON_PRIMARY = "#ffffff"
+# Yellow-orange on unselected tiles; Tyrian blue on the yellow selected button.
+# Streamlit primary button DOM does not reliably accept a CSS filter on Markdown <img>.
+_PRIMARY = "#f6ad49"
+_ON_PRIMARY = "#192542"
 _ATTRS = (
     f'xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
     f'stroke="{_PRIMARY}" stroke-width="2.25" stroke-linecap="round" '
@@ -125,21 +125,23 @@ def icon_markdown(svg: str, *, alt: str) -> str:
     return f"![{alt}]({icon_data_uri(svg)})"
 
 
-def _svg_for_selection(svg: str, *, selected: bool) -> str:
-    if selected:
+def _svg_for_selection(svg: str, *, selected: bool, light: bool = False) -> str:
+    # Yellow icons sit on the dark raised tiles. Light tiles and the yellow
+    # selected button both need the Tyrian blue stroke.
+    if selected or light:
         return svg.replace(_PRIMARY, _ON_PRIMARY)
     return svg
 
 
-def stem_icon_markdown(stem_id: str, *, selected: bool = False) -> str:
+def stem_icon_markdown(stem_id: str, *, selected: bool = False, light: bool = False) -> str:
     svg = STEM_ICON_SVG.get(stem_id)
     if not svg:
         return ""
-    return icon_markdown(_svg_for_selection(svg, selected=selected), alt=stem_id)
+    return icon_markdown(_svg_for_selection(svg, selected=selected, light=light), alt=stem_id)
 
 
-def outcome_icon_markdown(card_id: str, *, selected: bool = False) -> str:
+def outcome_icon_markdown(card_id: str, *, selected: bool = False, light: bool = False) -> str:
     svg = OUTCOME_ICON_SVG.get(card_id)
     if not svg:
         return ""
-    return icon_markdown(_svg_for_selection(svg, selected=selected), alt=card_id)
+    return icon_markdown(_svg_for_selection(svg, selected=selected, light=light), alt=card_id)

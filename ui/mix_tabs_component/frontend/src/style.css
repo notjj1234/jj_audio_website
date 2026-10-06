@@ -1,29 +1,8 @@
 @import url("../../../fonts/satoshi.css");
+@import url("./iframe-theme.css");
 
 :root {
-  color-scheme: light dark;
-  --mt-bg: #1a1d21;
-  --mt-bar: #121417;
-  --mt-fg: #e8eaed;
-  --mt-muted: #9aa0a6;
-  --mt-active: #2a2f36;
-  --mt-hover: #22262c;
-  --mt-border: rgba(255, 255, 255, 0.08);
-  --mt-accent: #6ec4bd;
   font-family: "Satoshi", system-ui, sans-serif;
-}
-
-@media (prefers-color-scheme: light) {
-  :root {
-    --mt-bg: #f0f2f5;
-    --mt-bar: #e4e7eb;
-    --mt-fg: #1a1f1c;
-    --mt-muted: #5f6368;
-    --mt-active: #ffffff;
-    --mt-hover: #f7f8fa;
-    --mt-border: rgba(0, 0, 0, 0.1);
-    --mt-accent: #2f6b4f;
-  }
 }
 
 * {
@@ -34,8 +13,8 @@ html,
 body {
   margin: 0;
   padding: 0;
-  background: var(--mt-bar);
-  color: var(--mt-fg);
+  background: var(--bg);
+  color: var(--text);
 }
 
 #root {
@@ -61,12 +40,12 @@ body {
 
 .mix-tab-wrap::before {
   left: 0;
-  background: linear-gradient(to right, var(--mt-bar), transparent);
+  background: linear-gradient(to right, var(--bg), transparent);
 }
 
 .mix-tab-wrap::after {
   right: 0;
-  background: linear-gradient(to left, var(--mt-bar), transparent);
+  background: linear-gradient(to left, var(--bg), transparent);
 }
 
 .mix-tab-wrap.fade-left::before,
@@ -78,7 +57,7 @@ body {
 .plus-btn:focus-visible,
 .mix-tab:focus-visible,
 .mix-tab .close:focus-visible {
-  outline: 2px solid var(--mt-accent);
+  outline: 2px solid var(--border-focus);
   outline-offset: -2px;
 }
 
@@ -88,8 +67,8 @@ body {
   gap: 0.15rem;
   min-height: 40px;
   padding: 0.25rem 0.35rem;
-  background: var(--mt-bar);
-  border-bottom: 1px solid var(--mt-border);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior-x: contain;
@@ -107,7 +86,7 @@ body {
   gap: 0.35rem;
   border: none;
   background: transparent;
-  color: var(--mt-muted);
+  color: var(--muted);
   font: inherit;
   font-size: 0.85rem;
   font-weight: 600;
@@ -116,20 +95,21 @@ body {
   border-radius: 8px 8px 0 0;
   padding: 0.45rem 0.7rem;
   flex: 0 0 auto;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 
 .home-btn:hover,
 .plus-btn:hover,
 .mix-tab:hover {
-  background: var(--mt-hover);
-  color: var(--mt-fg);
+  background: var(--bg-raised);
+  color: var(--text);
 }
 
 .home-btn.active,
 .mix-tab.active {
-  background: var(--mt-active);
-  color: var(--mt-fg);
-  box-shadow: inset 0 -2px 0 var(--mt-accent);
+  background: var(--bg-highlight);
+  color: var(--text);
+  box-shadow: inset 0 -2px 0 var(--primary);
 }
 
 .home-btn .icon,
@@ -160,7 +140,7 @@ body {
   bottom: 2px;
   height: 3px;
   border-radius: 2px;
-  background: rgba(128, 128, 128, 0.28);
+  background: var(--border);
   overflow: hidden;
   pointer-events: none;
 }
@@ -170,7 +150,7 @@ body {
   height: 100%;
   width: var(--mt-progress, 0%);
   border-radius: inherit;
-  background: var(--mt-accent);
+  background: var(--waveform-progress);
   transition: width 0.25s ease;
 }
 
@@ -201,13 +181,14 @@ body {
   border: none;
   border-radius: 5px;
   background: transparent;
-  color: var(--mt-muted);
+  color: var(--muted);
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
   padding: 0;
   flex: 0 0 auto;
   opacity: 0.8;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 
 .mix-tab:hover .close,
@@ -216,15 +197,15 @@ body {
 }
 
 .mix-tab .close:hover {
-  background: rgba(128, 128, 128, 0.25);
-  color: var(--mt-fg);
+  background: var(--border);
+  color: var(--text);
 }
 
 .plus-btn {
   font-size: 1.15rem;
   font-weight: 500;
   padding: 0.35rem 0.65rem;
-  color: var(--mt-muted);
+  color: var(--muted);
 }
 
 .spacer {

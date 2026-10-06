@@ -1,12 +1,18 @@
+[theme]
+base = "dark"
+primaryColor = "#f6ad49"
+backgroundColor = "#192542"
+secondaryBackgroundColor = "#2A4467"
+textColor = "#f6ad49"
+
 [browser]
 gatherUsageStats = false
 serverAddress = "127.0.0.1"
 
 [client]
-# Hide Deploy / rerun / clear-cache developer controls; keep the settings menu so
-# testers can still switch light/dark theme.
-toolbarMode = "viewer"
-
+# Print and Record screen are built into viewer mode. Minimal keeps About
+# and drops those two. Appearance lives on the Settings page.
+toolbarMode = "minimal"
 [server]
 headless = true
 address = "127.0.0.1"

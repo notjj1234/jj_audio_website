@@ -480,8 +480,8 @@ def test_lite_outcome_picker_uses_card_keys_not_pro_track_picker():
     assert "icon=STEM_TILE_EMOJI" not in source
     assert "icon=OUTCOME_TILE_EMOJI" not in source
     assert "icon=" not in tile
-    assert "stem_icon_markdown(stem_id, selected=selected)" in source
-    assert "outcome_icon_markdown(card_id, selected=selected)" in source
+    assert "stem_icon_markdown(stem_id, selected=selected, light=_tiles_use_light_icons())" in source
+    assert "outcome_icon_markdown(card_id, selected=selected, light=_tiles_use_light_icons())" in source
     label_fn = source[
         source.find("def _outcome_tile_label") : source.find("def _render_outcome_tile")
     ]
@@ -856,16 +856,19 @@ def test_tile_icons_are_markdown_data_uris_not_emoji():
         assert md.startswith("![")
         assert "data:image/svg+xml;base64," in md
         assert not any(ord(ch) > 127 for ch in md)
-        assert "#ff4b4b" in svg_body(md)
+        assert "#f6ad49" in svg_body(md)
         selected = stem_icon_markdown(stem_id, selected=True)
-        assert "#ffffff" in svg_body(selected)
-        assert "#ff4b4b" not in svg_body(selected)
+        assert "#192542" in svg_body(selected)
+        assert "#f6ad49" not in svg_body(selected)
     for card_id in OUTCOME_CARD_ORDER:
         md = outcome_icon_markdown(card_id)
         assert md.startswith("![")
         assert "data:image/svg+xml;base64," in md
         assert not any(ord(ch) > 127 for ch in md)
-        assert "#ffffff" in svg_body(outcome_icon_markdown(card_id, selected=True))
+        assert "#192542" in svg_body(outcome_icon_markdown(card_id, selected=True))
+    # Unselected icons on the light page are Tyrian blue, same as a selected icon.
+    assert "#192542" in svg_body(stem_icon_markdown("vocals", light=True))
+    assert "#f6ad49" not in svg_body(stem_icon_markdown("vocals", light=True))
 
 
 def test_roformer_speed_note_names_the_gpu_this_host_actually_has():
@@ -3566,3 +3569,74 @@ def test_default_isolate_device_with_nvidia_prefers_cuda(monkeypatch):
 
 def test_default_isolate_device_empty_options_returns_current():
     assert default_isolate_device(None, [], None) is None
+
+
+def test_save_theme_state_round_trips_preset_mode_and_tokens(tmp_path, monkeypatch):
+    import ui.common as common
+    import ui.isolate_state as state
+
+    monkeypatch.setattr(common, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(state, "DATA_DIR", tmp_path)
+    session = {
+        state.THEME_PRESET_KEY: "custom",
+        state.THEME_MODE_KEY: "light",
+        state.THEME_CUSTOM_TOKENS_KEY: {"--custom-bg-deep": "#111111"},
+    }
+    state.save_theme_state(session)
+    loaded: dict = {}
+    state.load_theme_state(loaded)
+    assert loaded[state.THEME_PRESET_KEY] == "custom"
+    assert loaded[state.THEME_MODE_KEY] == "light"
+    assert loaded[state.THEME_CUSTOM_TOKENS_KEY]["--custom-bg-deep"] == "#111111"
+
+
+def test_load_theme_state_replaces_retired_preset_with_tyrian(tmp_path, monkeypatch):
+    import json
+
+    import ui.common as common
+    import ui.isolate_state as state
+
+    monkeypatch.setattr(common, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(state, "DATA_DIR", tmp_path)
+    (tmp_path / "theme_config.json").write_text(
+        json.dumps({"preset": "forest-dark", "mode": "system", "custom_tokens": {}}),
+        encoding="utf-8",
+    )
+    loaded: dict = {}
+    state.load_theme_state(loaded)
+    assert loaded[state.THEME_PRESET_KEY] == "tyrian"
+    saved = json.loads((tmp_path / "theme_config.json").read_text(encoding="utf-8"))
+    assert saved["preset"] == "tyrian"
+    assert saved["mode"] == "system"
+
+
+def test_light_and_dark_themes_use_the_same_two_hues():
+    import ui.isolate_state as state
+
+    dark = state.build_theme_css_vars({state.THEME_MODE_KEY: "dark", state.THEME_PRESET_KEY: "tyrian"})
+    light = state.build_theme_css_vars({state.THEME_MODE_KEY: "light", state.THEME_PRESET_KEY: "tyrian"})
+    assert "color-scheme: dark" in dark
+    assert "color-scheme: light" in light
+    assert "#192542" in dark and "#f6ad49" in dark
+    assert "#FFF6DC" in light and "#FFFFFF" in light
+    assert "#192542" in light and "#f6ad49" in light
+
+
+def test_system_theme_follows_os(monkeypatch):
+    import ui.isolate_state as state
+
+    monkeypatch.setattr(state, "_os_theme_mode", lambda: "light")
+    assert state.get_effective_theme_mode({state.THEME_MODE_KEY: "system"}) == "light"
+    assert state.get_effective_theme_mode({state.THEME_MODE_KEY: "dark"}) == "dark"
+
+
+def test_theme_widgets_use_zero_arg_persist_callback():
+    root = Path(__file__).resolve().parents[1]
+    app = (root / "ui" / "app.py").read_text(encoding="utf-8")
+    page = (root / "ui" / "pages" / "settings.py").read_text(encoding="utf-8")
+    assert "def _persist_theme()" in page
+    assert "save_theme_state(st.session_state)" in page
+    assert "on_change=_persist_theme" in page
+    assert "on_change=save_theme_state" not in page
+    assert "on_change=save_theme_state" not in app
+    assert 'subheader("🎨 Theme")' not in app

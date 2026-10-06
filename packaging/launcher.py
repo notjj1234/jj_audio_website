@@ -814,7 +814,7 @@ def _streamlit_server_argv(workdir: Path, port: int) -> list[str]:
         f"--server.runOnSave={run_on_save}",
         "--server.enableCORS=true",
         "--server.enableXsrfProtection=true",
-        "--client.toolbarMode=viewer",
+        "--client.toolbarMode=minimal",
     ]
 
 

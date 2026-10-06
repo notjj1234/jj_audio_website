@@ -296,7 +296,7 @@ Offline scoring. Gitignored under `eval/lead_rhythm/`: `clips/`, `out/`, `manife
 
 ### `.streamlit/`
 
-- `config.toml` — local Streamlit: `gatherUsageStats = false`, `toolbarMode = "viewer"`, `headless = true`, `address = "127.0.0.1"`, `fileWatcherType = "none"`, `runOnSave = false`, `maxUploadSize = 500`, CORS + XSRF on. `credentials.toml` is gitignored.
+- `config.toml` — local Streamlit: `gatherUsageStats = false`, `toolbarMode = "minimal"`, `headless = true`, `address = "127.0.0.1"`, `fileWatcherType = "none"`, `runOnSave = false`, `maxUploadSize = 500`, CORS + XSRF on. `credentials.toml` is gitignored.
 
 ### `docs/`
 

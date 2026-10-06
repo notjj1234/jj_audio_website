@@ -62,6 +62,7 @@ def stem_mixer(
     hide_youtube_video: bool = False,
     local_video_url: str | None = None,
     video_offset_sec: float = 0.0,
+    theme_vars: dict[str, str] | None = None,
     key: str | None = None,
 ) -> dict[str, Any] | None:
     """
@@ -75,6 +76,9 @@ def stem_mixer(
     ``times1x``, ``refSec``, ``beatsPerMeasure``, ``durationSec``, and
     ``options`` ``{accent, rate, sound}``. When present, the mixer synthesizes
     clicks in-browser so Accent/Rate/Sound can change without reloading stems.
+
+    ``theme_vars`` (optional): CSS custom properties for theming the iframe.
+    Pass the result of ``get_iframe_theme_vars()`` from isolate_state.
 
     Returns the latest control state from the browser, e.g.
     ``{volumesDb, muted, soloed, masterVolumeDb, metronomeOptions?}``,
@@ -97,6 +101,7 @@ def stem_mixer(
         hideYoutubeVideo=bool(hide_youtube_video),
         localVideoUrl=(local_video_url or "").strip(),
         videoOffsetSec=max(0.0, float(video_offset_sec or 0.0)),
+        themeVars=theme_vars or {},
         key=key,
         default=None,
     )

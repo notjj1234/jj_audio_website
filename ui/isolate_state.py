@@ -30,6 +30,16 @@ from audio_to_tab.metronome import (
 from audio_to_tab.mixer import stem_display_name, stem_energy_db
 from ui.common import DATA_DIR, delete_run
 from ui.stem_icons import outcome_icon_markdown, stem_icon_markdown
+from ui.theme_presets import (
+    ACCENT_TOKENS,
+    BASE_TOKENS_DARK,
+    BASE_TOKENS_LIGHT,
+    SIGNAL_TOKENS,
+    THEME_PRESETS,
+    TYRIAN_BASE_DARK,
+    TYRIAN_BASE_LIGHT,
+    TYRIAN_BLUE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -3329,3 +3339,236 @@ def seed_metronome_widgets_for_run(
     session.setdefault(ISOLATE_METRO_FOLLOW_KEY, "smart")
     # Unknown baked options: let the Mixer rebake to the current prefs.
     session.pop(ISOLATE_METRO_APPLIED_KEY, None)
+
+
+# ═══════════════════════════════════════════════════════════════
+# THEME STATE MANAGEMENT
+# ═══════════════════════════════════════════════════════════════
+
+THEME_PRESET_KEY = "theme_preset_id"
+THEME_MODE_KEY = "theme_mode"  # light, dark, system
+THEME_CUSTOM_TOKENS_KEY = "theme_custom_tokens"
+
+DEFAULT_THEME_PRESET = "tyrian"
+DEFAULT_THEME_MODE = "dark"
+
+_THEME_CONFIG_FILENAME = "theme_config.json"
+
+
+def _theme_config_path() -> Path:
+    return DATA_DIR / _THEME_CONFIG_FILENAME
+
+
+def load_theme_state(session: MutableMapping[str, Any]) -> None:
+    """Load theme from persisted config file."""
+    config_path = _theme_config_path()
+    if config_path.is_file():
+        try:
+            import json
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            session[THEME_PRESET_KEY] = config.get("preset", DEFAULT_THEME_PRESET)
+            session[THEME_MODE_KEY] = config.get("mode", DEFAULT_THEME_MODE)
+            session[THEME_CUSTOM_TOKENS_KEY] = config.get("custom_tokens", {})
+        except Exception:
+            pass
+    # Set defaults if not present
+    session.setdefault(THEME_PRESET_KEY, DEFAULT_THEME_PRESET)
+    session.setdefault(THEME_MODE_KEY, DEFAULT_THEME_MODE)
+    session.setdefault(THEME_CUSTOM_TOKENS_KEY, {})
+    # Settings only offers Tyrian (or a saved custom palette). An older
+    # forest/teal/purple/ocean file would keep painting the green theme.
+    if session.get(THEME_PRESET_KEY) not in ("tyrian", "custom"):
+        session[THEME_PRESET_KEY] = DEFAULT_THEME_PRESET
+        session[THEME_CUSTOM_TOKENS_KEY] = {}
+        save_theme_state(session)
+
+
+def save_theme_state(session: MutableMapping[str, Any]) -> None:
+    """Persist theme to config file."""
+    config_path = _theme_config_path()
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    import json
+    config = {
+        "preset": session.get(THEME_PRESET_KEY, DEFAULT_THEME_PRESET),
+        "mode": session.get(THEME_MODE_KEY, DEFAULT_THEME_MODE),
+        "custom_tokens": session.get(THEME_CUSTOM_TOKENS_KEY, {}),
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+
+def _os_theme_mode() -> str:
+    """Light or dark from the operating system. Dark when it cannot be read."""
+    import sys
+
+    if sys.platform.startswith("win"):
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            ) as key:
+                value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            return "light" if int(value) == 1 else "dark"
+        except OSError:
+            return "dark"
+    if sys.platform == "darwin":
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["defaults", "read", "-g", "AppleInterfaceStyle"],
+                capture_output=True,
+                text=True,
+                timeout=1,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return "dark"
+        return "dark" if "dark" in (result.stdout or "").lower() else "light"
+    return "dark"
+
+
+def get_effective_theme_mode(session: MutableMapping[str, Any]) -> str:
+    """Resolve 'system' to the operating system's light or dark setting."""
+    mode = session.get(THEME_MODE_KEY, DEFAULT_THEME_MODE)
+    if mode == "light":
+        return "light"
+    if mode == "dark":
+        return "dark"
+    return _os_theme_mode()
+
+
+def _resolved_theme_tokens(session: Mapping[str, Any]) -> dict[str, str]:
+    """Token map for the saved preset. Tyrian stays on its two hues."""
+    preset_id = session.get(THEME_PRESET_KEY, DEFAULT_THEME_PRESET)
+    mode = get_effective_theme_mode(session)
+    custom = session.get(THEME_CUSTOM_TOKENS_KEY, {})
+    preset = next((p for p in THEME_PRESETS if p.id == preset_id), THEME_PRESETS[0])
+    if preset.accent_id == "tyrian":
+        base = TYRIAN_BASE_LIGHT if mode == "light" else TYRIAN_BASE_DARK
+        return {**base, **ACCENT_TOKENS["tyrian"]}
+    base = BASE_TOKENS_DARK if mode == "dark" else BASE_TOKENS_LIGHT
+    accent = ACCENT_TOKENS.get(preset.accent_id, {})
+    if preset.accent_id == "custom":
+        # Custom tokens use --custom- prefix for base layers
+        accent = {
+            f"--custom-{k.lstrip('--')}": v
+            for k, v in custom.items()
+            if k.startswith("--custom-")
+        }
+        accent.update({k: v for k, v in custom.items() if not k.startswith("--custom-")})
+    return {**base, **accent, **SIGNAL_TOKENS}
+
+
+_THEME_SHELL_CSS = """
+:root {
+  --background-color: var(--color-bg-deepest) !important;
+  --secondary-background-color: var(--color-bg-raised) !important;
+  --text-color: var(--color-text-primary) !important;
+  --secondary-text-color: var(--color-text-primary) !important;
+  --primary-color: var(--color-accent-primary) !important;
+  --link-color: var(--color-link) !important;
+  --border-color: var(--color-border-subtle) !important;
+}
+.stApp,
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"],
+[data-testid="stMainBlockContainer"],
+[data-testid="stBottom"],
+[data-testid="stSidebar"],
+[data-testid="stSidebarContent"],
+[data-testid="stHeader"],
+[data-testid="stToolbar"] {
+  background-color: var(--color-bg-deepest) !important;
+  color: var(--color-text-primary) !important;
+}
+.stApp a {
+  color: var(--color-link);
+}
+[data-testid="stSidebarNavLink"] {
+  color: var(--color-text-primary) !important;
+  background-color: transparent !important;
+}
+[data-testid="stSidebarNavLink"][aria-current="page"] {
+  background-color: var(--color-bg-highlight) !important;
+  color: var(--color-text-primary) !important;
+}
+[data-testid="stMainMenuPopover"] {
+  background-color: var(--color-bg-deepest) !important;
+  color: var(--color-text-primary) !important;
+}
+[data-testid^="stMainMenuItem-"] {
+  color: var(--color-text-primary) !important;
+}
+[data-testid="stMainMenuItem-theme-System"],
+[data-testid="stMainMenuItem-theme-Light"],
+[data-testid="stMainMenuItem-theme-Dark"] {
+  display: none !important;
+}
+[data-testid="stFileUploaderDropzone"],
+[data-testid="stExpander"],
+[data-testid="stExpander"] details,
+[data-baseweb="select"] > div,
+[data-baseweb="popover"] [data-baseweb="menu"] {
+  background-color: var(--color-bg-raised) !important;
+  color: var(--color-text-primary) !important;
+  border-color: var(--color-border-subtle) !important;
+}
+[data-testid="stMarkdownContainer"],
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stHeading"],
+[data-testid="stHeading"] h1,
+[data-testid="stHeading"] h2,
+[data-testid="stHeading"] h3,
+[data-testid="stCaptionContainer"],
+[data-testid="stWidgetLabel"],
+[data-testid="stWidgetLabel"] p {
+  color: var(--color-text-primary) !important;
+}
+[data-testid="stTextInput"] input,
+[data-testid="stTextArea"] textarea,
+[data-testid="stNumberInput"] input {
+  background-color: var(--color-bg-raised) !important;
+  color: var(--color-text-primary) !important;
+}
+button[kind="secondary"],
+[data-testid="stBaseButton-secondary"] {
+  background-color: var(--color-bg-raised) !important;
+  color: var(--color-text-primary) !important;
+  border-color: var(--color-border-subtle) !important;
+}
+button[kind="primary"],
+[data-testid="stBaseButton-primary"] {
+  background-color: var(--color-accent-primary) !important;
+  color: """ + TYRIAN_BLUE + """ !important;
+  border-color: var(--color-accent-primary-hover) !important;
+}
+button[kind="primary"] [data-testid="stMarkdownContainer"],
+button[kind="primary"] [data-testid="stMarkdownContainer"] p,
+[data-testid="stBaseButton-primary"] [data-testid="stMarkdownContainer"],
+[data-testid="stBaseButton-primary"] [data-testid="stMarkdownContainer"] p {
+  color: """ + TYRIAN_BLUE + """ !important;
+}
+"""
+
+
+def get_iframe_theme_vars(session: MutableMapping[str, Any]) -> dict[str, str]:
+    """Extract CSS custom properties for iframe components."""
+    return _resolved_theme_tokens(session)
+
+
+def build_theme_css_vars(session: MutableMapping[str, Any]) -> str:
+    """Generate CSS custom properties string for injection via st.html."""
+    preset_id = session.get(THEME_PRESET_KEY, DEFAULT_THEME_PRESET)
+    mode = get_effective_theme_mode(session)
+    all_tokens = _resolved_theme_tokens(session)
+    lines = [":root {"]
+    for key, value in all_tokens.items():
+        lines.append(f"  {key}: {value};")
+    lines.append("}")
+    lines.append(
+        f"html {{ --theme-preset: '{preset_id}'; --theme-mode: '{mode}'; color-scheme: {mode}; }}"
+    )
+    lines.append(_THEME_SHELL_CSS)
+    return "\n".join(lines)

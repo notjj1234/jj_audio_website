@@ -53,6 +53,7 @@ def region_picker(
     min_length_sec: float = 5.0,
     duration_sec: float | None = None,
     max_hint_sec: float | None = None,
+    theme_vars: dict[str, str] | None = None,
     key: str | None = None,
 ) -> dict[str, Any] | None:
     """
@@ -60,6 +61,9 @@ def region_picker(
 
     Returns ``{startSec, endSec}`` after the user finishes dragging, or None
     before the first report.
+
+    ``theme_vars`` (optional): CSS custom properties for theming the iframe.
+    Pass the result of ``get_iframe_theme_vars()`` from isolate_state.
     """
     if _region_picker is None:
         raise RuntimeError(
@@ -73,6 +77,7 @@ def region_picker(
         minLengthSec=float(min_length_sec),
         durationSec=None if duration_sec is None else float(duration_sec),
         maxHintSec=None if max_hint_sec is None else float(max_hint_sec),
+        themeVars=theme_vars or {},
         key=key,
         default=None,
     )

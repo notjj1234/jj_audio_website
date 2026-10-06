@@ -1,15 +1,19 @@
+@import "../../src/design-tokens.css";
+
 :root {
-  --ink: #1a1f1c;
-  --paper: #e8efe6;
-  --moss: #2f6b4f;
-  --moss-deep: #1e4533;
-  --sand: #d4c4a8;
-  --haze: rgba(26, 31, 28, 0.08);
-  --danger: #9b2c2c;
   --font-display: "Satoshi", system-ui, sans-serif;
   --font-body: "Satoshi", system-ui, sans-serif;
   --radius: 4px;
   --max: 720px;
+  
+  /* Legacy aliases for backward compatibility */
+  --ink: var(--color-text-primary);
+  --paper: var(--color-bg-deepest);
+  --moss: var(--color-accent-primary);
+  --moss-deep: var(--color-accent-tertiary);
+  --sand: var(--color-accent-secondary);
+  --haze: var(--color-border-subtle);
+  --danger: var(--color-danger);
 }
 
 *,

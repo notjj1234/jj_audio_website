@@ -389,7 +389,8 @@ def main() -> None:
             except YouTubeDownloadError as exc:
                 st.error(str(exc))
             except (FileNotFoundError, OSError) as exc:
-                st.error(f"File error: {exc}")
+                logger.warning("Tab PDF could not read the audio file: %s", exc)
+                st.error("Could not read that audio file.")
             except ValueError as exc:
                 st.error(str(exc))
             except Exception as exc:

@@ -353,8 +353,8 @@ def test_server_role_passes_loopback_flags_to_streamlit(tmp_path, monkeypatch):
     assert "--server.address=127.0.0.1" in argv
     assert "--server.port=8502" in argv
     assert "--server.enableXsrfProtection=true" in argv
-    assert "--client.toolbarMode=viewer" in argv
-    assert "--client.toolbarMode=minimal" not in argv
+    assert "--client.toolbarMode=minimal" in argv
+    assert "--client.toolbarMode=viewer" not in argv
     about = (Path(__file__).resolve().parents[1] / "ui" / "app.py").read_text(encoding="utf-8")
     assert "separates songs into stems on this computer" in about
     assert "Nothing is sent to an account." in about
@@ -368,7 +368,7 @@ def test_dev_reload_enables_streamlit_watch_when_unfrozen(tmp_path, monkeypatch)
     argv = launcher._streamlit_server_argv(tmp_path, 8501)
     assert "--server.fileWatcherType=auto" in argv
     assert "--server.runOnSave=true" in argv
-    assert "--client.toolbarMode=viewer" in argv
+    assert "--client.toolbarMode=minimal" in argv
 
 
 def test_dev_reload_ignored_when_frozen(tmp_path, monkeypatch):
@@ -946,16 +946,17 @@ def test_desktop_app_version_is_0_1_1_not_website_package(monkeypatch):
     from audio_to_tab import __version__
 
     monkeypatch.delenv("AUDIO_TOOLS_EDITION", raising=False)
-    assert __version__ == "0.1.4"
-    assert common.desktop_app_version() == "0.1.4"
+    assert __version__ == "0.1.5"
+    assert common.desktop_app_version() == "0.1.5"
     pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.1.4"' in pyproject
+    assert 'version = "0.1.5"' in pyproject
     blurb = common.desktop_demo_blurb()
-    assert "Demo 0.1.4 (CPU)" in blurb
-    assert "this PC" in blurb
+    assert "Demo 0.1.5 (CPU)" in blurb
+    assert "Processing stays on this PC" not in blurb
+    assert "No account." in blurb
     assert "github" not in blurb.lower()
     assert "ATT_SECRET" not in blurb
-    cuda_blurb = common.desktop_demo_blurb("0.1.4", "cuda")
+    cuda_blurb = common.desktop_demo_blurb("0.1.5", "cuda")
     assert "NVIDIA CUDA" in cuda_blurb
 
 
@@ -963,7 +964,7 @@ def test_inno_and_installer_script_use_versioned_filename():
     root = Path(__file__).resolve().parents[1]
     iss = (root / "packaging" / "AudioTools.iss").read_text(encoding="utf-8")
     assert "OutputBaseFilename=AudioTools-{#AppVersion}-windows-x64-{#Flavor}-setup" in iss
-    assert '#define AppVersion "0.1.4"' in iss
+    assert '#define AppVersion "0.1.5"' in iss
     assert "VersionInfoVersion={#AppVersion}" in iss
     assert "VersionInfoProductVersion={#AppVersion}" in iss
     assert "{A7C3E8F1-4B2D-4E9A-9C1F-8D6B5A2E0F73}" in iss
@@ -993,6 +994,9 @@ def test_streamlit_about_is_local_demo_without_hosted_urls():
     assert '[data-stale="true"]' in text
     assert "st.html(" in text
     assert "unsafe_allow_html" not in text
+    assert "unsafe_allow_javascript=True" in text
+    assert "stMainMenuItem-app-settings" in text
+    assert 'st.button("Settings"' not in text
     # Satoshi must not blanket-override Material Icons ([class*="st-"] broke ligatures
     # into overlapping text: upload, _arrow_right, keyboard_double_*).
     assert 'html, body, [class*="st-"]' not in text
@@ -1052,6 +1056,28 @@ def test_youtube_audio_page_nav_order_and_freeze_import():
     assert "Interface Lite/Pro" not in page
     assert "Alt+Tab" in page
     assert 'st.session_state[YT_AUDIO_FMT_KEY] = _DEFAULT_FMT' in page or '_DEFAULT_FMT = "mp3"' in page
+
+
+def test_settings_page_is_in_nav_without_sidebar_theme_or_emoji():
+    import re
+
+    root = Path(__file__).resolve().parents[1]
+    app = (root / "ui" / "app.py").read_text(encoding="utf-8")
+    page = (root / "ui" / "pages" / "settings.py").read_text(encoding="utf-8")
+    presets = (root / "ui" / "theme_presets.py").read_text(encoding="utf-8")
+    spec = (root / "packaging" / "audio_tools.spec").read_text(encoding="utf-8")
+    nav_block = app.split("_nav =")[1].split("pg = st.navigation")[0]
+    assert 'title="Settings"' in nav_block
+    assert nav_block.find("tab_pdf.py") < nav_block.find("settings.py")
+    assert 'subheader("🎨 Theme")' not in app
+    assert "on_change=save_theme_state" not in app
+    assert "def _persist_theme()" in page
+    assert "on_change=_persist_theme" in page
+    assert "The palette is dark Tyrian blue and yellow-orange." in page
+    assert re.search(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", page) is None
+    assert "#192542" in presets
+    assert "#f6ad49" in presets
+    assert "ui.pages.settings" in spec
 
 
 def test_tab_pdf_lite_hides_engine_widgets():

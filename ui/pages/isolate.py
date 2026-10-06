@@ -83,6 +83,7 @@ from ui.isolate_state import (
     OUTCOME_CARD_KEY,
     OUTCOME_CARD_ORDER,
     OUTCOME_CARDS,
+    get_effective_theme_mode,
     outcome_icon_markdown,
     stem_icon_markdown,
     DEMUCS_STEM_CHECKBOX_IDS,
@@ -213,6 +214,7 @@ from ui.isolate_state import (
     tracks_picker_help,
     upload_fingerprint,
     write_isolate_ui_state,
+    get_iframe_theme_vars,
 )
 from ui.media import (
     ensure_mixer_audio_paths,
@@ -1089,6 +1091,7 @@ def _render_live_mixer(
     local_url = _local_mixer_video_url(run_dir) if local_path is not None else None
     if local_path is not None and not local_url:
         youtube_id = mixer_youtube_video_id(st.session_state)
+    theme_vars = get_iframe_theme_vars(st.session_state)
     return stem_mixer(
         stems_arg,
         initial_volumes_db={n: float(volumes.get(n, DB_DEFAULT)) for n in stem_names},
@@ -1103,6 +1106,7 @@ def _render_live_mixer(
         hide_youtube_video=bool(st.session_state.get("isolate_hide_youtube_video")),
         local_video_url=local_url,
         video_offset_sec=video_offset_sec_for_run(run_dir),
+        theme_vars=theme_vars,
         key=mixer_key,
     )
 
@@ -1190,13 +1194,17 @@ def _render_track_picker(*, persist: dict) -> None:
     )
 
 
+def _tiles_use_light_icons() -> bool:
+    return get_effective_theme_mode(st.session_state) == "light"
+
+
 def _outcome_tile_label(card_id: str, *, selected: bool) -> str:
     """Icon above copy (same stack as Custom); stems + N tracks on one meta line."""
     spec = OUTCOME_CARDS[card_id]
     n_tracks = int(spec["n_tracks"])
     tracks = "1\u00a0track" if n_tracks == 1 else f"{n_tracks}\u00a0tracks"
     return (
-        f"{outcome_icon_markdown(card_id, selected=selected)}\n\n"
+        f"{outcome_icon_markdown(card_id, selected=selected, light=_tiles_use_light_icons())}\n\n"
         f"{spec['label']}\n"
         f"{spec['stems_line']} · {tracks}"
     )
@@ -1230,7 +1238,7 @@ def _render_stem_tile(
 ) -> None:
     """One custom-grid stem. Clicking toggles the existing Pro session keys."""
     clicked = st.button(
-        f"{stem_icon_markdown(stem_id, selected=selected)}\n"
+        f"{stem_icon_markdown(stem_id, selected=selected, light=_tiles_use_light_icons())}\n"
         f"{CUSTOM_STEM_CHOICES[stem_id]}",
         type="primary" if selected else "secondary",
         key=f"isolate_stem_pick_{stem_id}",
@@ -1961,7 +1969,8 @@ def _extract_uploaded_audio(uploaded: object) -> tuple[Path | None, str | None]:
     except Exception as exc:
         wav.unlink(missing_ok=True)
         st.session_state.pop("isolate_pending_video_path", None)
-        return None, str(exc)
+        logger.warning("Could not read audio from uploaded video: %s", exc)
+        return None, "Could not read audio from this video."
     return audio, None
 
 
@@ -2143,6 +2152,7 @@ def _render_region_bounds_widgets(
 
     if component_build_available is not None and component_build_available() and region_picker:
         try:
+            theme_vars = get_iframe_theme_vars(st.session_state)
             url = media_url_for_file(
                 audio_path, coordinates=f"isolate.region.{region_key}"
             )
@@ -2154,6 +2164,7 @@ def _render_region_bounds_widgets(
                     min_length_sec=float(MIN_REGION_SEC),
                     duration_sec=float(duration),
                     max_hint_sec=None if pro else float(LITE_MAX_DURATION_SEC),
+                    theme_vars=theme_vars,
                     key=f"{region_key}_wave_{st.session_state.get(f'{region_key}_wave_nonce', 0)}",
                 )
             if isinstance(result, dict):
@@ -4090,11 +4101,13 @@ def _render_moises_tab_strip(browser_id: str | None) -> None:
             from ui.mix_tabs_component import component_build_available, mix_tabs
 
             if component_build_available():
+                theme_vars = get_iframe_theme_vars(st.session_state)
                 result = mix_tabs(
                     tabs=tab_payload,
                     home_label="Home",
                     home_active=shell == "home" and not draft_active,
                     show_plus=True,
+                    theme_vars=theme_vars,
                     key="isolate_moises_tabs",
                 )
             else:

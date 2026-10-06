@@ -1,4 +1,5 @@
 @import url("../../../fonts/satoshi.css");
+@import url("./iframe-theme.css");
 
 :root {
   font-family: "Satoshi", system-ui, sans-serif;
@@ -11,7 +12,6 @@ body {
 }
 
 .mixer {
-  --danger: #b3261e;
   color: var(--text);
   background: var(--bg);
   display: flex;
@@ -63,7 +63,7 @@ body {
 
 .mixer button {
   border: none;
-  border-radius: 0.35rem;
+  border-radius: var(--radius);
   min-height: 40px;
   padding: 0.4rem 0.85rem;
   cursor: pointer;
@@ -82,17 +82,29 @@ body {
   color: #fff;
 }
 
+.mixer button.primary:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
 .mixer button.ghost {
   min-height: 36px;
   padding: 0.25rem 0.4rem;
   background: transparent;
   color: var(--text);
   font-size: 0.85rem;
+  border: 1px solid var(--border);
 }
 
-.mixer button.ghost:hover {
+.mixer button.ghost:hover:not(:disabled) {
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+
+.mixer button.ghost.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+  text-decoration: none;
 }
 
 .mixer-time {
@@ -125,7 +137,7 @@ body {
 .mixer input[type="range"]::-webkit-slider-runnable-track {
   height: 3px;
   border-radius: 999px;
-  background: rgba(128, 128, 128, 0.35);
+  background: var(--border);
 }
 
 .mixer input[type="range"]::-webkit-slider-thumb {
@@ -143,7 +155,7 @@ body {
 .mixer input[type="range"]::-moz-range-track {
   height: 3px;
   border-radius: 999px;
-  background: rgba(128, 128, 128, 0.35);
+  background: var(--border);
 }
 
 .mixer input[type="range"]::-moz-range-thumb {
@@ -220,8 +232,8 @@ body {
   box-sizing: border-box;
   padding: 0.45rem;
   background: var(--bg);
-  border: 1px solid color-mix(in srgb, var(--text) 28%, transparent);
-  border-radius: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
 }
 
@@ -280,7 +292,7 @@ body {
 .mixer-video-fallback img {
   width: 100%;
   aspect-ratio: 16 / 9;
-  background: #111;
+  background: var(--waveform-bg);
   object-fit: cover;
 }
 
@@ -323,7 +335,7 @@ body {
   z-index: 2;
   background: linear-gradient(to bottom, transparent 40%, var(--text) 40%, var(--text) 60%, transparent 60%);
   opacity: 0.45;
-  border-radius: 0.25rem;
+  border-radius: var(--radius-sm);
 }
 
 .mixer-stems-resize:hover,
@@ -345,7 +357,7 @@ body {
 }
 
 .mixer-stage[data-snap="below"] .mixer-video-wrap:not(.is-placed) {
-  order: 1;
+  order: 1.
 }
 
 .mixer-stage[data-snap="above"] .mixer-video-wrap:not(.is-placed):not(.is-sized),
@@ -396,7 +408,7 @@ body {
   align-items: center;
   gap: 0.3rem 0.45rem;
   padding: 0.4rem 0;
-  border-top: 1px solid rgba(128, 128, 128, 0.22);
+  border-top: 1px solid var(--border);
   box-sizing: border-box;
   transition: opacity 0.15s ease;
 }
@@ -461,7 +473,7 @@ body {
   padding: 0;
   background: transparent;
   color: var(--text);
-  border: 1px solid rgba(128, 128, 128, 0.45);
+  border: 1px solid var(--border);
   font-size: 0.78rem;
   letter-spacing: 0.02em;
 }
@@ -487,7 +499,7 @@ body {
   display: flex;
   align-items: center;
   gap: 0.65rem;
-  min-width: 0;
+  min-width: 0.
 }
 
 .metro-preview {
@@ -498,10 +510,10 @@ body {
   position: relative;
   flex: 1 1 auto;
   min-width: 0;
-  border-radius: 0.55rem;
-  background: rgba(128, 128, 128, 0.16);
+  border-radius: var(--radius-lg);
+  background: var(--waveform-bg);
   padding: 1.85rem 0.45rem 0.35rem;
-  box-sizing: border-box;
+  box-sizing: border-box.
 }
 
 .metro-toolbar {
@@ -524,7 +536,7 @@ body {
 .metro-rate-seg {
   display: inline-flex;
   align-items: stretch;
-  border-radius: 0.4rem;
+  border-radius: var(--radius);
   overflow: hidden;
   background: rgba(0, 0, 0, 0.28);
 }
@@ -548,9 +560,9 @@ body {
 
 .mixer .metro-rate-seg .metro-rate-btn.active,
 .mixer .metro-rate-seg .metro-follow-btn.active {
-  background: #f4f4f4;
-  color: #161616;
-  opacity: 1;
+  background: var(--bg-highlight);
+  color: var(--text);
+  opacity: 1.
 }
 
 .mixer .metro-chip {
@@ -558,130 +570,130 @@ body {
   min-height: 1.55rem;
   height: 1.55rem;
   padding: 0 0.55rem;
-  border-radius: 0.4rem;
-  border: none;
-  background: rgba(0, 0, 0, 0.28);
-  color: var(--text);
-  font-size: 0.68rem;
-  font-weight: 600;
-  opacity: 0.85;
+  border-radius: var(--radius);
+  border: none.
+  background: rgba(0, 0, 0, 0.28).
+  color: var(--text).
+  font-size: 0.68rem.
+  font-weight: 600.
+  opacity: 0.85.
 }
 
 .mixer .metro-chip.active {
-  background: rgba(244, 244, 244, 0.92);
-  color: #161616;
-  opacity: 1;
+  background: var(--bg-highlight).
+  color: var(--text).
+  opacity: 1.
 }
 
 .metro-sound-wrap {
-  margin: 0;
-  display: inline-flex;
+  margin: 0.
+  display: inline-flex.
 }
 
 .metro-sound-wrap select {
-  appearance: none;
-  -webkit-appearance: none;
-  font: inherit;
-  font-size: 0.68rem;
-  font-weight: 600;
-  color: var(--text);
-  background-color: rgba(0, 0, 0, 0.28);
-  border: none;
-  border-radius: 0.4rem;
-  height: 1.55rem;
-  padding: 0 1.35rem 0 0.55rem;
+  appearance: none.
+  -webkit-appearance: none.
+  font: inherit.
+  font-size: 0.68rem.
+  font-weight: 600.
+  color: var(--text).
+  background-color: rgba(0, 0, 0, 0.28).
+  border: none.
+  border-radius: var(--radius).
+  height: 1.55rem.
+  padding: 0 1.35rem 0 0.55rem.
   background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
-    linear-gradient(135deg, currentColor 50%, transparent 50%);
-  background-position: calc(100% - 0.7rem) 55%, calc(100% - 0.45rem) 55%;
-  background-size: 0.28rem 0.28rem, 0.28rem 0.28rem;
-  background-repeat: no-repeat;
-  opacity: 0.9;
-  cursor: pointer;
+    linear-gradient(135deg, currentColor 50%, transparent 50%).
+  background-position: calc(100% - 0.7rem) 55%, calc(100% - 0.45rem) 55%.
+  background-size: 0.28rem 0.28rem, 0.28rem 0.28rem.
+  background-repeat: no-repeat.
+  opacity: 0.9.
+  cursor: pointer.
 }
 
 .stem-row.is-metro .wave-seek {
-  margin-top: 0.1rem;
+  margin-top: 0.1rem.
 }
 
 .stem-row.is-metro .waveform-svg {
-  height: max(28px, calc(var(--stem-wave-height, 52px) * 0.85));
-  fill: rgba(200, 200, 200, 0.72);
-  opacity: 1;
+  height: max(28px, calc(var(--stem-wave-height, 52px) * 0.85)).
+  fill: var(--signal-low).
+  opacity: 1.
 }
 
 .stem-row.is-metro .waveform-svg .wave-baseline {
-  stroke: rgba(200, 200, 200, 0.35);
-  stroke-opacity: 1;
+  stroke: var(--signal-low).
+  stroke-opacity: 0.5.
 }
 
 .wave-seek {
-  position: relative;
-  flex: 1 1 auto;
-  min-width: 0;
-  cursor: pointer;
-  touch-action: none;
+  position: relative.
+  flex: 1 1 auto.
+  min-width: 0.
+  cursor: pointer.
+  touch-action: none.
 }
 
 .waveform-svg {
-  width: 100%;
-  height: var(--stem-wave-height, 52px);
-  display: block;
-  fill: var(--primary);
-  opacity: 0.85;
-  pointer-events: none;
+  width: 100%.
+  height: var(--stem-wave-height, 52px).
+  display: block.
+  fill: var(--waveform-fill).
+  opacity: 0.85.
+  pointer-events: none.
 }
 
 .waveform-svg .wave-baseline {
-  stroke: var(--primary);
-  stroke-width: 1;
-  stroke-opacity: 0.35;
-  fill: none;
+  stroke: var(--waveform-fill).
+  stroke-width: 1.
+  stroke-opacity: 0.35.
+  fill: none.
 }
 
 .wave-playhead {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  margin-left: -1px;
-  background: var(--text);
-  pointer-events: none;
-  z-index: 1;
+  position: absolute.
+  top: 0.
+  bottom: 0.
+  width: 2px.
+  margin-left: -1px.
+  background: var(--text).
+  pointer-events: none.
+  z-index: 1.
 }
 
 .download-link {
-  flex: 0 0 auto;
-  color: var(--text);
-  text-decoration: none;
-  font-size: 0.8rem;
-  font-weight: 600;
-  opacity: 0.78;
-  align-self: center;
+  flex: 0 0 auto.
+  color: var(--text).
+  text-decoration: none.
+  font-size: 0.8rem.
+  font-weight: 600.
+  opacity: 0.78.
+  align-self: center.
 }
 
 .download-link:hover {
-  text-decoration: underline;
-  text-underline-offset: 3px;
+  text-decoration: underline.
+  text-underline-offset: 3px.
 }
 
 @media (max-width: 520px) {
   .stem-row {
-    grid-template-columns: 40px 40px minmax(0, 1fr);
+    grid-template-columns: 40px 40px minmax(0, 1fr).
     grid-template-areas:
       "mute solo name"
       "vol vol vol"
-      "preview preview preview";
+      "preview preview preview".
   }
 
   .metro-wave {
-    padding-top: 2.15rem;
+    padding-top: 2.15rem.
   }
 
   .mixer-time {
-    margin-left: 0;
+    margin-left: 0.
   }
 
   .master-vol {
-    grid-template-columns: auto minmax(0, 1fr) 2.75rem;
+    grid-template-columns: auto minmax(0, 1fr) 2.75rem.
   }
 }

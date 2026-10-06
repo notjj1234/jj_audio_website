@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make the AudioTools 0.1.4 desktop demo reachable and usable by a friend — working download links, both Windows installers shipping, and a first click of "Separate" that succeeds on a machine with no NVIDIA GPU.
+**Goal:** Make the AudioTools 0.1.5 desktop demo reachable and usable by a friend — working download links, both Windows installers shipping, and a first click of "Separate" that succeeds on a machine with no NVIDIA GPU.
 
 **Architecture:** Three independent fixes. (1) `hardware.py` gains one probe-aware GPU decision helper that every recommendation path routes through, so a CUDA string present in the *offered options* no longer implies a CUDA *default*. (2) A pure `default_isolate_device()` helper in `ui/isolate_state.py` seeds the persisted device session key from the recommendation instead of positional order. (3) The CI release workflow stops renaming installer artifacts, making `packaging/make_windows_installer.ps1` and `packaging/make_pkg.sh` the single naming authority. Documentation is then corrected against assets that actually exist.
 
@@ -501,7 +501,7 @@ Expected: the paths above modified, uncommitted. Do not run `git add`, `git comm
 
 The installer scripts already produce correctly versioned filenames. The workflow then
 discards them: on Windows it renames the built `.exe` to a hardcoded unversioned label, and
-on macOS it overrides the script's own name. That is why the published 0.1.4 asset names
+on macOS it overrides the script's own name. That is why the published 0.1.5 asset names
 differ from what the docs promise.
 
 The fix is to **stop the override**. `packaging/**` is not touched, and the installer
@@ -640,7 +640,7 @@ Verify the extraction works locally first:
 sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/audio_to_tab/__init__.py
 ```
 
-Expected: `0.1.4`
+Expected: `0.1.5`
 
 Then insert as the **first** entry under the existing `jobs:` key:
 
@@ -682,12 +682,12 @@ sitting beside them. Get the version first:
 python -c "import sys; sys.path.insert(0,'src'); from audio_to_tab import __version__; print(__version__)"
 ```
 
-Expected: `0.1.4`. Then replace, inside the `body: |` block:
+Expected: `0.1.5`. Then replace, inside the `body: |` block:
 
-- `` `AudioTools-windows-x64-cpu-setup.exe` `` → `` `AudioTools-0.1.4-windows-x64-cpu-setup.exe` ``
-- `` `AudioTools-windows-x64-cuda-setup.exe` `` → `` `AudioTools-0.1.4-windows-x64-cuda-setup.exe` ``
-- `` `AudioTools-macos-arm64-silicon.pkg` `` → `` `AudioTools-0.1.4-macos-arm64-silicon.pkg` ``
-- `` `AudioTools-macos-x64-intel.pkg` `` → `` `AudioTools-0.1.4-macos-x64-intel.pkg` ``
+- `` `AudioTools-windows-x64-cpu-setup.exe` `` → `` `AudioTools-0.1.5-windows-x64-cpu-setup.exe` ``
+- `` `AudioTools-windows-x64-cuda-setup.exe` `` → `` `AudioTools-0.1.5-windows-x64-cuda-setup.exe` ``
+- `` `AudioTools-macos-arm64-silicon.pkg` `` → `` `AudioTools-0.1.5-macos-arm64-silicon.pkg` ``
+- `` `AudioTools-macos-x64-intel.pkg` `` → `` `AudioTools-0.1.5-macos-x64-intel.pkg` ``
 
 Leave `draft: true` at `:216` as-is — the human publishes the draft by hand in Task 6
 Step 6. The body itself contains no draft or prerelease wording to correct.
@@ -746,7 +746,7 @@ The names used here must be exactly what Task 4's pipeline produces.
 - Modify: `DESKTOP.md:88-140` (installer table + signing claim + all `curl` blocks)
 
 **Interfaces:**
-- Consumes: Task 4's output naming. Version from `__version__` (`0.1.4`); tag `desktop-v0.1.4`.
+- Consumes: Task 4's output naming. Version from `__version__` (`0.1.5`); tag `desktop-v0.1.5`.
 - Produces: the single canonical download section. Task 6 verifies every URL here.
 
 - [ ] **Step 1: Read the current section**
@@ -762,10 +762,10 @@ Confirm the exact span before editing.
 ```markdown
 | Tester machine | File | Notes |
 |----------------|------|--------|
-| Apple Silicon Mac (M1–M4) | `AudioTools-0.1.4-macos-arm64-silicon.pkg` | macOS **12+**. Double-click → **Install**. The app launches when install finishes. If Finder blocks: Terminal `xattr -cr` + `sudo installer`, or **System Settings → Privacy & Security → Open Anyway**. |
-| Intel Mac | `AudioTools-0.1.4-macos-x64-intel.pkg` | Same install steps. An arm64 pkg will not launch here. |
-| Windows 10 or 11 (x64), no NVIDIA GPU | `AudioTools-0.1.4-windows-x64-cpu-setup.exe` | **64-bit only.** Small Setup. Start Menu: **Audio Tools (CPU)**. Needs [WebView2](https://go.microsoft.com/fwlink/p/?LinkId=2124703). |
-| Windows 10 or 11 (x64) with NVIDIA GPU | `AudioTools-0.1.4-windows-x64-cuda-setup.exe` | **64-bit only.** Large Setup. Start Menu: **Audio Tools (NVIDIA)**. Isolation is faster on NVIDIA + drivers. Can be installed next to the CPU edition. |
+| Apple Silicon Mac (M1–M4) | `AudioTools-0.1.5-macos-arm64-silicon.pkg` | macOS **12+**. Double-click → **Install**. The app launches when install finishes. If Finder blocks: Terminal `xattr -cr` + `sudo installer`, or **System Settings → Privacy & Security → Open Anyway**. |
+| Intel Mac | `AudioTools-0.1.5-macos-x64-intel.pkg` | Same install steps. An arm64 pkg will not launch here. |
+| Windows 10 or 11 (x64), no NVIDIA GPU | `AudioTools-0.1.5-windows-x64-cpu-setup.exe` | **64-bit only.** Small Setup. Start Menu: **Audio Tools (CPU)**. Needs [WebView2](https://go.microsoft.com/fwlink/p/?LinkId=2124703). |
+| Windows 10 or 11 (x64) with NVIDIA GPU | `AudioTools-0.1.5-windows-x64-cuda-setup.exe` | **64-bit only.** Large Setup. Start Menu: **Audio Tools (NVIDIA)**. Isolation is faster on NVIDIA + drivers. Can be installed next to the CPU edition. |
 ```
 
 - [ ] **Step 3: Fix the signing claim (`:99`)**
@@ -776,7 +776,7 @@ certificates are available on the build Mac." That is misleading in a tester run
 with:
 
 ```markdown
-This is a **0.1.4 demo**. **Downloaded builds are unsigned** — macOS shows the
+This is a **0.1.5 demo**. **Downloaded builds are unsigned** — macOS shows the
 "Apple could not verify" Gatekeeper warning and Windows shows SmartScreen "Unknown
 publisher". Both are expected; the Terminal commands below handle macOS. The PyInstaller
 onedir is not obfuscated (Python is extractable); the freeze ships **no** hosted-site
@@ -790,7 +790,7 @@ Replace with:
 
 ```markdown
 Published under a `desktop-v*` GitHub Release. The download URLs below are pinned to the
-`desktop-v0.1.4` tag so they always resolve to these exact files.
+`desktop-v0.1.5` tag so they always resolve to these exact files.
 ```
 
 - [ ] **Step 5: Rewrite the whole terminal download section (`:105-145`)**
@@ -802,16 +802,16 @@ draft semantics that broke `/releases/latest/`.
 ````markdown
 ## Download & install (terminal)
 
-Use the file that matches your OS. Windows has two 0.1.4 Setups: **`AudioTools-0.1.4-windows-x64-cpu-setup.exe`** (default, ~330 MB) and **`AudioTools-0.1.4-windows-x64-cuda-setup.exe`** (NVIDIA, large). Pick CPU unless your machine has an NVIDIA GPU.
+Use the file that matches your OS. Windows has two 0.1.5 Setups: **`AudioTools-0.1.5-windows-x64-cpu-setup.exe`** (default, ~330 MB) and **`AudioTools-0.1.5-windows-x64-cuda-setup.exe`** (NVIDIA, large). Pick CPU unless your machine has an NVIDIA GPU.
 
 ### Apple Silicon Mac (M1–M4)
 
 ```bash
-curl -fL -o ~/Downloads/AudioTools-0.1.4-macos-arm64-silicon.pkg \
-  "https://github.com/notjj1234/jj_audio_website/releases/download/desktop-v0.1.4/AudioTools-0.1.4-macos-arm64-silicon.pkg"
+curl -fL -o ~/Downloads/AudioTools-0.1.5-macos-arm64-silicon.pkg \
+  "https://github.com/notjj1234/jj_audio_website/releases/download/desktop-v0.1.5/AudioTools-0.1.5-macos-arm64-silicon.pkg"
 
-xattr -cr ~/Downloads/AudioTools-0.1.4-macos-arm64-silicon.pkg
-sudo installer -pkg ~/Downloads/AudioTools-0.1.4-macos-arm64-silicon.pkg -target /
+xattr -cr ~/Downloads/AudioTools-0.1.5-macos-arm64-silicon.pkg
+sudo installer -pkg ~/Downloads/AudioTools-0.1.5-macos-arm64-silicon.pkg -target /
 open /Applications/AudioTools.app
 ```
 
@@ -822,26 +822,26 @@ If Finder shows "Apple could not verify…", use the Terminal block above, or **
 ### Intel Mac
 
 ```bash
-curl -fL -o ~/Downloads/AudioTools-0.1.4-macos-x64-intel.pkg \
-  "https://github.com/notjj1234/jj_audio_website/releases/download/desktop-v0.1.4/AudioTools-0.1.4-macos-x64-intel.pkg"
+curl -fL -o ~/Downloads/AudioTools-0.1.5-macos-x64-intel.pkg \
+  "https://github.com/notjj1234/jj_audio_website/releases/download/desktop-v0.1.5/AudioTools-0.1.5-macos-x64-intel.pkg"
 
-xattr -cr ~/Downloads/AudioTools-0.1.4-macos-x64-intel.pkg
-sudo installer -pkg ~/Downloads/AudioTools-0.1.4-macos-x64-intel.pkg -target /
+xattr -cr ~/Downloads/AudioTools-0.1.5-macos-x64-intel.pkg
+sudo installer -pkg ~/Downloads/AudioTools-0.1.5-macos-x64-intel.pkg -target /
 open /Applications/AudioTools.app
 ```
 
 ### Windows 10 / 11 CPU (PowerShell)
 
 ```powershell
-curl.exe -fL -o "$env:USERPROFILE\Downloads\AudioTools-0.1.4-windows-x64-cpu-setup.exe" `
-  "https://github.com/notjj1234/jj_audio_website/releases/download/desktop-v0.1.4/AudioTools-0.1.4-windows-x64-cpu-setup.exe"
+curl.exe -fL -o "$env:USERPROFILE\Downloads\AudioTools-0.1.5-windows-x64-cpu-setup.exe" `
+  "https://github.com/notjj1234/jj_audio_website/releases/download/desktop-v0.1.5/AudioTools-0.1.5-windows-x64-cpu-setup.exe"
 ```
 
 ### Windows 10 / 11 with NVIDIA GPU (PowerShell)
 
 ```powershell
-curl.exe -fL -o "$env:USERPROFILE\Downloads\AudioTools-0.1.4-windows-x64-cuda-setup.exe" `
-  "https://github.com/notjj1234/jj_audio_website/releases/download/desktop-v0.1.4/AudioTools-0.1.4-windows-x64-cuda-setup.exe"
+curl.exe -fL -o "$env:USERPROFILE\Downloads\AudioTools-0.1.5-windows-x64-cuda-setup.exe" `
+  "https://github.com/notjj1234/jj_audio_website/releases/download/desktop-v0.1.5/AudioTools-0.1.5-windows-x64-cuda-setup.exe"
 ```
 
 The two Windows Setups install to separate Start Menu entries and can sit side by side.
@@ -869,7 +869,7 @@ grep -n 'version' pyproject.toml | head -3
 grep -n '__version__' src/audio_to_tab/__init__.py
 ```
 
-Expected: `0.1.4` in both.
+Expected: `0.1.5` in both.
 
 - [ ] **Step 8: Commit**
 
@@ -919,14 +919,14 @@ Expected: clean tree; the commits from Tasks 1-5 are the most recent entries.
 git tag -l 'desktop-v*'
 ```
 
-Expected: empty. If `desktop-v0.1.4` already exists, stop and report.
+Expected: empty. If `desktop-v0.1.5` already exists, stop and report.
 
 - [ ] **Step 3: STOP — human takes over here**
 
 Hand the human this checklist and stop. Do not run Steps 4–6.
 
 - Step 4: push the branch — `git push origin main`
-- Step 5: push the tag — `git push origin desktop-v0.1.4`
+- Step 5: push the tag — `git push origin desktop-v0.1.5`
 - Step 6: publish the draft release
 
 Explain to the human: pushing the tag triggers a 4-job CI matrix (2 Windows + 2 macOS
@@ -937,7 +937,7 @@ decision to make, not the agent's.
 
 ```bash
 git push origin main
-git push origin desktop-v0.1.4
+git push origin desktop-v0.1.5
 ```
 
 - [ ] **Step 5: Watch the workflow — HUMAN ONLY, do not run**
@@ -959,7 +959,7 @@ UI, and **leave "Set as a pre-release" unchecked** so `/releases/latest/` resolv
 - [ ] **Step 7: Verify the four assets exist with the expected names**
 
 ```bash
-curl -sS "https://api.github.com/repos/notjj1234/jj_audio_website/releases/tags/desktop-v0.1.4" | python3 -c "
+curl -sS "https://api.github.com/repos/notjj1234/jj_audio_website/releases/tags/desktop-v0.1.5" | python3 -c "
 import json,sys
 r=json.load(sys.stdin)
 print('draft=%s prerelease=%s' % (r['draft'], r['prerelease']))
@@ -970,10 +970,10 @@ for a in r['assets']: print('  %-52s %8.1f MB' % (a['name'], a['size']/1e6))
 Expected: `draft=False prerelease=False` and exactly these four names:
 
 ```
-AudioTools-0.1.4-macos-arm64-silicon.pkg
-AudioTools-0.1.4-macos-x64-intel.pkg
-AudioTools-0.1.4-windows-x64-cpu-setup.exe
-AudioTools-0.1.4-windows-x64-cuda-setup.exe
+AudioTools-0.1.5-macos-arm64-silicon.pkg
+AudioTools-0.1.5-macos-x64-intel.pkg
+AudioTools-0.1.5-windows-x64-cpu-setup.exe
+AudioTools-0.1.5-windows-x64-cuda-setup.exe
 ```
 
 **If the names are unversioned, Task 4 did not take effect — stop and report.**
@@ -981,11 +981,11 @@ AudioTools-0.1.4-windows-x64-cuda-setup.exe
 - [ ] **Step 8: Verify every download URL from `DESKTOP.md` returns 200**
 
 ```bash
-B=https://github.com/notjj1234/jj_audio_website/releases/download/desktop-v0.1.4
-for f in AudioTools-0.1.4-macos-arm64-silicon.pkg \
-         AudioTools-0.1.4-macos-x64-intel.pkg \
-         AudioTools-0.1.4-windows-x64-cpu-setup.exe \
-         AudioTools-0.1.4-windows-x64-cuda-setup.exe; do
+B=https://github.com/notjj1234/jj_audio_website/releases/download/desktop-v0.1.5
+for f in AudioTools-0.1.5-macos-arm64-silicon.pkg \
+         AudioTools-0.1.5-macos-x64-intel.pkg \
+         AudioTools-0.1.5-windows-x64-cpu-setup.exe \
+         AudioTools-0.1.5-windows-x64-cuda-setup.exe; do
   curl -sS -o /dev/null -w "$f -> %{http_code}\n" -L -r 0-0 "$B/$f"
 done
 ```
@@ -1030,17 +1030,17 @@ needed:
   for the download links to work at all.
 
 **The release is still needed — just done by hand.** The tag-pinned URLs written in Task 5
-(`releases/download/desktop-v0.1.4/<file>`) do **not** require Actions. GitHub serves any
+(`releases/download/desktop-v0.1.5/<file>`) do **not** require Actions. GitHub serves any
 asset attached to a release, however it got there. To publish manually:
 
 1. Locally build all four installers (commands in README.md / DESKTOP.md).
 2. In the GitHub UI: **Releases → Draft a new release**.
-3. Tag: `desktop-v0.1.4`, target `main`.
+3. Tag: `desktop-v0.1.5`, target `main`.
 4. Upload the four files. The **filename must match exactly** what DESKTOP.md says:
-   - `AudioTools-0.1.4-macos-arm64-silicon.pkg`
-   - `AudioTools-0.1.4-macos-x64-intel.pkg`
-   - `AudioTools-0.1.4-windows-x64-cpu-setup.exe`
-   - `AudioTools-0.1.4-windows-x64-cuda-setup.exe`
+   - `AudioTools-0.1.5-macos-arm64-silicon.pkg`
+   - `AudioTools-0.1.5-macos-x64-intel.pkg`
+   - `AudioTools-0.1.5-windows-x64-cpu-setup.exe`
+   - `AudioTools-0.1.5-windows-x64-cuda-setup.exe`
 5. Publish, and **leave "Set as a pre-release" unchecked** (this is what makes
    `/releases/latest/` resolve, and it is the check that was silently failing before).
 6. Note: `desktop-release.yml` is `on: push: tags: desktop-v*` — creating the tag in the UI
@@ -1052,7 +1052,7 @@ asset attached to a release, however it got there. To publish manually:
 worth running, and are the only part of Task 6 the agent may run:
 
 ```bash
-curl -sS "https://api.github.com/repos/notjj1234/jj_audio_website/releases/tags/desktop-v0.1.4" \
+curl -sS "https://api.github.com/repos/notjj1234/jj_audio_website/releases/tags/desktop-v0.1.5" \
   | python3 -c "import json,sys; r=json.load(sys.stdin); print('draft=%s prerelease=%s'%(r['draft'],r['prerelease'])); [print('  %-52s %8.1f MB'%(a['name'],a['size']/1e6)) for a in r['assets']]"
 ```
 

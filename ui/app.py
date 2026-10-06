@@ -9,8 +9,6 @@ from pathlib import Path
 
 import streamlit as st
 
-logger = logging.getLogger(__name__)
-
 from ui.common import (
     DATA_DIR,
     desktop_app_version,
@@ -25,8 +23,12 @@ from ui.isolate_state import (
     UI_MODES,
     load_ui_mode,
     write_ui_mode,
+    build_theme_css_vars,
+    load_theme_state,
 )
 from ui.satoshi_font import satoshi_font_face_css
+
+logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SRC = _REPO_ROOT / "src"
@@ -90,8 +92,8 @@ except Exception:
     except Exception as exc:
         logger.warning("Could not set Streamlit page config: %s", exc)
 
-# Belt-and-braces with client.toolbarMode="viewer": the settings menu (theme) stays,
-# the Deploy button and Streamlit footer do not.
+# client.toolbarMode="minimal" drops Print and Record screen. About stays.
+# Settings is added to that same menu by the script below.
 # Also: nav user-select (resize highlight), gear instead of running-person,
 # no app fade while RUNNING, mixer iframe hit-testing.
 # st.html (not st.markdown) — indented HTML in markdown is parsed as a code block.
@@ -192,7 +194,7 @@ st.html(
   }
   [data-testid="stSidebarNav"] a:focus-visible,
   [data-testid="stSidebarNav"] li:focus-visible {
-    outline: 2px solid var(--primary-color, #ff4b4b) !important;
+    outline: 2px solid var(--color-accent-primary, #f6ad49) !important;
     outline-offset: 2px !important;
   }
 
@@ -305,13 +307,13 @@ st.html(
     position: sticky !important;
     top: 3.75rem !important;
     z-index: 90 !important;
-    background: var(--background-color, #0e1117) !important;
+    background: var(--color-bg-deepest, #192542) !important;
     padding-bottom: 0 !important;
     margin-bottom: 0 !important;
   }
   .st-key-isolate_sticky_chrome,
   div[class*="st-key-isolate_sticky_chrome"] {
-    background: var(--background-color, #0e1117) !important;
+    background: var(--color-bg-deepest, #192542) !important;
   }
   /* 0-height scroll helper must not reserve a blank strip under the title. */
   .st-key-isolate_sticky_chrome [data-testid="stCustomComponentV1"]:has(iframe[height="0"]),
@@ -343,7 +345,7 @@ st.html(
   div[class*="st-key-isolate_status_strip"] {
     position: relative;
     z-index: 20;
-    background: var(--background-color, inherit);
+    background: var(--color-bg-deepest, #192542);
     margin-top: 0.35rem;
     margin-bottom: 0.35rem;
   }
@@ -353,7 +355,7 @@ st.html(
   div[class*="st-key-isolate_mix_tabs_strip"] {
     position: relative !important;
     z-index: 1 !important;
-    background: var(--background-color, inherit) !important;
+    background: var(--color-bg-deepest, #192542) !important;
     padding-top: 0.1rem;
     padding-bottom: 0 !important;
     margin-bottom: 0 !important;
@@ -452,7 +454,7 @@ st.html(
     overflow-x: hidden !important;
     overflow-y: auto !important;
     z-index: 95 !important;
-    background: var(--background-color, #0e1117) !important;
+    background: var(--color-bg-deepest, #192542) !important;
     box-shadow: 0 10px 32px rgba(0, 0, 0, 0.38);
     border-radius: 0.75rem;
   }
@@ -467,7 +469,7 @@ st.html(
     overflow-x: hidden !important;
     overflow-y: auto !important;
     z-index: 95 !important;
-    background: var(--background-color, #0e1117) !important;
+    background: var(--color-bg-deepest, #192542) !important;
     box-shadow: 0 10px 32px rgba(0, 0, 0, 0.38);
     border-radius: 0.75rem;
   }
@@ -568,19 +570,19 @@ st.html(
     min-height: 52px !important;
     padding: 0.8rem 1.6rem !important;
     border-radius: 10px !important;
-    color: var(--secondary-text-color, inherit) !important;
-    background: var(--secondary-background-color, transparent) !important;
-    border: 1px solid var(--border-color, rgba(128, 128, 128, 0.35)) !important;
+    color: var(--color-text-primary, inherit) !important;
+    background: var(--color-bg-raised, transparent) !important;
+    border: 1px solid var(--color-border-subtle, rgba(128, 128, 128, 0.35)) !important;
     margin: 0.15rem 0 !important;
   }
   section.main [data-testid="stTabs"] button:hover {
-    color: var(--text-color, inherit) !important;
+    color: var(--color-text-primary, inherit) !important;
   }
   section.main [data-testid="stTabs"] button[aria-selected="true"] {
-    color: var(--text-color, inherit) !important;
-    background: var(--primary-color, inherit) !important;
-    border-color: var(--primary-color, inherit) !important;
-    box-shadow: 0 0 0 1px var(--primary-color) inset;
+    color: #192542 !important;
+    background: var(--color-accent-primary, #f6ad49) !important;
+    border-color: var(--color-accent-primary, #f6ad49) !important;
+    box-shadow: 0 0 0 1px var(--color-accent-primary, #f6ad49) inset;
   }
   section.main [data-testid="stTabs"] [data-baseweb="tab-highlight"],
   section.main [data-testid="stTabs"] [data-baseweb="tab-border"] {
@@ -604,8 +606,51 @@ st.html(
   document.addEventListener("selectionchange", clearSidebarSelection);
   document.addEventListener("mouseup", clearSidebarSelection);
 })();
+(function () {
+  if (window.__attSettingsMenuItem) return;
+  window.__attSettingsMenuItem = true;
+  var ITEM_ID = "stMainMenuItem-app-settings";
+
+  function settingsLink() {
+    var links = document.querySelectorAll('[data-testid="stSidebarNavLink"]');
+    for (var i = 0; i < links.length; i++) {
+      if ((links[i].textContent || "").replace(/\\s+/g, " ").trim() === "Settings") {
+        return links[i];
+      }
+    }
+    return null;
+  }
+
+  function ensureItem() {
+    var pop = document.querySelector('[data-testid="stMainMenuPopover"]');
+    if (!pop || pop.querySelector('[data-testid="' + ITEM_ID + '"]')) return;
+    var sample = pop.querySelector('[data-testid="stMainMenuItem-about"]');
+    var list = sample && sample.parentElement;
+    if (!sample || !list) return;
+    var btn = sample.cloneNode(true);
+    btn.setAttribute("data-testid", ITEM_ID);
+    var label = btn.querySelector('[data-testid="stMainMenuItemLabel"]');
+    if (label) label.textContent = "Settings";
+    else btn.textContent = "Settings";
+    btn.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      var link = settingsLink();
+      var menuBtn = document.querySelector('[data-testid="stMainMenuButton"]');
+      if (menuBtn && menuBtn.getAttribute("aria-expanded") === "true") menuBtn.click();
+      if (link) link.click();
+    });
+    list.insertBefore(btn, sample);
+  }
+
+  new MutationObserver(ensureItem).observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+  });
+})();
 </script>
-"""
+""",
+    unsafe_allow_javascript=True,
 )
 
 # Full-page loading overlay for one-shot cross-page nav only. Decided here before
@@ -733,8 +778,8 @@ _MODE_SWITCH_HTML = """
     align-items: center;
     justify-content: center;
     position: relative;
-    background: #161a18;
-    border: 4px solid #8ef0e4;
+    background: var(--color-bg-deepest, #192542);
+    border: 4px solid var(--color-accent-primary, #f6ad49);
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
   }
   .audiotools-gear {
@@ -746,7 +791,7 @@ _MODE_SWITCH_HTML = """
   .audiotools-gear-teeth {
     position: absolute;
     inset: 0;
-    background: #f4f7f5;
+    background: var(--color-accent-primary, #f6ad49);
     border-radius: 14px;
   }
   .audiotools-gear-teeth:nth-child(1) { transform: rotate(30deg); }
@@ -760,8 +805,8 @@ _MODE_SWITCH_HTML = """
     top: 50%;
     left: 50%;
     border-radius: 50%;
-    background: #161a18;
-    border: 4px solid #8ef0e4;
+    background: var(--color-bg-deepest, #192542);
+    border: 4px solid var(--color-accent-primary, #f6ad49);
     z-index: 1;
   }
   .audiotools-mode-switch-label {
@@ -793,6 +838,11 @@ if should_show_global_loading(nav_requested=_nav_requested):
     st.html(_loading_overlay_html("Loading…"))
 else:
     st.html(_LOADING_OVERLAY_CLEAR_HTML)
+
+# Load and inject theme (must be before pg.run so iframe components get correct vars)
+load_theme_state(st.session_state)
+theme_css = build_theme_css_vars(st.session_state)
+st.html(f"<style>{theme_css}</style>")
 
 _ui_state_path = DATA_DIR / ISOLATE_UI_STATE_FILENAME
 
@@ -827,6 +877,7 @@ _nav = [
     # Always listed. The page itself carries the unfinished-product warning —
     # hiding it in Lite made the sidebar look broken when users switched modes.
     st.Page(str(_pages / "tab_pdf.py"), title="Tab PDF (demo)"),
+    st.Page(str(_pages / "settings.py"), title="Settings"),
 ]
 pg = st.navigation(_nav)
 _mode_switching = bool(st.session_state.pop("_ui_mode_switching", False))

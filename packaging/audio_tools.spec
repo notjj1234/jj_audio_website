@@ -183,6 +183,7 @@ hiddenimports += [
     "ui.pages.isolate",
     "ui.pages.youtube_audio",
     "ui.pages.tab_pdf",
+    "ui.pages.settings",
     "ui.stem_mixer_component",
     "ui.region_picker_component",
     "ui.mix_tabs_component",
@@ -392,7 +393,7 @@ def _desktop_app_version() -> str:
         init_py.read_text(encoding="utf-8"),
         re.M,
     )
-    return match.group(1) if match else "0.1.4"
+    return match.group(1) if match else "0.1.5"
 
 
 def _version_tuple(version: str) -> tuple[int, int, int, int]:

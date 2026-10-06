@@ -34,78 +34,74 @@ Browser-only (no native window): `./scripts/dev.sh tester` (macOS/Linux) or `.\s
 
 ---
 
-## Build installers (0.1.4)
+## Build installers (0.1.5)
+
+Windows Setup files need [Inno Setup 6 or 7](https://jrsoftware.org/isinfo.php). The compiler is `ISCC.exe` (default install path `C:\Program Files\Inno Setup 7\ISCC.exe`).
 
 ### Windows CPU
 
 ```powershell
-cd <repo>
-py -3.11 -m venv .venv-desktop-cpu          # first time only
+py -3.11 -m venv .venv-desktop-cpu          
 .\.venv-desktop-cpu\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install --upgrade "torch>=2.2,<2.14" "torchaudio>=2.2,<2.12"
 pip install -e ".[demucs,desktop,roformer,separator]"
-.\scripts\dev.ps1 mixer-build                   # skip if frontend/build is committed
+.\scripts\dev.ps1 mixer-build                  
 python packaging/bundle_ffmpeg.py
 $env:AUDIO_TOOLS_EDITION = "cpu"
 pyinstaller packaging/audio_tools.spec --noconfirm --clean
 powershell -ExecutionPolicy Bypass -File packaging/make_windows_installer.ps1 -Flavor cpu -CopyToDownloads
 ```
-→ `%USERPROFILE%\Downloads\AudioTools-0.1.4-windows-x64-cpu-setup.exe`
+→ `%USERPROFILE%\Downloads\AudioTools-0.1.5-windows-x64-cpu-setup.exe`
 
 ### Windows combined (CPU + NVIDIA GPU)
 
 ```powershell
-cd <repo>
-py -3.11 -m venv .venv-desktop                # first time only
+py -3.11 -m venv .venv-desktop               
 .\.venv-desktop\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install --upgrade "torch>=2.2,<2.14" "torchaudio>=2.2,<2.12" --index-url https://download.pytorch.org/whl/cu126
 pip install "bs-roformer-infer>=0.1.5"
 pip install -e ".[demucs,desktop,separator]"
-.\scripts\dev.ps1 mixer-build                   # skip if frontend/build is committed
+.\scripts\dev.ps1 mixer-build                  
 python packaging/bundle_ffmpeg.py
 $env:AUDIO_TOOLS_EDITION = "both"
 pyinstaller packaging/audio_tools.spec --noconfirm --clean
 powershell -ExecutionPolicy Bypass -File packaging/make_windows_installer.ps1 -Flavor both -CopyToDownloads
 ```
-→ `%USERPROFILE%\Downloads\AudioTools-0.1.4-windows-x64-both-setup.exe`
+→ `%USERPROFILE%\Downloads\AudioTools-0.1.5-windows-x64-both-setup.exe`
 
 ### Windows GPU (CUDA) only
 
 ```powershell
-cd <repo>
-# Reuse .venv-desktop from the combined section (CUDA torch already installed)
 .\.venv-desktop\Scripts\Activate.ps1
 python packaging/bundle_ffmpeg.py
 $env:AUDIO_TOOLS_EDITION = "cuda"
 pyinstaller packaging/audio_tools.spec --noconfirm --clean
 powershell -ExecutionPolicy Bypass -File packaging/make_windows_installer.ps1 -Flavor cuda -CopyToDownloads
 ```
-→ `%USERPROFILE%\Downloads\AudioTools-0.1.4-windows-x64-cuda-setup.exe`
+→ `%USERPROFILE%\Downloads\AudioTools-0.1.5-windows-x64-cuda-setup.exe`
 
 ### macOS Apple Silicon (M1–M4)
 
 ```bash
 cd <repo>
 
-# First time only
 python3.11 -m venv .venv-desktop
 source .venv-desktop/bin/activate
 python -m pip install --upgrade pip
 python -m pip install --upgrade "torch>=2.2,<2.14" "torchaudio>=2.2,<2.12"
 pip install -e ".[demucs,desktop,roformer,separator]"
 
-# Build (skip mixer-build if frontend/build is already committed)
 make mixer-build
 make desktop-bundle-ffmpeg
 make desktop-build
 make desktop-pkg
 ```
 
-→ `~/Downloads/AudioTools-0.1.4-macos-arm64-silicon.pkg`
+→ `~/Downloads/AudioTools-0.1.5-macos-arm64-silicon.pkg`
 
-Optional: `AUDIO_TOOLS_VERSION=0.1.4 make desktop-pkg`
+Optional: `AUDIO_TOOLS_VERSION=0.1.5 make desktop-pkg`
 
 ### macOS Intel (x64)
 
@@ -114,24 +110,17 @@ Optional: `AUDIO_TOOLS_VERSION=0.1.4 make desktop-pkg`
 **On an Apple Silicon Mac** (Rosetta x86_64 freeze):
 
 ```bash
-cd <repo>
 
-# First time only — x86_64 Python under Rosetta
 arch -x86_64 python3.11 -m venv .venv-desktop-x64
 source .venv-desktop-x64/bin/activate
 python -m pip install --upgrade pip
 python -m pip install --upgrade "torch>=2.2,<2.14" "torchaudio>=2.2,<2.12"
 pip install -e ".[demucs,desktop,roformer,separator]"
 
-# Build (skip mixer-build if frontend/build is already committed)
 make mixer-build
 .venv-desktop-x64/bin/python packaging/bundle_ffmpeg.py
 .venv-desktop-x64/bin/python -m PyInstaller packaging/audio_tools.spec --noconfirm --clean
 ./packaging/make_pkg.sh
 ```
 
-→ `~/Downloads/AudioTools-0.1.4-macos-x64-intel.pkg`
-
-No Intel Mac? Trigger **desktop-release** (`workflow_dispatch`) for the Intel pkg on `macos-15-intel`.
-
-Unsigned pkg: right-click → Open, or `xattr -cr` + `sudo installer` (see [`DESKTOP.md`](DESKTOP.md)).
+→ `~/Downloads/AudioTools-0.1.5-macos-x64-intel.pkg`

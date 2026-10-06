@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-30
 **Status:** Draft for review
-**Target:** AudioTools 0.1.4 desktop demo (Windows + macOS), distributed via public GitHub Releases
+**Target:** AudioTools 0.1.5 desktop demo (Windows + macOS), distributed via public GitHub Releases
 **Audience:** friends and anyone who finds the public repo
 
 ---
@@ -61,7 +61,7 @@ the NVIDIA CUDA build — exactly as `desktop-release.yml:32-53` already produce
 Nothing in this plan collapses them into a combined `both` build, and the `both` edition
 support in `src/audio_to_tab/edition.py` is left alone.
 
-The `both` flavour currently sitting on the v0.1.4 release is an artifact of a manual
+The `both` flavour currently sitting on the v0.1.5 release is an artifact of a manual
 local build, not of this pipeline. The next release ships CPU + CUDA and no `both`.
 
 If a future change seems to require touching `packaging/`, that is a signal to stop and
@@ -101,7 +101,7 @@ Verified live against the GitHub REST API on 2026-09-30.
 **Defect 1 — every release is flagged as a prerelease.**
 
 ```
-v0.1.4-alpha-audio-tools   draft=False  prerelease=True   published=2026-09-20
+v0.1.5-alpha-audio-tools   draft=False  prerelease=True   published=2026-09-20
 v0.1.3-alpha-audio-tools   draft=False  prerelease=True   published=2026-09-14
 v0.1.2-alpha-audio-tools   draft=False  prerelease=True   published=2026-08-29
 v0.1.1-alpha-audio-tools   draft=False  prerelease=True   published=2026-08-27
@@ -113,7 +113,7 @@ GitHub's `/releases/latest/` endpoint **excludes prereleases**. Verified:
 ```
 GET /releases/latest          -> 302, Location: /releases
 GET /releases/latest/download/AudioTools-macos-arm64-silicon.pkg      -> 404
-GET /releases/latest/download/AudioTools-0.1.4-windows-x64-cpu-setup.exe -> 404
+GET /releases/latest/download/AudioTools-0.1.5-windows-x64-cpu-setup.exe -> 404
 GET /releases/latest/download/AudioTools-windows-x64-cpu-setup.exe     -> 404
 ```
 
@@ -122,9 +122,9 @@ GET /releases/latest/download/AudioTools-windows-x64-cpu-setup.exe     -> 404
 | Source | Windows name | macOS name |
 |---|---|---|
 | `DESKTOP.md:94-95` (table) | — | `AudioTools-macos-arm64-silicon.pkg` (unversioned) |
-| `DESKTOP.md:96-97` (table) | `AudioTools-0.1.4-windows-x64-cpu-setup.exe` (versioned) | — |
+| `DESKTOP.md:96-97` (table) | `AudioTools-0.1.5-windows-x64-cpu-setup.exe` (versioned) | — |
 | `DESKTOP.md:107` (prose) + all `curl` blocks | `AudioTools-windows-x64-cpu-setup.exe` (unversioned) | unversioned |
-| **Actually on the release** | `AudioTools-0.1.4-windows-x64-both-setup.exe` | `AudioTools-0.1.4-macos-*.pkg` |
+| **Actually on the release** | `AudioTools-0.1.5-windows-x64-both-setup.exe` | `AudioTools-0.1.5-macos-*.pkg` |
 
 Three conventions, none of them matching reality.
 
@@ -136,7 +136,7 @@ Local build scripts version their output:
 - `packaging/make_windows_installer.ps1:93` → `AudioTools-$AppVersion-windows-x64-$Flavor-setup.exe`
 
 The CI workflow discards that name and substitutes a hardcoded unversioned matrix label
-(`desktop-release.yml:186` on Windows, `:193` on macOS). So the published 0.1.4 assets
+(`desktop-release.yml:186` on Windows, `:193` on macOS). So the published 0.1.5 assets
 were built by the **local** process, and the committed workflow would produce a
 **different** set. The docs were written against the workflow's names; the release
 contains the local names.
@@ -313,7 +313,7 @@ Rejected alternatives:
 `DESKTOP.md` download URLs become **tag-pinned**:
 
 ```
-https://github.com/notjj1234/jj_audio_website/releases/download/desktop-v0.1.4/AudioTools-0.1.4-macos-arm64-silicon.pkg
+https://github.com/notjj1234/jj_audio_website/releases/download/desktop-v0.1.5/AudioTools-0.1.5-macos-arm64-silicon.pkg
 ```
 
 Tag-pinned URLs are deterministic and immune to the prerelease/draft semantics that
@@ -351,10 +351,10 @@ The fix is to **stop the override**, not to change either script:
    script-generated versioned ones:
 
    ```
-   AudioTools-0.1.4-windows-x64-cpu-setup.exe
-   AudioTools-0.1.4-windows-x64-cuda-setup.exe
-   AudioTools-0.1.4-macos-arm64-silicon.pkg
-   AudioTools-0.1.4-macos-x64-intel.pkg
+   AudioTools-0.1.5-windows-x64-cpu-setup.exe
+   AudioTools-0.1.5-windows-x64-cuda-setup.exe
+   AudioTools-0.1.5-macos-arm64-silicon.pkg
+   AudioTools-0.1.5-macos-x64-intel.pkg
    ```
 
 This removes the duplicate naming logic rather than adding a third convention, and it
@@ -448,7 +448,7 @@ Ordering matters: A4 must precede A3, because the workflow creates a **draft** r
 | A6 | Commit the baseline with `git add -A`; confirm bundle consistency | `ui/stem_mixer_component/frontend/build/**` | committed `index.html` references only committed assets |
 | A5 | Probe-aware GPU default (§4.4) | `hardware.py:519-525,550,602`, `ui/isolate_state.py`, `isolate.py:2437-2438` | `both` + CPU-only probe selects `cpu`; `desktop_device_options` unchanged |
 | A2 | Stop the workflow renaming/overriding installer filenames; align the release body (§4.3) | `desktop-release.yml:181-198,213-231` | release asset names equal the filenames `make_windows_installer.ps1` / `make_pkg.sh` produce |
-| A4 | Push a `desktop-v0.1.4` tag; let the workflow run end to end | `.github/workflows/desktop-release.yml` | run count ≥ 1, all four matrix jobs green, draft release created |
+| A4 | Push a `desktop-v0.1.5` tag; let the workflow run end to end | `.github/workflows/desktop-release.yml` | run count ≥ 1, all four matrix jobs green, draft release created |
 | A3 | **Publish** the draft release; leave `prerelease` false | GitHub release settings | `/releases/latest` resolves to it (200, not a 302) |
 | A1 | Correct all download names and URLs; pin to tag; fix the signing claim | `DESKTOP.md:88-140` | every `curl -fL` returns 200 |
 
@@ -487,7 +487,7 @@ Dependabot is missing `ui/region_picker_component/frontend` and
 `ui/mix_tabs_component/frontend`. `README.md:72` documents a `both` build the workflow
 will not produce. `DESKTOP.md:99` claims CI artifacts are signed — they are not
 (`desktop-release.yml:2-3`). `web/package.json` and all three component
-`package.json` files say `0.1.0` while the project is `0.1.4`. Git history is 92 MB, 73%
+`package.json` files say `0.1.0` while the project is `0.1.5`. Git history is 92 MB, 73%
 of it committed `node_modules`; if the repo is going public, `git filter-repo` is worth a
 quiet moment. None of this blocks the demo.
 
@@ -549,7 +549,7 @@ whether their machine has an NVIDIA GPU.
 **7.2 Release mechanics.** Fix the docs to match the local build, or make the local build
 match the committed workflow? *Resolution: neither script is edited.* The workflow stops
 overriding the filenames the installer scripts already produce (§4.3), then one real
-`desktop-v0.1.4` release is cut so the pipeline is proven and the docs have a single
+`desktop-v0.1.5` release is cut so the pipeline is proven and the docs have a single
 source of truth.
 
 Both decisions are made as recommended and can be overruled without invalidating the rest

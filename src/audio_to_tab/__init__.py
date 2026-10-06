@@ -1,3 +1,3 @@
 """Audio-to-guitar-tab PDF pipeline."""
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
