@@ -1147,6 +1147,8 @@ def _run_native_window(url: str, port: int, server: subprocess.Popen) -> int:
             "height": WINDOW_SIZE[1],
             "min_size": WINDOW_MIN_SIZE,
             "text_select": True,
+            # Match the dark page so the WebView does not flash white before Streamlit paints.
+            "background_color": "#192542",
         }
         if sys.platform.startswith("win"):
             create_kwargs["shadow"] = False

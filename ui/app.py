@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import sys
-import time
 from pathlib import Path
 
 import streamlit as st
@@ -693,7 +692,7 @@ def _loading_overlay_html(label: str) -> str:
     -webkit-backdrop-filter: blur(2px);
     opacity: 0;
     animation: audiotools-dim-in 0.2s ease both;
-    animation-delay: 0.2s;
+    animation-delay: 1s;
   }}
   .audiotools-global-loading-root .audiotools-global-loading {{
     position: relative;
@@ -704,7 +703,7 @@ def _loading_overlay_html(label: str) -> str:
     gap: 0.85rem;
     opacity: 0;
     animation: audiotools-dim-in 0.2s ease both;
-    animation-delay: 0.2s;
+    animation-delay: 1s;
   }}
   .audiotools-global-loading-root .audiotools-spinner {{
     width: 64px;
@@ -714,6 +713,15 @@ def _loading_overlay_html(label: str) -> str:
     border-top-color: transparent;
     animation: audiotools-circle-spin 0.9s linear infinite;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  }}
+  @media (prefers-reduced-motion: reduce) {{
+    .audiotools-global-loading-root .audiotools-dim {{
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+    }}
+    .audiotools-global-loading-root .audiotools-spinner {{
+      animation: none;
+    }}
   }}
   .audiotools-global-loading-root .audiotools-loading-label {{
     color: var(--text-color, rgba(255, 255, 255, 0.95));
@@ -742,7 +750,6 @@ _LOADING_OVERLAY_CLEAR_HTML = """
 
 # Lite/Pro flips a lot of controls in one rerun. st.html strips <script>, so the
 # overlay lives in an st.empty() slot that Python clears once pg.run() returns.
-_MODE_SWITCH_MIN_VISIBLE_SEC = 0.5
 _MODE_SWITCH_HTML = """
 <style>
   @keyframes audiotools-gear-spin {
@@ -787,6 +794,11 @@ _MODE_SWITCH_HTML = """
     width: 108px;
     height: 108px;
     animation: audiotools-gear-spin 1.1s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .audiotools-gear {
+      animation: none;
+    }
   }
   .audiotools-gear-teeth {
     position: absolute;
@@ -834,10 +846,11 @@ _MODE_SWITCH_HTML = """
 """
 
 _nav_requested = bool(st.session_state.pop("_nav_loading", False))
+_nav_overlay_slot = st.empty()
 if should_show_global_loading(nav_requested=_nav_requested):
-    st.html(_loading_overlay_html("Loading…"))
+    _nav_overlay_slot.html(_loading_overlay_html("Loading…"))
 else:
-    st.html(_LOADING_OVERLAY_CLEAR_HTML)
+    _nav_overlay_slot.html(_LOADING_OVERLAY_CLEAR_HTML)
 
 # Load and inject theme (must be before pg.run so iframe components get correct vars)
 load_theme_state(st.session_state)
@@ -882,14 +895,12 @@ _nav = [
 pg = st.navigation(_nav)
 _mode_switching = bool(st.session_state.pop("_ui_mode_switching", False))
 _mode_switch_slot = st.empty()
-_mode_switch_started = time.monotonic()
 if _mode_switching:
     _mode_switch_slot.html(_MODE_SWITCH_HTML)
 try:
     pg.run()
 finally:
+    if _nav_requested:
+        _nav_overlay_slot.empty()
     if _mode_switching:
-        _remaining = _MODE_SWITCH_MIN_VISIBLE_SEC - (time.monotonic() - _mode_switch_started)
-        if _remaining > 0:
-            time.sleep(_remaining)
         _mode_switch_slot.empty()

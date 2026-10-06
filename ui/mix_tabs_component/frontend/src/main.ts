@@ -142,13 +142,133 @@ function report(action: string, id?: string): void {
   Streamlit.setComponentValue(payload);
 }
 
+/** One listener on the strip root, so in-place tab updates cannot drop the X. */
+function ensureStripClicks(root: HTMLElement): void {
+  if (root.dataset.clicks === "1") return;
+  root.dataset.clicks = "1";
+  root.addEventListener("click", (ev) => {
+    const raw = ev.target;
+    const target =
+      raw instanceof Element ? raw : (raw as Node | null)?.parentElement ?? null;
+    if (!target) return;
+    const closer = target.closest<HTMLElement>("[data-close]");
+    if (closer) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const id = closer.getAttribute("data-close");
+      if (id) report("close", id);
+      return;
+    }
+    const tab = target.closest<HTMLElement>(".mix-tab");
+    if (tab?.dataset.id) {
+      report("focus", tab.dataset.id);
+      return;
+    }
+    const action = target.closest<HTMLElement>("[data-action]")?.getAttribute("data-action");
+    if (action === "home") report("home");
+    else if (action === "plus") report("plus");
+  });
+}
+
+/** Home label, plus button, and tab ids. Busy/progress can change without this. */
+function structureKey(homeLabel: string, showPlus: boolean, tabs: TabInfo[]): string {
+  return JSON.stringify({
+    homeLabel,
+    showPlus,
+    ids: tabs.map((t) => String(t.id || "")),
+  });
+}
+
+/** Keep an indeterminate bar node so its animation does not restart. */
+function syncProgress(el: HTMLElement, busy: boolean, progress: number | null): void {
+  const existing = el.querySelector<HTMLElement>(".tab-progress");
+  if (!busy) {
+    existing?.remove();
+    return;
+  }
+  if (progress == null) {
+    if (existing?.classList.contains("indeterminate")) return;
+    existing?.remove();
+    el.insertAdjacentHTML("beforeend", progressMarkup(true, null));
+    return;
+  }
+  const pct = `${Math.round(progress * 100)}%`;
+  if (existing && !existing.classList.contains("indeterminate")) {
+    existing.style.setProperty("--mt-progress", pct);
+    return;
+  }
+  existing?.remove();
+  el.insertAdjacentHTML("beforeend", progressMarkup(true, progress));
+}
+
+/**
+ * Patch busy state on the existing strip when the tabs themselves did not change.
+ * Replacing innerHTML restarts the indeterminate bar.
+ */
+function updateTabsInPlace(root: HTMLElement, args: Args, tabs: TabInfo[]): boolean {
+  const homeLabel = args.homeLabel || "Home";
+  const homeActive = !!args.homeActive;
+  const showPlus = args.showPlus !== false;
+  if (root.dataset.structure !== structureKey(homeLabel, showPlus, tabs)) return false;
+
+  const homeBtn = root.querySelector<HTMLElement>('[data-action="home"]');
+  if (!homeBtn) return false;
+  const nodes: HTMLElement[] = [];
+  for (const t of tabs) {
+    const id = String(t.id || "");
+    const el = root.querySelector<HTMLElement>(`.mix-tab[data-id="${CSS.escape(id)}"]`);
+    if (!el) return false;
+    nodes.push(el);
+  }
+
+  homeBtn.classList.toggle("active", homeActive);
+  homeBtn.setAttribute("aria-selected", homeActive ? "true" : "false");
+  homeBtn.setAttribute("tabindex", homeActive ? "0" : "-1");
+
+  tabs.forEach((t, i) => {
+    const el = nodes[i];
+    if (!el) return;
+    const id = String(t.id || "");
+    const title = String(t.title || id || "Mix");
+    const active = !!t.active && !homeActive;
+    const busy = !!t.busy;
+    const progress = clampProgress(t.progress);
+    el.classList.toggle("active", active);
+    el.classList.toggle("busy", busy);
+    el.setAttribute("aria-selected", active ? "true" : "false");
+    el.setAttribute("tabindex", active ? "0" : "-1");
+    if (busy) el.setAttribute("aria-busy", "true");
+    else el.removeAttribute("aria-busy");
+    const titleEl = el.querySelector<HTMLElement>(".title");
+    if (titleEl) {
+      titleEl.textContent = title;
+      titleEl.setAttribute("title", title);
+    }
+    const close = el.querySelector<HTMLElement>("[data-close]");
+    if (close) close.setAttribute("aria-label", `Close ${title}`);
+    syncProgress(el, busy, progress);
+  });
+
+  const wrap = root.querySelector<HTMLElement>(".mix-tab-wrap");
+  const bar = root.querySelector<HTMLElement>(".mix-tab-bar");
+  if (wrap && bar) {
+    updateOverflowFades(wrap, bar);
+    const selected = bar.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]');
+    selected?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+  requestAnimationFrame(() => Streamlit.setFrameHeight());
+  return true;
+}
+
 function renderUI(args: Args): void {
   const root = document.getElementById("root");
   if (!root) return;
+  ensureStripClicks(root);
   const homeLabel = args.homeLabel || "Home";
   const homeActive = !!args.homeActive;
   const showPlus = args.showPlus !== false;
   const tabs = Array.isArray(args.tabs) ? args.tabs : [];
+  if (updateTabsInPlace(root, args, tabs)) return;
 
   const tabHtml = tabs
     .map((t) => {
@@ -187,28 +307,6 @@ function renderUI(args: Args): void {
     </div>
   `;
 
-  root.querySelector('[data-action="home"]')?.addEventListener("click", () => {
-    report("home");
-  });
-  root.querySelector('[data-action="plus"]')?.addEventListener("click", () => {
-    report("plus");
-  });
-  root.querySelectorAll<HTMLElement>(".mix-tab").forEach((el) => {
-    el.addEventListener("click", (ev) => {
-      const target = ev.target as HTMLElement;
-      if (target.closest("[data-close]")) return;
-      const id = el.dataset.id;
-      if (id) report("focus", id);
-    });
-  });
-  root.querySelectorAll<HTMLElement>("[data-close]").forEach((btn) => {
-    btn.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      const id = btn.getAttribute("data-close");
-      if (id) report("close", id);
-    });
-  });
-
   const wrap = root.querySelector<HTMLElement>(".mix-tab-wrap");
   const bar = root.querySelector<HTMLElement>(".mix-tab-bar");
   if (wrap && bar) {
@@ -228,6 +326,7 @@ function renderUI(args: Args): void {
     updateOverflowFades(wrap, bar);
   }
 
+  root.dataset.structure = structureKey(homeLabel, showPlus, tabs);
   requestAnimationFrame(() => Streamlit.setFrameHeight());
 }
 

@@ -36,6 +36,7 @@ from ui.isolate_jobs import (
     remove_job,
     resume_job,
     separation_in_progress,
+    succeeded_jobs_for_mix_tab,
     video_offset_sec_for_run,
 )
 from ui.isolate_state import (
@@ -529,6 +530,29 @@ def test_delete_library_run_removes_job_and_run_dir(jobs_dir: Path):
     assert not (jobs_dir / "isolate_jobs" / "s1").exists()
     assert not run_dir.exists()
     assert all(r["id"] != "s1" for r in list_jobs())
+
+
+def test_mix_tab_delete_finds_job_by_slash_style_or_origin(jobs_dir: Path):
+    run_dir = jobs_dir / "run_origin"
+    run_dir.mkdir()
+    wav = run_dir / "vocals.wav"
+    wav.write_bytes(b"x")
+    write_status(
+        "s-origin",
+        status="succeeded",
+        title="Done",
+        run_dir=str(run_dir),
+        origin_tab="__new__:abc",
+        artifacts={"vocals": str(wav)},
+        created_at=1.0,
+    )
+    by_origin = succeeded_jobs_for_mix_tab("__new__:abc")
+    assert [job["id"] for job in by_origin] == ["s-origin"]
+    by_slash = succeeded_jobs_for_mix_tab(run_dir.as_posix())
+    assert [job["id"] for job in by_slash] == ["s-origin"]
+    assert delete_library_run(run_dir.as_posix()) is True
+    assert not run_dir.exists()
+    assert all(r["id"] != "s-origin" for r in list_jobs())
 
 
 def test_delete_library_run_still_deletes_folder_without_job(jobs_dir: Path):

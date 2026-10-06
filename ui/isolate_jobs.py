@@ -598,17 +598,43 @@ def jobs_visible_in_queue(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return visible
 
 
+def _same_run_path(a: str, b: str) -> bool:
+    """True when two run folder strings are the same path (slash and case)."""
+    left = str(a or "").strip()
+    right = str(b or "").strip()
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    return os.path.normcase(os.path.normpath(left)) == os.path.normcase(
+        os.path.normpath(right)
+    )
+
+
+def succeeded_jobs_for_mix_tab(tab_id: str) -> list[dict[str, Any]]:
+    """Succeeded queue jobs for a mix tab id (run folder or its origin draft)."""
+    wanted = str(tab_id or "").strip()
+    if not wanted:
+        return []
+    found: list[dict[str, Any]] = []
+    for job in list_jobs(limit=200):
+        if job.get("status") != "succeeded":
+            continue
+        if _same_run_path(str(job.get("run_dir") or ""), wanted):
+            found.append(job)
+            continue
+        if str(job.get("origin_tab") or "") == wanted:
+            found.append(job)
+    return found
+
+
 def delete_library_run(run_dir: str) -> bool:
     """Remove a mixer run and every succeeded queue job that points at it."""
     wanted = str(run_dir or "")
     if not wanted:
         return False
     ok = False
-    for job in list_jobs(limit=50):
-        if job.get("status") != "succeeded":
-            continue
-        if str(job.get("run_dir") or "") != wanted:
-            continue
+    for job in succeeded_jobs_for_mix_tab(wanted):
         result = delete_finished_job(job)
         ok = ok or bool(result.get("ok"))
     ok = bool(delete_run(wanted)) or ok

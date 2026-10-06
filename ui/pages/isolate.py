@@ -70,6 +70,7 @@ from ui.isolate_jobs import (
     requeue_job,
     resume_job,
     separation_in_progress,
+    succeeded_jobs_for_mix_tab,
     video_offset_sec_for_run,
     worker_busy,
 )
@@ -337,8 +338,10 @@ def _stage_youtube_audio(
     label = spinner_label or "Downloading YouTube audio…"
     try:
         if show_spinner:
-            with st.spinner(label):
+            with st.status(label, expanded=True) as status:
+                st.write("Fetching audio from YouTube. This can take a minute.")
                 path = download_youtube_audio(url, run_output_dir())
+                status.update(label=f"Ready: {path.stem}", state="complete")
         else:
             path = download_youtube_audio(url, run_output_dir())
         if prev_path and str(prev_path) != str(path):
@@ -2877,7 +2880,7 @@ def _render_job_queue_panel() -> None:
             )
 
 
-def _request_queue_delete(jobs: list[dict]) -> None:
+def _request_queue_delete(jobs: list[dict], *, tab_ids: list[str] | None = None) -> None:
     """Remember finished jobs and rerun the whole app so the mixer can close."""
     slim = []
     for job in jobs:
@@ -2890,10 +2893,14 @@ def _request_queue_delete(jobs: list[dict]) -> None:
                 "run_dir": str(job.get("run_dir") or "") or None,
             }
         )
-    if not slim:
+    extra_tabs = [str(tab) for tab in (tab_ids or []) if str(tab or "").strip()]
+    if not slim and not extra_tabs:
         st.session_state["isolate_flash"] = _DELETE_FAILED_FLASH
         st.rerun(scope="app")
-    st.session_state[PENDING_QUEUE_DELETE_KEY] = {"phase": "show", "jobs": slim}
+    pending: dict = {"phase": "show", "jobs": slim}
+    if extra_tabs:
+        pending["tab_ids"] = extra_tabs
+    st.session_state[PENDING_QUEUE_DELETE_KEY] = pending
     st.rerun(scope="app")
 
 
@@ -2948,18 +2955,44 @@ def _clear_loaded_mixer_keys(session: dict, *, dismiss: bool) -> None:
         session.pop(ISOLATE_SKIP_REHYDRATE_KEY, None)
 
 
-def _execute_pending_queue_delete(jobs: list[dict]) -> None:
+def _execute_pending_queue_delete(
+    jobs: list[dict], *, tab_ids: list[str] | None = None
+) -> None:
     failed = False
     deleted_dirs: list[str] = []
     for job in jobs:
-        result = delete_finished_job(job)
-        run_dir = str(result.get("run_dir") or "")
-        still_there = bool(run_dir) and Path(run_dir).exists()
-        if still_there or not result.get("ok"):
-            failed = True
+        try:
+            result = delete_finished_job(job)
+        except OSError:
+            result = {"ok": False, "run_dir": str(job.get("run_dir") or "") or None}
+        run_dir = str(result.get("run_dir") or job.get("run_dir") or "")
+        if run_dir and not is_new_draft_tab(run_dir):
+            try:
+                delete_library_run(run_dir)
+            except OSError:
+                result = {"ok": False, "run_dir": run_dir}
+        gone = bool(run_dir) and not is_new_draft_tab(run_dir) and not Path(run_dir).exists()
+        if result.get("ok") or gone:
+            if run_dir:
+                deleted_dirs.append(run_dir)
             continue
-        if run_dir:
-            deleted_dirs.append(run_dir)
+        failed = True
+    for tab_id in tab_ids or []:
+        tab = str(tab_id or "").strip()
+        if not tab or tab in deleted_dirs:
+            continue
+        if is_new_draft_tab(tab):
+            if not failed:
+                deleted_dirs.append(tab)
+            continue
+        try:
+            removed = delete_library_run(tab)
+        except OSError:
+            removed = False
+        if removed or not Path(tab).exists():
+            deleted_dirs.append(tab)
+        else:
+            failed = True
     if deleted_dirs:
         detach_deleted_mix_runs(st.session_state, deleted_dirs)
     _persist_isolate_ui_state()
@@ -2979,8 +3012,9 @@ def _drain_pending_queue_delete() -> None:
         st.session_state[PENDING_QUEUE_DELETE_KEY] = pending
         st.rerun(scope="app")
     jobs = list(pending.get("jobs") or [])
+    tab_ids = [str(tab) for tab in (pending.get("tab_ids") or []) if str(tab or "").strip()]
     st.session_state.pop(PENDING_QUEUE_DELETE_KEY, None)
-    _execute_pending_queue_delete(jobs)
+    _execute_pending_queue_delete(jobs, tab_ids=tab_ids)
 
 
 def _render_job_failure(
@@ -3553,8 +3587,10 @@ def _resolve_audio_for_job(choice: dict) -> tuple[Path | None, str | None]:
             return audio, None
         out = run_output_dir()
         try:
-            with st.spinner("Downloading YouTube audio…"):
+            with st.status("Downloading YouTube audio…", expanded=True) as status:
+                st.write("Fetching audio from YouTube. This can take a minute.")
                 path = download_youtube_audio(youtube_url, out)
+                status.update(label=f"Ready: {path.stem}", state="complete")
             if pending and str(pending) != str(path):
                 prev_fp = st.session_state.get("isolate_pending_fp") or st.session_state.get(
                     "isolate_upload_fp"
@@ -4148,20 +4184,11 @@ def _render_moises_tab_strip(browser_id: str | None) -> None:
             }
             _rerun_scroll_top()
             return
-        if is_new_draft_tab(tab_id):
+        if is_new_draft_tab(tab_id) and not succeeded_jobs_for_mix_tab(tab_id):
             _close_mix_tab(rows, tab_id)
             return
         st.session_state[MIX_TAB_DELETE_KEY] = {"id": tab_id}
         _rerun_scroll_top()
-
-
-def _succeeded_job_for_run(run_dir: str) -> dict:
-    for job in list_jobs(limit=50):
-        if job.get("status") != "succeeded":
-            continue
-        if is_loaded_mix_tab({"isolate_run_dir": job.get("run_dir")}, run_dir):
-            return job
-    return {"id": "", "status": "succeeded", "run_dir": run_dir}
 
 
 def _render_mix_tab_delete_prompt() -> None:
@@ -4179,7 +4206,10 @@ def _render_mix_tab_delete_prompt() -> None:
             confirm_help="Removes these separated tracks. No undo.",
         ):
             st.session_state.pop(MIX_TAB_DELETE_KEY, None)
-            _request_queue_delete([_succeeded_job_for_run(run_dir)])
+            jobs = succeeded_jobs_for_mix_tab(run_dir)
+            if not jobs and not is_new_draft_tab(run_dir):
+                jobs = [{"id": "", "status": "succeeded", "run_dir": run_dir}]
+            _request_queue_delete(jobs, tab_ids=[run_dir])
         if st.session_state.get(MIX_TAB_DELETE_KEY) and st.button(
             "Cancel",
             key="isolate_mix_tab_delete_cancel",
@@ -4591,10 +4621,10 @@ def main() -> None:
             )
         if refresh_clicked:
             _refresh_isolate_from_disk(browser_id)
+        _render_busy_tab_close_prompt(owner)
+        _render_mix_tab_delete_prompt()
 
     _poll_running_jobs()
-    _render_busy_tab_close_prompt(owner)
-    _render_mix_tab_delete_prompt()
     if flash := st.session_state.pop("isolate_flash", None):
         st.success(flash)
     else:

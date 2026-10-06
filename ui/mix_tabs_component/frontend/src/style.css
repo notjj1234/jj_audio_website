@@ -212,3 +212,15 @@ body {
   flex: 1 1 auto;
   min-width: 0.5rem;
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .mix-tab .tab-progress.indeterminate .tab-progress-bar {
+    animation: none;
+    transform: none;
+    width: 100%;
+  }
+
+  .mix-tab .tab-progress-bar {
+    transition: none;
+  }
+}
