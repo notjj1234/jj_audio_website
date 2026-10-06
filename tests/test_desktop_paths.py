@@ -207,9 +207,12 @@ def test_patch_webview_audio_open_dialogs_forces_audio_extensions(monkeypatch):
     view = FakeBrowserView()
     view.create_file_dialog(FakeFileDialog.OPEN, "", False, "", None)
     assert captured["dialog_type"] == FakeFileDialog.OPEN
-    assert captured["file_filter"][0][0] == "Audio"
+    assert captured["file_filter"][0][0] == "Audio or video"
     assert "mp3" in captured["file_filter"][0][1]
     assert "wav" in captured["file_filter"][0][1]
+    assert "mov" in captured["file_filter"][0][1]
+    assert "webm" in captured["file_filter"][0][1]
+    assert "mkv" in captured["file_filter"][0][1]
 
     view.create_file_dialog(FakeFileDialog.SAVE, "", False, "out.wav", None)
     assert captured["file_filter"] is None
@@ -1056,6 +1059,10 @@ def test_youtube_audio_page_nav_order_and_freeze_import():
     assert "Interface Lite/Pro" not in page
     assert "Alt+Tab" in page
     assert 'st.session_state[YT_AUDIO_FMT_KEY] = _DEFAULT_FMT' in page or '_DEFAULT_FMT = "mp3"' in page
+    main = page.split("def main", 1)[1]
+    display = main[main.find("if note :=") : main.find("if err :=")]
+    assert "if pro and" not in display
+    assert "st.caption(str(note))" in display
 
 
 def test_settings_page_is_in_nav_without_sidebar_theme_or_emoji():
@@ -1121,4 +1128,40 @@ def test_cpu_edition_windows_data_dir(tmp_path, monkeypatch):
     assert launcher.app_name() == "AudioTools"
     assert launcher._user_data_root() == tmp_path / "AudioTools"
     assert launcher._user_cache_root() == tmp_path / "AudioTools" / "models"
+
+
+def test_window_background_color_follows_saved_light_theme(tmp_path, monkeypatch):
+    launcher = _load_launcher()
+    assert launcher.window_background_color("light") == "#FFF6DC"
+    assert launcher.window_background_color("dark") == "#192542"
+    assert launcher.window_background_color("system") == "#192542"
+    assert launcher.window_background_color(None) == "#192542"
+
+    monkeypatch.delenv("AUDIO_TOOLS_DATA_DIR", raising=False)
+    assert launcher._saved_window_theme_mode() is None
+
+    (tmp_path / "theme_config.json").write_text('{"mode": "light"}', encoding="utf-8")
+    monkeypatch.setenv("AUDIO_TOOLS_DATA_DIR", str(tmp_path))
+    assert launcher._saved_window_theme_mode() == "light"
+    assert launcher.window_background_color(launcher._saved_window_theme_mode()) == "#FFF6DC"
+
+    (tmp_path / "theme_config.json").write_text("{", encoding="utf-8")
+    assert launcher._saved_window_theme_mode() is None
+
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    window = source.split("create_kwargs: dict = {", 1)[1].split("webview.create_window", 1)[0]
+    assert "window_background_color(_saved_window_theme_mode())" in window
+    assert "hidden" not in window
+
+
+def test_youtube_disclaimer_is_not_pro_only():
+    root = Path(__file__).resolve().parents[1]
+    for name in ("ui/pages/youtube_audio.py", "ui/pages/tab_pdf.py", "ui/pages/isolate.py"):
+        lines = (root / name).read_text(encoding="utf-8").splitlines()
+        hits = [i for i, line in enumerate(lines) if "st.caption(YOUTUBE_DISCLAIMER)" in line]
+        assert hits, name
+        for i in hits:
+            prev = lines[i - 1].strip()
+            assert not prev.startswith("if pro"), name
+            assert "is_pro_mode" not in prev, name
 

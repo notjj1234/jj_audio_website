@@ -718,6 +718,74 @@ function mixerTimeForPicture(
   return Math.max(0, Math.min(dur, raw));
 }
 
+const PICTURE_STABLE_SEC = 0.05;
+
+type PictureSeekKind = "seek-stems" | "pull-picture" | "echo" | "defer" | "hold";
+
+type PictureSeekInput = {
+  playing: boolean;
+  syncOrigin: "audio" | "video" | null;
+  nowMs: number;
+  suppressUntilMs: number;
+  videoSyncAtMs: number;
+  pictureSec: number;
+  mixerSec: number;
+  offsetSec: number;
+  lastPictureSec: number;
+  lastMixerSec: number;
+  commandedPictureSec: number | null;
+  deferredPictureSec: number | null;
+  fromSeekedEvent: boolean;
+};
+
+/** Who moves when the picture time and the stem playhead disagree. */
+function pictureSeekDecision(input: PictureSeekInput): PictureSeekKind {
+  const echoWindow = input.nowMs - input.videoSyncAtMs < VIDEO_RESYNC_COOLDOWN_MS;
+  const nearCommand =
+    input.commandedPictureSec != null &&
+    Math.abs(input.pictureSec - input.commandedPictureSec) <= VIDEO_DRIFT_SEC;
+  if (input.syncOrigin === "audio" || input.nowMs < input.suppressUntilMs) {
+    return "echo";
+  }
+  if (echoWindow && nearCommand) return "echo";
+
+  let userJump = input.fromSeekedEvent;
+  if (!userJump && input.lastPictureSec >= 0 && input.lastMixerSec >= 0) {
+    const pictureMoved = input.pictureSec - input.lastPictureSec;
+    const mixerMoved = input.mixerSec - input.lastMixerSec;
+    userJump = Math.abs(pictureMoved - mixerMoved) > VIDEO_DRIFT_SEC;
+  }
+  if (userJump) {
+    if (input.fromSeekedEvent) return "seek-stems";
+    if (echoWindow && !nearCommand) {
+      const expected = pictureTimeForMixer(input.mixerSec, input.offsetSec);
+      const awayFromMixer = Math.abs(input.pictureSec - expected) > VIDEO_DRIFT_SEC;
+      const awayFromCommand =
+        input.commandedPictureSec == null ||
+        Math.abs(input.pictureSec - input.commandedPictureSec) > VIDEO_DRIFT_SEC;
+      const stable =
+        input.deferredPictureSec != null &&
+        Math.abs(input.pictureSec - input.deferredPictureSec) <= PICTURE_STABLE_SEC;
+      if (stable && awayFromMixer && awayFromCommand) return "seek-stems";
+      return "defer";
+    }
+    return "seek-stems";
+  }
+  if (
+    input.playing &&
+    input.syncOrigin !== "video" &&
+    videoNeedsSeek(
+      pictureTimeForMixer(input.mixerSec, input.offsetSec),
+      input.pictureSec,
+      input.nowMs,
+      input.videoSyncAtMs
+    )
+  ) {
+    return "pull-picture";
+  }
+  return "hold";
+}
+
 const VIDEO_MIN_WIDTH = 160;
 const VIDEO_STEM_GUTTER = 160;
 const VIDEO_LAYOUT_KEY = "audiotools_stem_mixer_video_layout";
@@ -909,6 +977,9 @@ let syncOrigin: "audio" | "video" | null = null;
 let suppressPictureEventsUntil = 0;
 let lastPictureObserved = -1;
 let lastMixerObserved = -1;
+let commandedPictureSec: number | null = null;
+let deferredPictureSec: number | null = null;
+let pictureSeekGen = 0;
 let picturePollTimer: number | null = null;
 let localVideoApplyToken = 0;
 let localPlayFromUs = false;
@@ -1018,6 +1089,7 @@ function readPictureTime(): number | null {
 }
 
 function writePictureTo(pictureT: number, playing: boolean): void {
+  commandedPictureSec = pictureT;
   lastPictureObserved = pictureT;
   lastMixerObserved = engine.currentTime();
   if (localVideoEl && !hideYoutubeVideo && localVideoUrl) {
@@ -1109,41 +1181,62 @@ function playYoutubeVideo(): void {
   ytPlayer.playVideo();
 }
 
+function seekStemsFromPicture(pictureSec: number): void {
+  const gen = ++pictureSeekGen;
+  syncOrigin = "video";
+  videoSyncAt = performance.now();
+  deferredPictureSec = null;
+  const next = mixerTimeForPicture(pictureSec, videoOffsetSec, engine.getDuration());
+  lastPictureObserved = pictureSec;
+  lastMixerObserved = next;
+  void engine.seek(next).finally(() => {
+    if (gen !== pictureSeekGen) return;
+    if (syncOrigin === "video") syncOrigin = null;
+  });
+}
+
+function applyPictureSeek(picture: number, playing: boolean, fromSeekedEvent: boolean): void {
+  if (!fromSeekedEvent && syncOrigin === "video") return;
+  const mixerT = engine.currentTime();
+  const decision = pictureSeekDecision({
+    playing,
+    syncOrigin,
+    nowMs: performance.now(),
+    suppressUntilMs: suppressPictureEventsUntil,
+    videoSyncAtMs: videoSyncAt,
+    pictureSec: picture,
+    mixerSec: mixerT,
+    offsetSec: videoOffsetSec,
+    lastPictureSec: lastPictureObserved,
+    lastMixerSec: lastMixerObserved,
+    commandedPictureSec,
+    deferredPictureSec,
+    fromSeekedEvent,
+  });
+  if (decision === "defer") {
+    deferredPictureSec = picture;
+    return;
+  }
+  if (decision === "seek-stems") {
+    seekStemsFromPicture(picture);
+    return;
+  }
+  if (decision === "pull-picture") {
+    deferredPictureSec = null;
+    markPictureCommand();
+    writePictureTo(pictureTimeForMixer(mixerT, videoOffsetSec), true);
+    return;
+  }
+  lastPictureObserved = picture;
+  lastMixerObserved = mixerT;
+  deferredPictureSec = null;
+}
+
 function syncPictureToStems(playing: boolean): void {
   if (hideYoutubeVideo) return;
   const picture = readPictureTime();
   if (picture == null) return;
-  const mixerT = engine.currentTime();
-  const dur = engine.getDuration();
-  const expected = pictureTimeForMixer(mixerT, videoOffsetSec);
-  const now = performance.now();
-  const cooled = now - videoSyncAt < VIDEO_RESYNC_COOLDOWN_MS;
-  let userJump = false;
-  if (lastPictureObserved >= 0 && lastMixerObserved >= 0) {
-    const pictureMoved = picture - lastPictureObserved;
-    const mixerMoved = mixerT - lastMixerObserved;
-    userJump = Math.abs(pictureMoved - mixerMoved) > VIDEO_DRIFT_SEC;
-  }
-  lastPictureObserved = picture;
-  lastMixerObserved = mixerT;
-  if (userJump && syncOrigin !== "audio" && !cooled) {
-    syncOrigin = "video";
-    videoSyncAt = now;
-    const next = mixerTimeForPicture(picture, videoOffsetSec, dur);
-    lastMixerObserved = next;
-    void engine.seek(next).finally(() => {
-      if (syncOrigin === "video") syncOrigin = null;
-    });
-    return;
-  }
-  if (
-    playing &&
-    syncOrigin !== "video" &&
-    videoNeedsSeek(expected, picture, now, videoSyncAt)
-  ) {
-    markPictureCommand();
-    writePictureTo(expected, true);
-  }
+  applyPictureSeek(picture, playing, false);
 }
 
 function abandonUnplayableLocalVideo(): void {
@@ -1187,23 +1280,7 @@ function mountLocalVideo(): void {
     pauseStemsFromPicture();
   });
   video.addEventListener("seeked", () => {
-    if (syncOrigin === "audio" || performance.now() - videoSyncAt < VIDEO_RESYNC_COOLDOWN_MS) {
-      lastPictureObserved = video.currentTime;
-      lastMixerObserved = engine.currentTime();
-      return;
-    }
-    syncOrigin = "video";
-    videoSyncAt = performance.now();
-    lastPictureObserved = video.currentTime;
-    const next = mixerTimeForPicture(
-      video.currentTime,
-      videoOffsetSec,
-      engine.getDuration()
-    );
-    lastMixerObserved = next;
-    void engine.seek(next).finally(() => {
-      if (syncOrigin === "video") syncOrigin = null;
-    });
+    applyPictureSeek(video.currentTime, engine.isPlaying(), true);
   });
   nudgeYoutubeToAudio();
 }
@@ -1810,7 +1887,7 @@ function renderUI(theme?: Theme): void {
   const primary = theme?.primaryColor ?? "#ff4b4b";
 
   root.innerHTML = `
-    <div class="mixer" tabindex="-1" style="--text:${textColor};--bg:${bg};--secondary:${secondary};--primary:${primary}">
+    <div class="mixer" tabindex="-1" style="--text:${textColor};--bg:${bg};--secondary:${secondary};--primary:${primary};--waveform-fill:${primary}">
       <header class="mixer-header">
         <div class="track-title" id="track-title"></div>
         <p class="mixer-status" id="status" aria-live="polite">Ready</p>

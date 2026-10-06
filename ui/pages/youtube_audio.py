@@ -321,8 +321,7 @@ def main() -> None:
         anchor=False,
         help=title_help,
     )
-    if pro:
-        st.caption(YOUTUBE_DISCLAIMER)
+    st.caption(YOUTUBE_DISCLAIMER)
 
     _apply_pending_url()
     if YT_AUDIO_FMT_KEY not in st.session_state:
@@ -390,7 +389,7 @@ def main() -> None:
             _run_save_flow(url, fmt, already_staged=staged)
             st.rerun()
 
-    if pro and (note := st.session_state.get(YT_AUDIO_PICKER_NOTE_KEY)):
+    if note := st.session_state.get(YT_AUDIO_PICKER_NOTE_KEY):
         st.caption(str(note))
     if err := st.session_state.get(YT_AUDIO_ERROR_KEY):
         st.error(str(err))

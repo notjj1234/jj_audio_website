@@ -13,6 +13,7 @@ from audio_to_tab.isolate import (
     GUITAR_REFINED_NAME,
     _highpass_rms,
     apply_sub_bass_debleed,
+    attach_guitar_refine_backups,
     ensure_guitar_prerefine_backup,
     has_guitar_prerefine,
     switch_guitar_stem_variant,
@@ -84,6 +85,17 @@ def test_run_guitar_refine_saves_backups(tmp_path: Path, monkeypatch):
     assert (tmp_path / GUITAR_PREREFINE_NAME).is_file()
     assert (tmp_path / GUITAR_REFINED_NAME).is_file()
     assert guitar.read_bytes() != pre_bytes
+    artifacts = {"guitar": guitar}
+    attach_guitar_refine_backups(artifacts)
+    assert artifacts["guitar_prerefine"] == tmp_path / GUITAR_PREREFINE_NAME
+    assert artifacts["guitar_refined"] == tmp_path / GUITAR_REFINED_NAME
+    isolate_src = Path(__file__).resolve().parents[1] / "src" / "audio_to_tab" / "isolate.py"
+    separate = isolate_src.read_text(encoding="utf-8")
+    separate = separate[separate.find("def separate_stems") :]
+    assert "attach_guitar_refine_backups(artifacts)" in separate
+    assert separate.find("attach_guitar_refine_backups(artifacts)") < separate.find(
+        'progress("done", "Finish")'
+    )
 
 
 def test_refine_guitar_from_stems_cleans_work_dir(tmp_path: Path, monkeypatch):

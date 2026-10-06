@@ -1340,6 +1340,7 @@ def test_guitar_ft_fallback_to_stock_demucs_on_load_failure(tmp_path: Path):
         )
 
     assert "guitar" in artifacts
+    assert any(msg.startswith("Trimming to ") for msg in seen)
     assert not any("mock missing" in msg for msg in seen)
     assert not any("guitar-ft unavailable" in msg for msg in seen)
     isolate = Path(__file__).resolve().parents[1] / "src" / "audio_to_tab" / "isolate.py"

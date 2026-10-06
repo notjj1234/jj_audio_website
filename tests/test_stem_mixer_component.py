@@ -486,3 +486,136 @@ def test_mixer_stem_wave_height_when_video_present():
     assert "mixer-stems-resize" in css
     assert "ns-resize" in css
 
+
+def test_paused_picture_seek_moves_stems_and_ignores_our_echo():
+    text = _mixer_main_ts()
+    assert "function pictureSeekDecision" in text
+    assert "function seekStemsFromPicture" in text
+    assert "function applyPictureSeek" in text
+
+    seeked = text[
+        text.find('video.addEventListener("seeked"') : text.find("nudgeYoutubeToAudio();")
+    ]
+    assert "applyPictureSeek(" in seeked
+    assert "VIDEO_RESYNC_COOLDOWN_MS" not in seeked
+    assert "video.controls = true" in text
+    assert "video.muted = true" in text
+
+    sync = text[
+        text.find("function syncPictureToStems") : text.find("function abandonUnplayableLocalVideo")
+    ]
+    assert "applyPictureSeek(" in sync
+    assert "startPicturePoll" in text
+
+    apply = text[text.find("function applyPictureSeek") : text.find("function syncPictureToStems")]
+    assert "pictureSeekDecision(" in apply
+    defer = apply[apply.find('decision === "defer"') : apply.find('decision === "seek-stems"')]
+    assert "lastPictureObserved" not in defer
+    assert "deferredPictureSec = picture" in defer
+
+    stems = text[text.find("function seekStemsFromPicture") : text.find("function applyPictureSeek")]
+    assert "engine.seek(" in stems
+    assert "writePictureTo" not in stems
+    assert ".play(" not in stems
+    assert "startStemsFromPicture" not in stems
+
+    drift = 0.4
+    cooldown_ms = 2000
+    stable_sec = 0.05
+
+    def picture_time(mixer: float, offset: float) -> float:
+        offset = offset if offset > 0 else 0.0
+        mixer = mixer if mixer > 0 else 0.0
+        return mixer + offset
+
+    def video_needs_seek(audio: float, video: float, now_ms: float, last_ms: float) -> bool:
+        if now_ms - last_ms < cooldown_ms:
+            return False
+        return abs(video - audio) > drift
+
+    def picture_seek_decision(inp: dict) -> str:
+        echo_window = inp["now_ms"] - inp["video_sync_at_ms"] < cooldown_ms
+        commanded = inp["commanded_picture_sec"]
+        near_command = commanded is not None and abs(inp["picture_sec"] - commanded) <= drift
+        if inp["sync_origin"] == "audio" or inp["now_ms"] < inp["suppress_until_ms"]:
+            return "echo"
+        if echo_window and near_command:
+            return "echo"
+        user_jump = inp["from_seeked_event"]
+        if not user_jump and inp["last_picture_sec"] >= 0 and inp["last_mixer_sec"] >= 0:
+            picture_moved = inp["picture_sec"] - inp["last_picture_sec"]
+            mixer_moved = inp["mixer_sec"] - inp["last_mixer_sec"]
+            user_jump = abs(picture_moved - mixer_moved) > drift
+        if user_jump:
+            if inp["from_seeked_event"]:
+                return "seek-stems"
+            if echo_window and not near_command:
+                expected = picture_time(inp["mixer_sec"], inp["offset_sec"])
+                away_from_mixer = abs(inp["picture_sec"] - expected) > drift
+                away_from_command = commanded is None or abs(inp["picture_sec"] - commanded) > drift
+                deferred = inp["deferred_picture_sec"]
+                stable = deferred is not None and abs(inp["picture_sec"] - deferred) <= stable_sec
+                if stable and away_from_mixer and away_from_command:
+                    return "seek-stems"
+                return "defer"
+            return "seek-stems"
+        if (
+            inp["playing"]
+            and inp["sync_origin"] != "video"
+            and video_needs_seek(
+                picture_time(inp["mixer_sec"], inp["offset_sec"]),
+                inp["picture_sec"],
+                inp["now_ms"],
+                inp["video_sync_at_ms"],
+            )
+        ):
+            return "pull-picture"
+        return "hold"
+
+    base = {
+        "playing": False,
+        "sync_origin": None,
+        "now_ms": 10_000.0,
+        "suppress_until_ms": 0.0,
+        "video_sync_at_ms": 0.0,
+        "picture_sec": 25.0,
+        "mixer_sec": 0.0,
+        "offset_sec": 0.0,
+        "last_picture_sec": 10.0,
+        "last_mixer_sec": 0.0,
+        "commanded_picture_sec": None,
+        "deferred_picture_sec": None,
+        "from_seeked_event": False,
+    }
+    assert picture_seek_decision(base) == "seek-stems"
+    small = dict(base, picture_sec=10.2, mixer_sec=10.0, last_picture_sec=10.0, last_mixer_sec=10.0)
+    assert picture_seek_decision(small) == "hold"
+    echo = dict(base, sync_origin="audio")
+    assert picture_seek_decision(echo) == "echo"
+    both = dict(base, picture_sec=15.0, mixer_sec=5.0, last_picture_sec=10.0, last_mixer_sec=0.0)
+    assert picture_seek_decision(both) == "hold"
+    first = dict(
+        base,
+        now_ms=500.0,
+        video_sync_at_ms=0.0,
+        commanded_picture_sec=10.0,
+        deferred_picture_sec=None,
+    )
+    assert picture_seek_decision(first) == "defer"
+    stable = dict(first, deferred_picture_sec=25.0)
+    assert picture_seek_decision(stable) == "seek-stems"
+    drifting = dict(
+        base,
+        playing=True,
+        picture_sec=12.0,
+        mixer_sec=0.0,
+        last_picture_sec=12.0,
+        last_mixer_sec=0.0,
+        now_ms=1_000.0,
+        video_sync_at_ms=0.0,
+    )
+    assert picture_seek_decision(drifting) == "hold"
+    assert picture_seek_decision(dict(drifting, now_ms=2_500.0)) == "pull-picture"
+    section = dict(base, offset_sec=12.5, picture_sec=27.5, last_picture_sec=12.5)
+    assert picture_seek_decision(section) == "seek-stems"
+

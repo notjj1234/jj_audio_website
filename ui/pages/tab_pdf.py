@@ -292,8 +292,7 @@ def main() -> None:
                 "Upload a file above to use something else instead."
             )
         youtube_url = st.text_input("Or paste a YouTube URL")
-        if pro:
-            st.caption(YOUTUBE_DISCLAIMER)
+        st.caption(YOUTUBE_DISCLAIMER)
         # st.caption(
         #     "Off until you paste a URL or search. Enable only if you have rights."
         # )

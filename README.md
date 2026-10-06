@@ -28,13 +28,9 @@ pip install -e ".[demucs,desktop,roformer,separator]"
 .venv-desktop/bin/python packaging/launcher.py
 ```
 
-Browser-only (no native window): `./scripts/dev.sh tester` (macOS/Linux) or `.\scripts\dev.ps1 tester` (Windows).
-
 ---
 
 ## Build installers (0.1.5)
-
-Windows Setup files need [Inno Setup 6 or 7](https://jrsoftware.org/isinfo.php). The compiler is `ISCC.exe` (default install path `C:\Program Files\Inno Setup 7\ISCC.exe`).
 
 ### Windows CPU
 
@@ -99,7 +95,6 @@ make desktop-pkg
 
 → `~/Downloads/AudioTools-0.1.5-macos-arm64-silicon.pkg`
 
-Optional: `AUDIO_TOOLS_VERSION=0.1.5 make desktop-pkg`
 
 ### macOS Intel (x64)
 

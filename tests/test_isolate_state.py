@@ -2838,6 +2838,8 @@ def test_isolate_youtube_paste_and_search_are_always_visible():
     assert 'key="isolate_youtube_url"' in controls
     assert 'key="isolate_youtube_search_open_btn"' in controls
     assert "YOUTUBE_DISCLAIMER" in controls
+    disc = controls[controls.find("st.caption(YOUTUBE_DISCLAIMER)") - 80 :]
+    assert "is_pro_mode" not in disc[:80]
     # assert "Off until you paste a URL or search" in controls
     assert "off in this installer build" not in source
 
@@ -2856,6 +2858,8 @@ def test_mixer_builds_current_mix_on_save_click():
     assert 'key="isolate_save_mix"' in panel
     assert "Alt+Tab" in panel
     assert "overwrites a same-named" in panel
+    hint_at = panel.find("If the folder window is hidden")
+    assert "is_pro_mode" not in panel[max(0, hint_at - 80) : hint_at]
 
 
 def test_mixer_workspace_lite_shares_fixup_and_tab_pdf_carry_over():
@@ -3640,3 +3644,6 @@ def test_theme_widgets_use_zero_arg_persist_callback():
     assert "on_change=save_theme_state" not in page
     assert "on_change=save_theme_state" not in app
     assert 'subheader("🎨 Theme")' not in app
+    assert "_render_custom_colors" not in page
+    assert "Use default colors" not in page
+    assert "The palette is dark Tyrian blue and yellow-orange." in page

@@ -2329,8 +2329,7 @@ def _render_separation_controls() -> dict:
             st.rerun()
     if st.session_state.get(ISOLATE_YOUTUBE_SEARCH_OPEN_KEY):
         _youtube_search_dialog()
-    if is_pro_mode(st.session_state):
-        st.caption(YOUTUBE_DISCLAIMER)
+    st.caption(YOUTUBE_DISCLAIMER)
     # st.caption(
     #     "Off until you paste a URL or search. Enable only if you have rights."
     # )
@@ -3511,11 +3510,10 @@ def _render_downloads_panel(
                 target = Path(str(last)) if last else export_root
                 if not open_path_in_os(target):
                     st.warning("Could not open that folder.")
-        if is_pro_mode(st.session_state):
-            st.caption(
-                "If the folder window is hidden, Alt+Tab. Saving overwrites a same-named "
-                "file. On Linux, a missing zenity picker is treated as cancel."
-            )
+        st.caption(
+            "If the folder window is hidden, Alt+Tab. Saving overwrites a same-named "
+            "file. On Linux, a missing zenity picker is treated as cancel."
+        )
 
         st.divider()
         fmt = _download_format_widget()

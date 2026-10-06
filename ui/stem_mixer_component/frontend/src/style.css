@@ -357,7 +357,7 @@ body {
 }
 
 .mixer-stage[data-snap="below"] .mixer-video-wrap:not(.is-placed) {
-  order: 1.
+  order: 1;
 }
 
 .mixer-stage[data-snap="above"] .mixer-video-wrap:not(.is-placed):not(.is-sized),
@@ -499,7 +499,7 @@ body {
   display: flex;
   align-items: center;
   gap: 0.65rem;
-  min-width: 0.
+  min-width: 0;
 }
 
 .metro-preview {
@@ -513,7 +513,7 @@ body {
   border-radius: var(--radius-lg);
   background: var(--waveform-bg);
   padding: 1.85rem 0.45rem 0.35rem;
-  box-sizing: border-box.
+  box-sizing: border-box;
 }
 
 .metro-toolbar {
@@ -562,7 +562,7 @@ body {
 .mixer .metro-rate-seg .metro-follow-btn.active {
   background: var(--bg-highlight);
   color: var(--text);
-  opacity: 1.
+  opacity: 1;
 }
 
 .mixer .metro-chip {
@@ -571,129 +571,129 @@ body {
   height: 1.55rem;
   padding: 0 0.55rem;
   border-radius: var(--radius);
-  border: none.
-  background: rgba(0, 0, 0, 0.28).
-  color: var(--text).
-  font-size: 0.68rem.
-  font-weight: 600.
-  opacity: 0.85.
+  border: none;
+  background: rgba(0, 0, 0, 0.28);
+  color: var(--text);
+  font-size: 0.68rem;
+  font-weight: 600;
+  opacity: 0.85;
 }
 
 .mixer .metro-chip.active {
-  background: var(--bg-highlight).
-  color: var(--text).
-  opacity: 1.
+  background: var(--bg-highlight);
+  color: var(--text);
+  opacity: 1;
 }
 
 .metro-sound-wrap {
-  margin: 0.
-  display: inline-flex.
+  margin: 0;
+  display: inline-flex;
 }
 
 .metro-sound-wrap select {
-  appearance: none.
-  -webkit-appearance: none.
-  font: inherit.
-  font-size: 0.68rem.
-  font-weight: 600.
-  color: var(--text).
-  background-color: rgba(0, 0, 0, 0.28).
-  border: none.
-  border-radius: var(--radius).
-  height: 1.55rem.
-  padding: 0 1.35rem 0 0.55rem.
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text);
+  background-color: rgba(0, 0, 0, 0.28);
+  border: none;
+  border-radius: var(--radius);
+  height: 1.55rem;
+  padding: 0 1.35rem 0 0.55rem;
   background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
-    linear-gradient(135deg, currentColor 50%, transparent 50%).
-  background-position: calc(100% - 0.7rem) 55%, calc(100% - 0.45rem) 55%.
-  background-size: 0.28rem 0.28rem, 0.28rem 0.28rem.
-  background-repeat: no-repeat.
-  opacity: 0.9.
-  cursor: pointer.
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 0.7rem) 55%, calc(100% - 0.45rem) 55%;
+  background-size: 0.28rem 0.28rem, 0.28rem 0.28rem;
+  background-repeat: no-repeat;
+  opacity: 0.9;
+  cursor: pointer;
 }
 
 .stem-row.is-metro .wave-seek {
-  margin-top: 0.1rem.
+  margin-top: 0.1rem;
 }
 
 .stem-row.is-metro .waveform-svg {
-  height: max(28px, calc(var(--stem-wave-height, 52px) * 0.85)).
-  fill: var(--signal-low).
-  opacity: 1.
+  height: max(28px, calc(var(--stem-wave-height, 52px) * 0.85));
+  fill: var(--signal-low);
+  opacity: 1;
 }
 
 .stem-row.is-metro .waveform-svg .wave-baseline {
-  stroke: var(--signal-low).
-  stroke-opacity: 0.5.
+  stroke: var(--signal-low);
+  stroke-opacity: 0.5;
 }
 
 .wave-seek {
-  position: relative.
-  flex: 1 1 auto.
-  min-width: 0.
-  cursor: pointer.
-  touch-action: none.
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  cursor: pointer;
+  touch-action: none;
 }
 
 .waveform-svg {
-  width: 100%.
-  height: var(--stem-wave-height, 52px).
-  display: block.
-  fill: var(--waveform-fill).
-  opacity: 0.85.
-  pointer-events: none.
+  width: 100%;
+  height: var(--stem-wave-height, 52px);
+  display: block;
+  fill: var(--waveform-fill, var(--primary, #f6ad49));
+  opacity: 0.85;
+  pointer-events: none;
 }
 
 .waveform-svg .wave-baseline {
-  stroke: var(--waveform-fill).
-  stroke-width: 1.
-  stroke-opacity: 0.35.
-  fill: none.
+  stroke: var(--waveform-fill, var(--primary, #f6ad49));
+  stroke-width: 1;
+  stroke-opacity: 0.35;
+  fill: none;
 }
 
 .wave-playhead {
-  position: absolute.
-  top: 0.
-  bottom: 0.
-  width: 2px.
-  margin-left: -1px.
-  background: var(--text).
-  pointer-events: none.
-  z-index: 1.
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--text);
+  pointer-events: none;
+  z-index: 1;
 }
 
 .download-link {
-  flex: 0 0 auto.
-  color: var(--text).
-  text-decoration: none.
-  font-size: 0.8rem.
-  font-weight: 600.
-  opacity: 0.78.
-  align-self: center.
+  flex: 0 0 auto;
+  color: var(--text);
+  text-decoration: none;
+  font-size: 0.8rem;
+  font-weight: 600;
+  opacity: 0.78;
+  align-self: center;
 }
 
 .download-link:hover {
-  text-decoration: underline.
-  text-underline-offset: 3px.
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 @media (max-width: 520px) {
   .stem-row {
-    grid-template-columns: 40px 40px minmax(0, 1fr).
+    grid-template-columns: 40px 40px minmax(0, 1fr);
     grid-template-areas:
       "mute solo name"
       "vol vol vol"
-      "preview preview preview".
+      "preview preview preview";
   }
 
   .metro-wave {
-    padding-top: 2.15rem.
+    padding-top: 2.15rem;
   }
 
   .mixer-time {
-    margin-left: 0.
+    margin-left: 0;
   }
 
   .master-vol {
-    grid-template-columns: auto minmax(0, 1fr) 2.75rem.
+    grid-template-columns: auto minmax(0, 1fr) 2.75rem;
   }
 }

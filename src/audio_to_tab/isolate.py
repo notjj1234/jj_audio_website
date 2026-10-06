@@ -1354,6 +1354,19 @@ def save_guitar_refined_backup(guitar_path: Path) -> Path:
     return dest
 
 
+def attach_guitar_refine_backups(artifacts: dict) -> None:
+    """Add refine wavs that already sit next to guitar.wav so downloads can keep them."""
+    guitar = artifacts.get("guitar")
+    if guitar is None:
+        return
+    pre = guitar_prerefine_path(guitar)
+    refined = guitar_refined_path(guitar)
+    if pre.is_file():
+        artifacts["guitar_prerefine"] = pre
+    if refined.is_file():
+        artifacts["guitar_refined"] = refined
+
+
 def switch_guitar_stem_variant(guitar_path: Path, *, use_prerefine: bool) -> bool:
     """Copy pre-refine or refined backup onto ``guitar.wav``."""
     guitar = Path(guitar_path)
@@ -2326,7 +2339,7 @@ def separate_stems(
         else:
             trim_message = f"Trimming to {format_region_label(trim_start, trim_length)}"
         logger.debug("isolate trim: %s", trim_message)
-        progress("ingest", "Preparing audio")
+        progress("ingest", trim_message)
         return _trim_audio(normalized, trim_length, start_sec=trim_start)
 
     def _run_separate_stage(trimmed: Path, work: Path) -> Path:
@@ -2723,5 +2736,6 @@ def separate_stems(
         except Exception:
             logger.debug("metronome stem skipped", exc_info=True)
 
+    attach_guitar_refine_backups(artifacts)
     progress("done", "Finish")
     return artifacts

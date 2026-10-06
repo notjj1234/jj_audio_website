@@ -1183,7 +1183,13 @@ def ensure_worker_started() -> None:
 
 
 _DIAGNOSTIC_KEYS = frozenset(
-    {"guitar_split_diagnostics", "stem_presence_diagnostics", "bass_bleed_diagnostics"}
+    {
+        "guitar_split_diagnostics",
+        "stem_presence_diagnostics",
+        "bass_bleed_diagnostics",
+        "guitar_prerefine",
+        "guitar_refined",
+    }
 )
 _MIXER_RESET_KEYS = (
     "isolate_volumes_db",

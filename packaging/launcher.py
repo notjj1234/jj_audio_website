@@ -63,7 +63,16 @@ _AUDIO_OPEN_EXTENSIONS = (
     "ogg",
     "aiff",
     "aif",
+    "mov",
+    "webm",
+    "mkv",
 )
+
+# Native window wash. Light matches the page wash in ui/theme_presets.py.
+_WINDOW_BG_DARK = "#192542"
+_WINDOW_BG_LIGHT = "#FFF6DC"
+_THEME_CONFIG_NAME = "theme_config.json"
+
 
 def _is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
@@ -896,11 +905,11 @@ def _webview_icon() -> str | None:
 
 
 def _patch_webview_audio_open_dialogs() -> None:
-    """Force native open panels to audio extensions only.
+    """Force native open panels to the audio and video types Isolate accepts.
 
     Streamlit's ``accept`` often sends MIME types that pywebview cannot map to
-    UTTypes on macOS, leaving every file selectable. This app only uploads audio,
-    so OPEN dialogs always use an audio extension filter. SAVE (downloads) is
+    UTTypes on macOS, leaving every file selectable. OPEN dialogs use the same
+    extensions as the Home uploader, including video. SAVE (downloads) is
     unchanged.
     """
     try:
@@ -914,7 +923,7 @@ def _patch_webview_audio_open_dialogs() -> None:
         return
 
     original = browser_view.create_file_dialog
-    audio_filter = [["Audio", list(_AUDIO_OPEN_EXTENSIONS)]]
+    audio_filter = [["Audio or video", list(_AUDIO_OPEN_EXTENSIONS)]]
 
     def create_file_dialog(
         self,
@@ -1038,6 +1047,31 @@ def _window_was_shown(window) -> bool:
         return True
 
 
+def window_background_color(mode: str | None) -> str:
+    """Light uses the page wash. Dark, system, and a missing file stay dark."""
+    if str(mode or "").strip().lower() == "light":
+        return _WINDOW_BG_LIGHT
+    return _WINDOW_BG_DARK
+
+
+def _saved_window_theme_mode() -> str | None:
+    """Read Appearance from theme_config.json. None when the file is missing."""
+    raw = os.environ.get("AUDIO_TOOLS_DATA_DIR", "").strip()
+    if not raw:
+        return None
+    path = Path(raw) / _THEME_CONFIG_NAME
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    mode = data.get("mode")
+    if not isinstance(mode, str) or not mode.strip():
+        return None
+    return mode.strip()
+
+
 def _no_window_failure(detail: str) -> int:
     """Report a native-window failure instead of quietly degrading to a browser."""
     _log(f"Native window failed: {detail}")
@@ -1147,8 +1181,9 @@ def _run_native_window(url: str, port: int, server: subprocess.Popen) -> int:
             "height": WINDOW_SIZE[1],
             "min_size": WINDOW_MIN_SIZE,
             "text_select": True,
-            # Match the dark page so the WebView does not flash white before Streamlit paints.
-            "background_color": "#192542",
+            # Light mode matches the page wash. Dark, system, and a missing file stay dark.
+            # The window stays visible; hiding it until loaded can flash twice on Windows.
+            "background_color": window_background_color(_saved_window_theme_mode()),
         }
         if sys.platform.startswith("win"):
             create_kwargs["shadow"] = False

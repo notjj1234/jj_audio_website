@@ -5,6 +5,7 @@ import { ProcessingModeSelect } from "../components/ProcessingModeSelect";
 import { RegionPicker } from "../components/RegionPicker";
 import { StemMixer } from "../components/StemMixer";
 import type { StemInfo } from "../mixer/engine";
+import { fullFileTrimNotice, isolateRepairBody } from "./isolateSubmit";
 import {
   DEFAULT_TRACK_OPTIONS,
   DEMUCS_STEM_CHECKBOX_IDS,
@@ -150,6 +151,8 @@ export function IsolatePage() {
   const [guitarTrack, setGuitarTrack] = useState<GuitarTrackChoice>("guitar_demucs_6s");
   const [vocalsInstrumentalOnly, setVocalsInstrumentalOnly] = useState(false);
   const [processingMode, setProcessingMode] = useState("auto");
+  const [lowEndRestoreDb, setLowEndRestoreDb] = useState(0);
+  const [subBassDebleed, setSubBassDebleed] = useState(false);
   const [capabilities, setCapabilities] = useState<api.SystemCapabilities | null>(null);
   const [duration, setDuration] = useState<number | null>(null);
   const [useRegion, setUseRegion] = useState(false);
@@ -258,6 +261,7 @@ export function IsolatePage() {
   const modeCap = selectedMode?.max_duration_sec ?? null;
   const regionOverCap =
     useRegion && regionLength !== null && modeCap !== null && regionLength > modeCap;
+  const trimNotice = fullFileTrimNotice(duration, modeCap, useRegion);
 
   const regionLabel =
     useRegion && duration !== null ? formatRegionLabel(regionStart, regionEnd) : null;
@@ -341,7 +345,13 @@ export function IsolatePage() {
     setBusy(true);
     setError(null);
     stopWatch?.();
-    setClipLabel(useRegion && regionLabel ? regionLabel : null);
+    setClipLabel(
+      useRegion && regionLabel
+        ? regionLabel
+        : trimNotice && modeCap !== null
+          ? formatRegionLabel(0, modeCap)
+          : null,
+    );
 
     const body: Record<string, unknown> = {
       upload_id: "",
@@ -349,6 +359,7 @@ export function IsolatePage() {
       processing_mode: processingMode,
       emit_stems: [...resolved.emit_stems],
       fold_other_into_guitar: resolved.fold_other_into_guitar,
+      ...isolateRepairBody({ lowEndRestoreDb, subBassDebleed }),
     };
     if (resolved.two_stems) {
       body.two_stems = resolved.two_stems;
@@ -359,6 +370,9 @@ export function IsolatePage() {
     if (useRegion) {
       body.start_sec = regionStart;
       body.end_sec = regionEnd;
+    } else if (trimNotice && modeCap !== null) {
+      body.start_sec = 0;
+      body.end_sec = modeCap;
     }
 
     try {
@@ -586,6 +600,26 @@ export function IsolatePage() {
         </fieldset>
 
         <ProcessingModeSelect value={processingMode} onChange={setProcessingMode} />
+        {trimNotice && <p className="hint">{trimNotice}</p>}
+        <label className="field">
+          Low-end restore (dB, 0 = off)
+          <input
+            type="number"
+            min={0}
+            max={6}
+            step={1}
+            value={lowEndRestoreDb}
+            onChange={(e) => setLowEndRestoreDb(Number(e.target.value) || 0)}
+          />
+        </label>
+        <label className="field checkbox">
+          <input
+            type="checkbox"
+            checked={subBassDebleed}
+            onChange={(e) => setSubBassDebleed(e.target.checked)}
+          />
+          Subtractive bass de-bleed (opt-in)
+        </label>
 
         {error && <p className="error">{error}</p>}
         <button type="submit" disabled={startBlocked}>
