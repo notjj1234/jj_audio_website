@@ -215,6 +215,10 @@ def test_separate_progress_mentions_device():
 def test_recommended_cpu_threads_clamps_by_ram(monkeypatch):
     monkeypatch.setenv("AUDIO_TOOLS_EDITION", "")
     monkeypatch.delenv("AUDIO_TOOLS_EDITION", raising=False)
+    # The cap is min(cores, ram//2). GitHub's macos-15 arm64 runner exposes
+    # 3 vCPUs, so an unpinned 16 GB call returns 3 and fails `>= 4`.
+    monkeypatch.setattr("audio_to_tab.hardware._physical_perf_cores", lambda: 8)
+    monkeypatch.setattr("audio_to_tab.hardware.os.cpu_count", lambda: 8)
 
     def threads_for(ram_gb):
         return recommended_cpu_threads(ram_gb=ram_gb)
