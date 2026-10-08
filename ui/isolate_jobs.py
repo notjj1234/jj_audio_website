@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import multiprocessing
 import os
 import re
@@ -22,8 +23,18 @@ from typing import Any, Callable
 
 from ui.common import DATA_DIR, delete_run, run_output_dir
 
+logger = logging.getLogger(__name__)
+
 _JOBS_SUBDIR = "isolate_jobs"
+# Demo retention: a week of history, and at least the ten newest folders
+# (~1 GB each) even when they are older than that. Not a settings surface.
+_JOB_RETENTION_SEC = 7 * 86400
+_JOB_MAX_KEPT = 10
+_PRUNE_PROTECTED_STATUSES = frozenset({"queued", "running"})
 _QUEUE_LOCK = threading.Lock()
+_PRUNE_LOCK = threading.Lock()
+_APP_START_PRUNE_DONE = False
+_APP_START_PRUNE_LOCK = threading.Lock()
 _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
 _WORKER_THREAD: threading.Thread | None = None
@@ -428,7 +439,18 @@ def _finalize_job_after_process(job_id: str) -> None:
     gone but the folder remains) must become ``failed``. Leaving ``queued``
     makes the worker retry the same id forever and the UI stays on Waiting.
     A deleted folder is left deleted — do not recreate it.
+
+    Every exit, including an already-terminal status, then sweeps old job
+    folders. That is the "job reached a terminal state" prune trigger.
     """
+    try:
+        _settle_job_after_process(job_id)
+    finally:
+        prune_old_jobs()
+
+
+def _settle_job_after_process(job_id: str) -> None:
+    """Write the post-exit status. Does not prune."""
     if not _job_dir(job_id).is_dir():
         return
     status = read_status(job_id)
@@ -548,6 +570,108 @@ def remove_job(job_id: str) -> bool:
         ensure_worker_started()
         return True
     return _delete_job_folder(job_id)
+
+
+def _job_created_at(spec: dict[str, Any], status: dict[str, Any]) -> float:
+    """Creation time from the spec, then the status row. Missing means ancient."""
+    for raw in (spec.get("created_at"), status.get("created_at")):
+        if raw is None or raw == "":
+            continue
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def _job_ids_to_prune(*, now: float) -> list[str]:
+    """Job ids the retention rules say to delete, oldest first.
+
+    Queued and running jobs are never selected. The ``_JOB_MAX_KEPT`` newest
+    jobs are kept even when they are older than ``_JOB_RETENTION_SEC``. Any
+    other job older than that window is a candidate.
+    """
+    records: list[tuple[float, str, str | None]] = []
+    root = jobs_root()
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        spec = _read_json(child / "spec.json") or {}
+        status = _read_json(child / "status.json") or {}
+        raw_status = status.get("status")
+        state = str(raw_status) if raw_status else None
+        records.append((_job_created_at(spec, status), child.name, state))
+    records.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    keep = {job_id for _created, job_id, _state in records[:_JOB_MAX_KEPT]}
+    victims: list[str] = []
+    for created, job_id, state in reversed(records):
+        if state in _PRUNE_PROTECTED_STATUSES or job_id in keep:
+            continue
+        if now - created > _JOB_RETENTION_SEC:
+            victims.append(job_id)
+    return victims
+
+
+def prune_old_jobs(*, now: float | None = None) -> int:
+    """Delete expired isolate job folders via ``remove_job``.
+
+    Returns how many folders were removed. A locked file or other deletion
+    error is logged and skipped so app start cannot die on a Windows lock.
+    Nested or overlapping calls do nothing; the in-flight sweep finishes the
+    work.
+    """
+    if not _PRUNE_LOCK.acquire(blocking=False):
+        return 0
+    removed = 0
+    try:
+        moment = time.time() if now is None else float(now)
+        try:
+            victims = _job_ids_to_prune(now=moment)
+        except Exception:
+            logger.warning("Isolate job prune scan failed", exc_info=True)
+            return 0
+        for job_id in victims:
+            folder = _job_dir(job_id)
+            try:
+                if not folder.is_dir():
+                    continue
+                latest = read_status(job_id)
+                if latest and str(latest.get("status") or "") in _PRUNE_PROTECTED_STATUSES:
+                    continue
+                deleted = remove_job(job_id)
+            except Exception:
+                logger.warning("Could not prune isolate job %s", job_id, exc_info=True)
+                continue
+            if not folder.exists():
+                removed += 1
+                continue
+            # remove_job cancels a pausing job and leaves the folder for the
+            # worker. That is not a failed delete. A locked folder returns False
+            # and is still on disk: log it and keep going.
+            if not deleted:
+                logger.warning("Could not prune isolate job %s", job_id)
+        if removed:
+            logger.info("Pruned %d isolate job folder(s)", removed)
+        return removed
+    finally:
+        _PRUNE_LOCK.release()
+
+
+def prune_jobs_on_app_start() -> None:
+    """Reconcile crash leftovers and prune job folders once per process.
+
+    Streamlit re-executes ``ui/app.py`` on every rerun; later calls no-op.
+    """
+    global _APP_START_PRUNE_DONE
+    with _APP_START_PRUNE_LOCK:
+        if _APP_START_PRUNE_DONE:
+            return
+        try:
+            _reconcile_orphaned_jobs()
+        except Exception:
+            logger.warning("Isolate job startup sweep failed", exc_info=True)
+            return
+        _APP_START_PRUNE_DONE = True
 
 
 def delete_finished_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -1123,18 +1247,23 @@ def _reconcile_orphaned_jobs() -> None:
         proc = _ACTIVE_PROCESS
         if proc is not None and proc.is_alive():
             return
-    root = jobs_root()
     try:
-        children = list(root.iterdir())
-    except OSError:
-        return
-    for child in children:
-        if not child.is_dir():
-            continue
-        status = _read_json(child / "status.json")
-        if not status or status.get("status") not in _ORPHAN_IN_FLIGHT:
-            continue
-        _finalize_job_after_process(str(status.get("id") or child.name))
+        root = jobs_root()
+        try:
+            children = list(root.iterdir())
+        except OSError:
+            return
+        for child in children:
+            if not child.is_dir():
+                continue
+            status = _read_json(child / "status.json")
+            if not status or status.get("status") not in _ORPHAN_IN_FLIGHT:
+                continue
+            _finalize_job_after_process(str(status.get("id") or child.name))
+    finally:
+        # App start and worker start land here even when nothing was in flight,
+        # so finished folders older than the retention window are still swept.
+        prune_old_jobs()
 
 
 def _worker_loop() -> None:

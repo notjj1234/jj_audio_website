@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -71,6 +72,7 @@ def jobs_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(jobs, "_ACTIVE_JOB_ID", None)
     monkeypatch.setattr(jobs, "_ACTIVE_PROCESS", None)
     monkeypatch.setattr(jobs, "_WORKER_THREAD", None)
+    monkeypatch.setattr(jobs, "_APP_START_PRUNE_DONE", False)
     return tmp_path
 
 
@@ -1500,3 +1502,278 @@ def test_worker_busy_false_when_process_dead(jobs_dir: Path, monkeypatch):
     assert jobs._ACTIVE_PROCESS is None
     assert jobs.active_job_id() is None
     assert not (jobs.active_job_id() and jobs.worker_busy())
+
+
+_PRUNE_NOW = 1_700_000_000.0
+
+
+def _seed_prune_job(job_id: str, *, status: str, created_at: float) -> None:
+    import ui.isolate_jobs as jobs
+
+    jobs._ensure_job_dir(job_id)
+    jobs._write_json(
+        jobs._spec_path(job_id),
+        {
+            "id": job_id,
+            "created_at": created_at,
+            "title": job_id,
+            "audio_path": "a.wav",
+            "output_dir": "out",
+        },
+    )
+    jobs.write_status(job_id, status=status, created_at=created_at, title=job_id)
+
+
+def _prune_job_exists(jobs_dir: Path, job_id: str) -> bool:
+    return (jobs_dir / "isolate_jobs" / job_id).is_dir()
+
+
+def test_job_prune_constants():
+    import ui.isolate_jobs as jobs
+
+    assert jobs._JOB_RETENTION_SEC == 7 * 86400
+    assert jobs._JOB_MAX_KEPT == 10
+
+
+def test_prune_keeps_recent_and_in_flight_drops_old(jobs_dir: Path):
+    """Queued and running stay. The newest ten stay. Older leftovers go."""
+    import ui.isolate_jobs as jobs
+
+    now = _PRUNE_NOW
+    retention = jobs._JOB_RETENTION_SEC
+    removed_ids: list[str] = []
+    real_remove = jobs.remove_job
+
+    def spy(job_id: str) -> bool:
+        removed_ids.append(job_id)
+        return real_remove(job_id)
+
+    # Newest ten are all older than the retention window and still kept.
+    for index in range(jobs._JOB_MAX_KEPT):
+        _seed_prune_job(
+            f"keep-{index:02d}",
+            status="succeeded",
+            created_at=now - retention - 5_000 + index * 10,
+        )
+    _seed_prune_job("old-succeeded", status="succeeded", created_at=now - retention - 7_000)
+    _seed_prune_job("old-paused", status="paused", created_at=now - retention - 8_000)
+    _seed_prune_job("old-queued", status="queued", created_at=now - retention - 9_000)
+    _seed_prune_job("old-running", status="running", created_at=now - retention - 10_000)
+
+    jobs.remove_job = spy
+    try:
+        removed = jobs.prune_old_jobs(now=now)
+    finally:
+        jobs.remove_job = real_remove
+
+    assert removed == 2
+    assert removed_ids == ["old-paused", "old-succeeded"]
+    assert not _prune_job_exists(jobs_dir, "old-succeeded")
+    assert not _prune_job_exists(jobs_dir, "old-paused")
+    assert _prune_job_exists(jobs_dir, "old-queued")
+    assert _prune_job_exists(jobs_dir, "old-running")
+    for index in range(jobs._JOB_MAX_KEPT):
+        assert _prune_job_exists(jobs_dir, f"keep-{index:02d}")
+    assert read_status("old-queued")["status"] == "queued"
+    assert read_status("old-running")["status"] == "running"
+
+
+def test_prune_keeps_young_jobs_past_the_count_cap(jobs_dir: Path):
+    import ui.isolate_jobs as jobs
+
+    now = _PRUNE_NOW
+    for index in range(jobs._JOB_MAX_KEPT + 2):
+        _seed_prune_job(
+            f"young-{index:02d}",
+            status="succeeded",
+            created_at=now - 3_600 + index,
+        )
+    assert jobs.prune_old_jobs(now=now) == 0
+    for index in range(jobs._JOB_MAX_KEPT + 2):
+        assert _prune_job_exists(jobs_dir, f"young-{index:02d}")
+
+
+def test_prune_keeps_job_at_exact_retention_boundary(jobs_dir: Path):
+    import ui.isolate_jobs as jobs
+
+    now = _PRUNE_NOW
+    retention = jobs._JOB_RETENTION_SEC
+    for index in range(jobs._JOB_MAX_KEPT):
+        _seed_prune_job(
+            f"newer-{index:02d}",
+            status="failed",
+            created_at=now - 60 + index,
+        )
+    _seed_prune_job("boundary", status="succeeded", created_at=now - retention)
+    assert jobs.prune_old_jobs(now=now) == 0
+    assert _prune_job_exists(jobs_dir, "boundary")
+
+
+def test_prune_drops_job_just_past_retention(jobs_dir: Path):
+    import ui.isolate_jobs as jobs
+
+    now = _PRUNE_NOW
+    retention = jobs._JOB_RETENTION_SEC
+    for index in range(jobs._JOB_MAX_KEPT):
+        _seed_prune_job(
+            f"newer-{index:02d}",
+            status="failed",
+            created_at=now - 60 + index,
+        )
+    _seed_prune_job("stale", status="succeeded", created_at=now - retention - 1)
+    assert jobs.prune_old_jobs(now=now) == 1
+    assert not _prune_job_exists(jobs_dir, "stale")
+    assert _prune_job_exists(jobs_dir, "newer-00")
+
+
+def test_prune_deletion_failure_does_not_raise(jobs_dir: Path, monkeypatch, caplog):
+    """One locked folder must not stop the sweep or escape to the caller."""
+    import ui.isolate_jobs as jobs
+
+    now = _PRUNE_NOW
+    retention = jobs._JOB_RETENTION_SEC
+    for index in range(jobs._JOB_MAX_KEPT):
+        _seed_prune_job(
+            f"keep-{index:02d}",
+            status="succeeded",
+            created_at=now - retention - 1_000 + index,
+        )
+    _seed_prune_job("bad", status="failed", created_at=now - retention - 5_000)
+    _seed_prune_job("good", status="failed", created_at=now - retention - 6_000)
+    real_remove = jobs.remove_job
+
+    def flaky(job_id: str) -> bool:
+        if job_id == "bad":
+            raise OSError("file locked")
+        return real_remove(job_id)
+
+    monkeypatch.setattr(jobs, "remove_job", flaky)
+    with caplog.at_level(logging.WARNING, logger="ui.isolate_jobs"):
+        removed = jobs.prune_old_jobs(now=now)
+
+    assert removed == 1
+    assert _prune_job_exists(jobs_dir, "bad")
+    assert not _prune_job_exists(jobs_dir, "good")
+    assert any("Could not prune isolate job bad" in rec.message for rec in caplog.records)
+    for index in range(jobs._JOB_MAX_KEPT):
+        assert _prune_job_exists(jobs_dir, f"keep-{index:02d}")
+
+
+def test_prune_locked_folder_is_skipped(jobs_dir: Path, monkeypatch, caplog):
+    import ui.isolate_jobs as jobs
+
+    now = _PRUNE_NOW
+    retention = jobs._JOB_RETENTION_SEC
+    for index in range(jobs._JOB_MAX_KEPT):
+        _seed_prune_job(
+            f"keep-{index:02d}",
+            status="succeeded",
+            created_at=now - retention - 1_000 + index,
+        )
+    _seed_prune_job("locked", status="succeeded", created_at=now - retention - 5_000)
+    monkeypatch.setattr(jobs.shutil, "rmtree", lambda *_args, **_kwargs: None)
+    with caplog.at_level(logging.WARNING, logger="ui.isolate_jobs"):
+        removed = jobs.prune_old_jobs(now=now)
+    assert removed == 0
+    assert _prune_job_exists(jobs_dir, "locked")
+    assert any("Could not prune isolate job locked" in rec.message for rec in caplog.records)
+
+
+def test_finalize_prunes_after_terminal_state(jobs_dir: Path, monkeypatch):
+    import ui.isolate_jobs as jobs
+
+    now = _PRUNE_NOW
+    retention = jobs._JOB_RETENTION_SEC
+    monkeypatch.setattr(jobs.time, "time", lambda: now)
+    for index in range(jobs._JOB_MAX_KEPT + 1):
+        _seed_prune_job(
+            f"old-{index:02d}",
+            status="succeeded",
+            created_at=now - retention - 2_000 - index,
+        )
+    _seed_prune_job("fresh", status="running", created_at=now)
+    jobs._finalize_job_after_process("fresh")
+    status = read_status("fresh")
+    assert status is not None
+    assert status["status"] == "failed"
+    assert _prune_job_exists(jobs_dir, "fresh")
+    # fresh plus the nine newest old folders are the keep window.
+    assert not _prune_job_exists(jobs_dir, "old-09")
+    assert not _prune_job_exists(jobs_dir, "old-10")
+    assert _prune_job_exists(jobs_dir, "old-00")
+    assert _prune_job_exists(jobs_dir, "old-08")
+
+
+def test_reconcile_prunes_finished_jobs_when_idle(jobs_dir: Path):
+    import ui.isolate_jobs as jobs
+
+    now = _PRUNE_NOW
+    retention = jobs._JOB_RETENTION_SEC
+    for index in range(jobs._JOB_MAX_KEPT + 2):
+        _seed_prune_job(
+            f"old-{index:02d}",
+            status="succeeded",
+            created_at=now - retention - 2_000 - index,
+        )
+    monkeypatch_now = now
+
+    real_time = jobs.time.time
+    jobs.time.time = lambda: monkeypatch_now
+    try:
+        jobs._reconcile_orphaned_jobs()
+    finally:
+        jobs.time.time = real_time
+
+    assert not _prune_job_exists(jobs_dir, "old-10")
+    assert not _prune_job_exists(jobs_dir, "old-11")
+    assert _prune_job_exists(jobs_dir, "old-00")
+    assert _prune_job_exists(jobs_dir, "old-09")
+
+
+def test_prune_on_app_start_runs_once(jobs_dir: Path, monkeypatch):
+    import ui.isolate_jobs as jobs
+
+    calls: list[str] = []
+
+    def fake_reconcile() -> None:
+        calls.append("reconcile")
+
+    monkeypatch.setattr(jobs, "_reconcile_orphaned_jobs", fake_reconcile)
+    monkeypatch.setattr(jobs, "_APP_START_PRUNE_DONE", False)
+    jobs.prune_jobs_on_app_start()
+    jobs.prune_jobs_on_app_start()
+    assert calls == ["reconcile"]
+
+
+def test_app_start_sweeps_crash_leftovers_once(jobs_dir: Path, monkeypatch):
+    import ui.isolate_jobs as jobs
+
+    now = _PRUNE_NOW
+    retention = jobs._JOB_RETENTION_SEC
+    monkeypatch.setattr(jobs.time, "time", lambda: now)
+    for index in range(jobs._JOB_MAX_KEPT + 1):
+        _seed_prune_job(
+            f"old-{index:02d}",
+            status="succeeded",
+            created_at=now - retention - 2_000 - index,
+        )
+    _seed_prune_job("orphan-run", status="running", created_at=now)
+    monkeypatch.setattr(jobs, "_APP_START_PRUNE_DONE", False)
+    jobs.prune_jobs_on_app_start()
+    status = read_status("orphan-run")
+    assert status is not None
+    assert status["status"] == "failed"
+    assert _prune_job_exists(jobs_dir, "orphan-run")
+    assert not _prune_job_exists(jobs_dir, "old-10")
+    _seed_prune_job("late", status="succeeded", created_at=now - retention - 50_000)
+    jobs.prune_jobs_on_app_start()
+    assert _prune_job_exists(jobs_dir, "late")
+    assert jobs.prune_old_jobs(now=now) == 1
+    assert not _prune_job_exists(jobs_dir, "late")
+
+
+def test_app_module_prunes_on_process_start():
+    source = (Path(__file__).resolve().parents[1] / "ui" / "app.py").read_text(encoding="utf-8")
+    start = source.index('if __name__ == "__main__":')
+    window = source[start : start + 400]
+    assert "prune_jobs_on_app_start()" in window
