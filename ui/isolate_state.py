@@ -1671,18 +1671,48 @@ def promote_job_origin_tab(
 _DRAFT_JOB_BUSY_STATUSES = frozenset({"queued", "running", "pausing", "paused"})
 
 
-def draft_tab_job_overlays(jobs: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+def pending_open_job_ids(
+    jobs: Iterable[Mapping[str, Any]],
+    consumed_ids: Iterable[str] | None,
+) -> set[str]:
+    """Succeeded job ids the tab strip should keep busy until the poll consumes them.
+
+    ``consumed_ids is None`` is a fresh session. The poll seeds those historical
+    successes and does not open them, so they are not waiting on the mixer.
+    """
+    if consumed_ids is None:
+        return set()
+    consumed = {str(item) for item in consumed_ids if str(item or "").strip()}
+    pending: set[str] = set()
+    for job in jobs:
+        if str(job.get("status") or "") != "succeeded":
+            continue
+        job_id = str(job.get("id") or "").strip()
+        if job_id and job_id not in consumed:
+            pending.add(job_id)
+    return pending
+
+
+def draft_tab_job_overlays(
+    jobs: Iterable[Mapping[str, Any]],
+    pending_open_ids: Iterable[str] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Map draft tab id → in-flight job overlay for the mix-tabs strip.
 
     Used to paint a per-tab progress bar while separation runs in that slot.
+    Succeeded ids in ``pending_open_ids`` stay busy at 100% until the mixer
+    poll consumes them. A running or queued job on the same tab still wins.
     """
+    pending = {str(item) for item in (pending_open_ids or ()) if str(item or "").strip()}
     out: dict[str, dict[str, Any]] = {}
     for job in jobs:
         origin = str(job.get("origin_tab") or "").strip()
         if not is_new_draft_tab(origin):
             continue
         status = str(job.get("status") or "")
-        if status not in _DRAFT_JOB_BUSY_STATUSES:
+        job_id = str(job.get("id") or "")
+        opening = status == "succeeded" and job_id in pending
+        if status not in _DRAFT_JOB_BUSY_STATUSES and not opening:
             continue
         progress: float | None = None
         if status == "running":
@@ -1691,12 +1721,17 @@ def draft_tab_job_overlays(jobs: Iterable[Mapping[str, Any]]) -> dict[str, dict[
             except (TypeError, ValueError):
                 progress = 0.0
             progress = min(1.0, max(0.0, progress))
+        elif opening:
+            progress = 1.0
         # Prefer a running job over a queued one if both somehow share a tab.
+        # An in-flight job also wins over a succeeded mix that is not open yet.
         existing = out.get(origin)
         if existing and existing.get("status") == "running" and status != "running":
             continue
+        if existing and existing.get("status") in _DRAFT_JOB_BUSY_STATUSES and opening:
+            continue
         out[origin] = {
-            "job_id": str(job.get("id") or ""),
+            "job_id": job_id,
             "status": status,
             "title": str(job.get("title") or "").strip() or None,
             "busy": True,

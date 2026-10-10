@@ -322,8 +322,16 @@ def test_mixer_video_dock_and_snaps():
     assert 'data-snap="right"' in text
     assert 'data-snap="above"' in text
     assert 'data-snap="below"' in text
+    assert ">Top</button>" in text
+    assert ">Bottom</button>" in text
+    assert ">Above</button>" not in text
+    assert ">Below</button>" not in text
     assert "function dockedVideoLayout" in text
     assert "function videoSnap" in text
+    mount_yt = text[text.find("function mountYoutubePlayer") : text.find("function updateYoutubeChrome")]
+    assert "width: 1920" in mount_yt
+    assert "height: 1080" in mount_yt
+    assert 'vq: "hd1080"' in mount_yt
     dock = text[text.find("function dockedVideoLayout") : text.find("let videoLayout")]
     assert "placed: false" in dock
     snap = text[text.find("function videoSnap") : text.find("function dockedVideoLayout")]

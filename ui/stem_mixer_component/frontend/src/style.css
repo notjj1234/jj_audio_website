@@ -560,9 +560,11 @@ body {
 
 .mixer .metro-rate-seg .metro-rate-btn.active,
 .mixer .metro-rate-seg .metro-follow-btn.active {
-  background: var(--bg-highlight);
-  color: var(--text);
+  /* Mixer only inlines --primary; --bg-highlight is unset in the iframe. */
+  background: var(--primary, #f6ad49);
+  color: #192542;
   opacity: 1;
+  font-weight: 700;
 }
 
 .mixer .metro-chip {
@@ -580,9 +582,10 @@ body {
 }
 
 .mixer .metro-chip.active {
-  background: var(--bg-highlight);
-  color: var(--text);
+  background: var(--primary, #f6ad49);
+  color: #192542;
   opacity: 1;
+  font-weight: 700;
 }
 
 .metro-sound-wrap {

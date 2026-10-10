@@ -283,7 +283,7 @@ function renderUI(args: Args): void {
         <div class="mix-tab${active ? " active" : ""}${busyClass}" data-id="${escapeHtml(id)}" data-focus-key="tab:${escapeHtml(id)}" role="tab" tabindex="${active ? 0 : -1}" aria-selected="${active}"${ariaBusy}>
           ${docIcon()}
           <span class="title" title="${title}">${title}</span>
-          <button type="button" class="close" data-close="${escapeHtml(id)}" tabindex="-1" aria-label="Close ${title}" title="Close tab (Delete)">×</button>
+          <button type="button" class="close" data-close="${escapeHtml(id)}" tabindex="-1" aria-label="Close ${title}" title="Close tab">×</button>
           ${progressMarkup(busy, progress)}
         </div>`;
     })

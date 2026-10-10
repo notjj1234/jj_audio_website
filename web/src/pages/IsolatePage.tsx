@@ -5,7 +5,12 @@ import { ProcessingModeSelect } from "../components/ProcessingModeSelect";
 import { RegionPicker } from "../components/RegionPicker";
 import { StemMixer } from "../components/StemMixer";
 import type { StemInfo } from "../mixer/engine";
-import { fullFileTrimNotice, isolateRepairBody } from "./isolateSubmit";
+import {
+  fullFileTrimNotice,
+  isolateRepairBody,
+  isolateStartDisabled,
+  isolateStartLabel,
+} from "./isolateSubmit";
 import {
   DEFAULT_TRACK_OPTIONS,
   DEMUCS_STEM_CHECKBOX_IDS,
@@ -622,8 +627,11 @@ export function IsolatePage() {
         </label>
 
         {error && <p className="error">{error}</p>}
-        <button type="submit" disabled={startBlocked}>
-          {busy ? "Starting…" : "Start isolation"}
+        <button
+          type="submit"
+          disabled={isolateStartDisabled(startBlocked, job?.status)}
+        >
+          {isolateStartLabel(busy, job?.status)}
         </button>
       </form>
 

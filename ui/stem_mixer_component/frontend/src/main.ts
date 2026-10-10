@@ -1315,6 +1315,8 @@ function mountYoutubePlayer(): void {
       startPicturePoll();
       ytPlayer = new YT.Player("yt-player", {
         videoId: wanted,
+        width: 1920,
+        height: 1080,
         playerVars: {
           autoplay: 0,
           mute: 1,
@@ -1324,6 +1326,7 @@ function mountYoutubePlayer(): void {
           modestbranding: 1,
           rel: 0,
           playsinline: 1,
+          vq: "hd1080",
         },
         events: {
           onReady: (ev: { target: YTPlayer }) => {
@@ -1934,8 +1937,8 @@ function renderUI(theme?: Theme): void {
             <button type="button" class="ghost" id="btn-dock-video" hidden>Dock</button>
             <button type="button" class="ghost" data-snap="left" aria-pressed="true">Left</button>
             <button type="button" class="ghost" data-snap="right" aria-pressed="false">Right</button>
-            <button type="button" class="ghost" data-snap="above" aria-pressed="false">Above</button>
-            <button type="button" class="ghost" data-snap="below" aria-pressed="false">Below</button>
+            <button type="button" class="ghost" data-snap="above" aria-pressed="false">Top</button>
+            <button type="button" class="ghost" data-snap="below" aria-pressed="false">Bottom</button>
             <button type="button" class="ghost" id="btn-hide-video">Hide video</button>
           </div>
           <div class="mixer-video" id="yt-player-slot"></div>

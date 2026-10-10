@@ -1933,6 +1933,7 @@ def test_promote_draft_tab_to_run_keeps_slot(tmp_path: Path):
         OPEN_MIX_TABS_KEY,
         SHELL_TAB_KEY,
         draft_tab_job_overlays,
+        pending_open_job_ids,
         mark_draft_tab_processing,
         open_new_draft_tab,
         promote_job_origin_tab,
@@ -1970,8 +1971,46 @@ def test_promote_draft_tab_to_run_keeps_slot(tmp_path: Path):
     )
     assert overlays[draft]["progress"] == pytest.approx(0.42)
     assert overlays[draft]["busy"] is True
+    assert overlays[draft]["status"] == "running"
     assert "__new__:gone" in overlays
     assert overlays["__new__:gone"]["progress"] is None
+
+    waiting = draft_tab_job_overlays(
+        [{"id": "j3", "status": "succeeded", "title": "My Song", "origin_tab": draft}],
+        pending_open_ids={"j3"},
+    )
+    assert waiting[draft]["busy"] is True
+    assert waiting[draft]["progress"] == pytest.approx(1.0)
+    assert waiting[draft]["status"] == "succeeded"
+
+    omitted = draft_tab_job_overlays(
+        [{"id": "j3", "status": "succeeded", "title": "My Song", "origin_tab": draft}]
+    )
+    assert draft not in omitted
+    consumed = draft_tab_job_overlays(
+        [{"id": "j3", "status": "succeeded", "title": "My Song", "origin_tab": draft}],
+        pending_open_ids=set(),
+    )
+    assert draft not in consumed
+    running_wins = draft_tab_job_overlays(
+        [
+            {
+                "id": "j1",
+                "status": "running",
+                "progress": 0.42,
+                "title": "My Song",
+                "origin_tab": draft,
+            },
+            {"id": "j3", "status": "succeeded", "origin_tab": draft},
+        ],
+        pending_open_ids={"j3"},
+    )
+    assert running_wins[draft]["status"] == "running"
+    assert running_wins[draft]["progress"] == pytest.approx(0.42)
+    finished = [{"id": "j3", "status": "succeeded", "origin_tab": draft}]
+    assert pending_open_job_ids(finished, None) == set()
+    assert pending_open_job_ids(finished, []) == {"j3"}
+    assert pending_open_job_ids(finished, ["j3"]) == set()
 
     promoted = promote_job_origin_tab(
         session,
@@ -2264,6 +2303,22 @@ def test_consume_mix_tab_event_applies_once_per_seq():
     # Missing seq still applies once (older iframe builds).
     last, action, tab_id = consume_mix_tab_event({"action": "plus"}, 20)
     assert last == 21 and action == "plus"
+
+
+def test_mix_tab_x_closes_without_deleting():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    close = source[
+        source.find('elif action == "close" and tab_id:') : source.find(
+            "def _render_busy_tab_close_prompt"
+        )
+    ]
+    assert "_close_mix_tab(rows, tab_id)" in close
+    assert "MIX_TAB_DELETE_KEY" not in close
+    assert "MIX_TAB_DELETE_KEY" not in source
+    assert "_render_mix_tab_delete_prompt" not in source
+    assert "Delete this mix from disk?" not in source
+    assert "_request_queue_delete" in source
 
 
 def test_running_poll_does_not_full_rerun_or_scroll_top():
@@ -2623,7 +2678,7 @@ def test_listening_switcher_renames_current_mix_from_editable_name():
 def test_poll_and_queue_fragments_run_every_one_second():
     page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
     source = page.read_text(encoding="utf-8")
-    assert source.count("@st.fragment(run_every=1.0)") == 2
+    assert source.count("@st.fragment(run_every=1.0)") == 3
     assert "run_every=2.0" not in source
     poll = source[
         source.find("def _poll_running_jobs") : source.find("def _queue_tab_fragment")
@@ -2703,7 +2758,32 @@ def test_poll_and_queue_fragments_run_every_one_second():
         in css
     )
     assert 'key="isolate_sticky_chrome"' in main
-    assert main.find("_render_moises_tab_strip") < main.find("_poll_running_jobs()")
+    tab_frag = source[
+        source.find("def _mix_tab_strip_fragment") : source.find(
+            "def _render_busy_tab_close_prompt"
+        )
+    ]
+    assert "_render_moises_tab_strip(" in tab_frag
+    assert "st.rerun(" not in tab_frag
+    assert "pending_open_ids" in source[
+        source.find("def _render_moises_tab_strip") : source.find(
+            "def _mix_tab_strip_fragment"
+        )
+    ]
+    assert main.find("_mix_tab_strip_fragment") < main.find("_poll_running_jobs()")
+
+
+def test_delete_confirm_first_click_is_labeled_as_arming():
+    page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    source = page.read_text(encoding="utf-8")
+    arm = "Click to arm confirm. Nothing is deleted yet."
+    confirm = source[source.find("def _confirm_button") : source.find("def _queue_confirm_pair")]
+    pair = source[
+        source.find("def _queue_confirm_pair") : source.find("def _render_job_queue_panel")
+    ]
+    assert arm in confirm
+    assert arm in pair
+    assert source.count('confirm_label="Delete from disk"') == 3
 
 
 def test_home_queue_is_floating_panel_not_bottom_section():
@@ -2728,7 +2808,7 @@ def test_home_queue_is_floating_panel_not_bottom_section():
     assert "if st.session_state.get(ISOLATE_QUEUE_PANEL_OPEN_KEY):" in fragment
     assert 'key="isolate_queue_toggle_slot"' in fragment
     assert "[5.5, 1.15, 1]" in main
-    assert main.find("_render_moises_tab_strip") < main.find("_queue_header_fragment()")
+    assert main.find("_mix_tab_strip_fragment") < main.find("_queue_header_fragment()")
     assert main.find("_queue_header_fragment()") < main.find('key="isolate_refresh"')
     assert main.find("_queue_header_fragment()") < main.find('if shell == "mix":')
     assert main.find("_queue_header_fragment()") < main.find("_render_mixer_workspace")

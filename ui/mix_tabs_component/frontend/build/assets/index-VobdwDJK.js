@@ -36,7 +36,7 @@ object-assign
         <div class="mix-tab${Ct?" active":""}${ia}" data-id="${ze(K)}" data-focus-key="tab:${ze(K)}" role="tab" tabindex="${Ct?0:-1}" aria-selected="${Ct}"${ra}>
           ${Au()}
           <span class="title" title="${G}">${G}</span>
-          <button type="button" class="close" data-close="${ze(K)}" tabindex="-1" aria-label="Close ${G}" title="Close tab (Delete)">×</button>
+          <button type="button" class="close" data-close="${ze(K)}" tabindex="-1" aria-label="Close ${G}" title="Close tab">×</button>
           ${Vi(ve,na)}
         </div>`}).join(""),a=(p=(f=document.activeElement)==null?void 0:f.dataset)==null?void 0:p.focusKey,c=t.querySelector(".mix-tab-bar"),u=c?c.scrollLeft:0;t.innerHTML=`
     <div class="mix-tab-wrap">

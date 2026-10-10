@@ -70,7 +70,6 @@ from ui.isolate_jobs import (
     requeue_job,
     resume_job,
     separation_in_progress,
-    succeeded_jobs_for_mix_tab,
     video_offset_sec_for_run,
     worker_busy,
 )
@@ -101,6 +100,7 @@ from ui.isolate_state import (
     apply_shell_view,
     close_open_mix_tab,
     draft_tab_job_overlays,
+    pending_open_job_ids,
     focus_new_draft_tab,
     is_loaded_mix_tab,
     is_new_draft_tab,
@@ -317,7 +317,6 @@ ISOLATE_YOUTUBE_DOWNLOADING_KEY = "_isolate_youtube_downloading"
 LITE_GUITAR_FELL_BACK_KEY = "_isolate_lite_guitar_fell_back"
 ISOLATE_QUEUE_PANEL_OPEN_KEY = "isolate_queue_panel_open"
 BUSY_TAB_CLOSE_KEY = "_isolate_busy_tab_close"
-MIX_TAB_DELETE_KEY = "_isolate_mix_tab_delete"
 
 
 def _close_youtube_search_dialog() -> None:
@@ -2793,7 +2792,15 @@ def _confirm_button(
         if accept_confirm_click(st.session_state, flag, confirmed):
             return True
         return False
-    st.button(label, key=key, help=help, width=width, on_click=_arm_confirm, args=(flag,))
+    idle = label if str(label).endswith("…") else f"{label}…"
+    st.button(
+        idle,
+        key=key,
+        help=help or "Click to arm confirm. Nothing is deleted yet.",
+        width=width,
+        on_click=_arm_confirm,
+        args=(flag,),
+    )
     return False
 
 
@@ -2835,7 +2842,15 @@ def _queue_confirm_pair(
         if accept_confirm_click(st.session_state, flag, confirmed):
             return True
         return False
-    st.button(label, key=key, help=help, width=width, on_click=_arm_confirm, args=(flag,))
+    idle = label if str(label).endswith("…") else f"{label}…"
+    st.button(
+        idle,
+        key=key,
+        help=help or "Click to arm confirm. Nothing is deleted yet.",
+        width=width,
+        on_click=_arm_confirm,
+        args=(flag,),
+    )
     return False
 
 
@@ -4108,7 +4123,16 @@ def _render_moises_tab_strip(browser_id: str | None) -> None:
     shell_tab = str(st.session_state.get(SHELL_TAB_KEY) or "")
     draft_active = shell == "home" and is_new_draft_tab(shell_tab)
     active_id = str(st.session_state.get(LISTEN_PICKER_KEY) or loaded or "")
-    overlays = draft_tab_job_overlays(list_jobs(limit=30))
+    jobs = list_jobs(limit=30)
+    consumed_ids = (
+        None
+        if "isolate_consumed_job_ids" not in st.session_state
+        else list(st.session_state.get("isolate_consumed_job_ids") or [])
+    )
+    overlays = draft_tab_job_overlays(
+        jobs,
+        pending_open_ids=pending_open_job_ids(jobs, consumed_ids),
+    )
     tab_payload = []
     for d in open_tabs:
         overlay = overlays.get(d) or {}
@@ -4182,38 +4206,18 @@ def _render_moises_tab_strip(browser_id: str | None) -> None:
             }
             _rerun_scroll_top()
             return
-        if is_new_draft_tab(tab_id) and not succeeded_jobs_for_mix_tab(tab_id):
-            _close_mix_tab(rows, tab_id)
-            return
-        st.session_state[MIX_TAB_DELETE_KEY] = {"id": tab_id}
-        _rerun_scroll_top()
+        # Close the strip only. Queue → Delete removes the run from disk.
+        _close_mix_tab(rows, tab_id)
 
 
-def _render_mix_tab_delete_prompt() -> None:
-    """Confirm before the mix-tab X deletes that run from disk."""
-    pending = st.session_state.get(MIX_TAB_DELETE_KEY)
-    if not isinstance(pending, dict) or not pending.get("id"):
-        return
-    run_dir = str(pending["id"])
-    with st.container(border=True, key="isolate_mix_tab_delete"):
-        st.caption("Delete this mix from disk?")
-        if _confirm_button(
-            "Delete this mix",
-            key="isolate_mix_tab_delete_btn",
-            confirm_label="Delete from disk",
-            confirm_help="Removes these separated tracks. No undo.",
-        ):
-            st.session_state.pop(MIX_TAB_DELETE_KEY, None)
-            jobs = succeeded_jobs_for_mix_tab(run_dir)
-            if not jobs and not is_new_draft_tab(run_dir):
-                jobs = [{"id": "", "status": "succeeded", "run_dir": run_dir}]
-            _request_queue_delete(jobs, tab_ids=[run_dir])
-        if st.session_state.get(MIX_TAB_DELETE_KEY) and st.button(
-            "Cancel",
-            key="isolate_mix_tab_delete_cancel",
-        ):
-            st.session_state.pop(MIX_TAB_DELETE_KEY, None)
-            _rerun_scroll_top()
+@st.fragment(run_every=1.0)
+def _mix_tab_strip_fragment(browser_id: str | None) -> None:
+    """Refresh tab busy/progress without remounting the mixer.
+
+    Progress ticks stay inside this fragment. Tab clicks still call
+    ``_rerun_scroll_top`` from the strip, which is a full-page rerun.
+    """
+    _render_moises_tab_strip(browser_id)
 
 
 def _render_busy_tab_close_prompt(browser_id: str | None) -> None:
@@ -4607,7 +4611,7 @@ def main() -> None:
             [5.5, 1.15, 1], vertical_alignment="center"
         )
         with tabs_col:
-            _render_moises_tab_strip(owner)
+            _mix_tab_strip_fragment(owner)
         with queue_col:
             _queue_header_fragment()
         with refresh_col:
@@ -4620,7 +4624,6 @@ def main() -> None:
         if refresh_clicked:
             _refresh_isolate_from_disk(browser_id)
         _render_busy_tab_close_prompt(owner)
-        _render_mix_tab_delete_prompt()
 
     _poll_running_jobs()
     if flash := st.session_state.pop("isolate_flash", None):

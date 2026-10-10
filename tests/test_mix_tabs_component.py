@@ -47,6 +47,8 @@ def test_mix_tabs_source_has_moises_chrome():
     assert 'report("plus")' in main
     assert 'report("focus"' in main
     assert 'report("close"' in main
+    assert 'title="Close tab"' in main
+    assert "Close tab (Delete)" not in main
     assert "seq:" in main or "seq =" in main
     assert "mix-tab-bar" in main or "Home" in main
     assert "tab-progress" in main
@@ -105,13 +107,17 @@ def test_mix_tabs_strip_is_sticky_in_app_css():
     assert 'key="isolate_region_picker"' in page
     main = page[page.find("def main") :]
     chrome = main[main.find('key="isolate_sticky_chrome"') : main.find("_poll_running_jobs()")]
-    assert "_render_moises_tab_strip" in chrome
+    assert "_mix_tab_strip_fragment" in chrome
     assert 'key="isolate_refresh"' in chrome
     assert "_queue_header_fragment()" in chrome
     assert "[5.5, 1.15, 1]" in chrome
     assert 'st.title("Audio Isolation"' not in chrome
     assert main.find('st.title("Audio Isolation"') < main.find('key="isolate_sticky_chrome"')
-    assert main.find('st.title("Audio Isolation"') < main.find("_render_moises_tab_strip")
-    assert main.find("_render_moises_tab_strip") < main.find("_queue_header_fragment()")
+    assert main.find('st.title("Audio Isolation"') < main.find("_mix_tab_strip_fragment")
+    assert main.find("_mix_tab_strip_fragment") < main.find("_queue_header_fragment()")
     assert main.find("_queue_header_fragment()") < main.find('key="isolate_refresh"')
-    assert main.find("_render_moises_tab_strip") < main.find("_poll_running_jobs()")
+    assert main.find("_mix_tab_strip_fragment") < main.find("_poll_running_jobs()")
+    tab_frag = page[
+        page.find("def _mix_tab_strip_fragment") : page.find("def _render_busy_tab_close_prompt")
+    ]
+    assert "_render_moises_tab_strip(" in tab_frag
