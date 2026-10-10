@@ -40,7 +40,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-demucs = ["demucs>=4.0", "torch>=2.2,<2.14", "torchaudio>=2.2,<2.12", "torchcodec>=0.14,<0.15"]
+demucs = ["demucs>=4.0", "torch>=2.2,<2.14", "torchaudio>=2.2,<2.12", "torchcodec>=0.14,<0.18"]
 roformer = ["bs-roformer-infer>=0.1.5"]
 separator = ["audio-separator>=0.39.1"]
 scnet = ["torch>=2.2,<2.14"]
