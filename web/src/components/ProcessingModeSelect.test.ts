@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { FALLBACK_MODES, helperText } from "./ProcessingModeSelect";
+import { FALLBACK_MODES, helperText, resolveProcessingMode } from "./ProcessingModeSelect";
 import type { SystemCapabilities } from "../api";
 
 const caps: SystemCapabilities = {
@@ -29,5 +29,19 @@ describe("ProcessingModeSelect Auto", () => {
     const text = helperText(caps, "auto", false);
     expect(text).toContain("Auto will use CPU");
     expect(text).toContain("90s");
+  });
+
+  it("uses the fallback cap when capabilities cannot be loaded", () => {
+    const selected = resolveProcessingMode(null, "lite");
+
+    expect(selected?.label).toBe("Low RAM (60 s)");
+    expect(selected?.max_duration_sec).toBe(60);
+  });
+
+  it("keeps the server-provided cap when capabilities are available", () => {
+    const selected = resolveProcessingMode(caps, "balanced");
+
+    expect(selected?.label).toBe("Balanced");
+    expect(selected?.max_duration_sec).toBe(300);
   });
 });

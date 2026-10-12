@@ -16,6 +16,16 @@ export const FALLBACK_MODES: api.ProcessingModeInfo[] = [
   { id: "lite", label: "Low RAM (60 s)", enabled: true, reason: null, device: "cpu", max_duration_sec: 60 },
 ];
 
+export function resolveProcessingMode(
+  capabilities: api.SystemCapabilities | null,
+  processingMode: string,
+): api.ProcessingModeInfo | undefined {
+  const modes = capabilities?.modes ?? FALLBACK_MODES;
+  const picked = modes.find((m) => m.id === processingMode);
+  if (picked) return picked;
+  return modes.find((m) => m.id === "auto") ?? modes.find((m) => m.id === "fast_cpu");
+}
+
 type Props = {
   value: string;
   onChange: (mode: string) => void;

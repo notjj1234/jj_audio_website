@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import * as api from "../api";
 import { JobProgress } from "../components/JobProgress";
-import { ProcessingModeSelect } from "../components/ProcessingModeSelect";
+import { ProcessingModeSelect, resolveProcessingMode } from "../components/ProcessingModeSelect";
 import { RegionPicker } from "../components/RegionPicker";
 import { StemMixer } from "../components/StemMixer";
 import type { StemInfo } from "../mixer/engine";
@@ -256,10 +256,7 @@ export function IsolatePage() {
   }, [file]);
 
   const selectedMode = useMemo(() => {
-    const modes = capabilities?.modes ?? [];
-    const picked = modes.find((m) => m.id === processingMode);
-    if (picked) return picked;
-    return modes.find((m) => m.id === "auto") ?? modes.find((m) => m.id === "fast_cpu");
+    return resolveProcessingMode(capabilities, processingMode);
   }, [capabilities, processingMode]);
 
   const regionLength = useRegion ? Math.max(0, regionEnd - regionStart) : null;
