@@ -1,4 +1,4 @@
-"""Lock the contributor-facing docs added for outside contributors."""
+"""Lock the remaining contributor-facing readiness docs (no CoC / CONTRIBUTING)."""
 
 from pathlib import Path
 
@@ -10,30 +10,9 @@ def test_contributor_docs_match_the_readiness_plan():
     assert "AUDIO_TOOLS_EDITION" in readme
     assert "mixer-build" in readme
     top = readme.split("## Tester", 1)[0]
-    assert "CONTRIBUTING.md" in top
     assert "DESKTOP.md" in top
     assert "DEPLOY.md" in top
     assert "3.11" in top
-
-    contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
-    for heading in (
-        "Setup",
-        "Tests",
-        "Two products",
-        "Where to start",
-        "Committed frontends",
-        "Never commit",
-    ):
-        assert f"## {heading}" in contributing
-    assert "region-picker-build" in contributing
-    assert "mix-tabs-build" in contributing
-    assert "npm test" in contributing
-    assert "click_times_1x" not in contributing
-
-    conduct = (ROOT / "CODE_OF_CONDUCT.md").read_text(encoding="utf-8")
-    assert "Contributor Covenant" in conduct
-    assert "2.1" in conduct
-    assert conduct.count("[MAINTAINER_EMAIL]") == 1
 
     security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
     assert "[MAINTAINER_EMAIL]" in security

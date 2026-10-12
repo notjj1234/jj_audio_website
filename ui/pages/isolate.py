@@ -225,6 +225,15 @@ from ui.media import (
     stem_media_urls,
 )
 from ui.stem_mixer_component import component_build_available, stem_mixer
+from ui.youtube_search import (
+    PAGE_SIZE as YT_SEARCH_PAGE_SIZE,
+    has_next_page,
+    hits_as_dicts,
+    meta_line,
+    normalize_page,
+    page_offset,
+    result_range_caption,
+)
 
 ensure_src_path()
 
@@ -312,6 +321,10 @@ SECTION_OPTIONAL_HELP = (
 DOWNLOADS_HELP = "Export stems or a mix from the current Mixer run."
 
 ISOLATE_YOUTUBE_SEARCH_OPEN_KEY = "isolate_youtube_search_open"
+ISOLATE_YOUTUBE_SEARCH_HITS_KEY = "isolate_youtube_search_hits"
+ISOLATE_YOUTUBE_SEARCH_ERROR_KEY = "isolate_youtube_search_error"
+ISOLATE_YOUTUBE_SEARCH_PAGE_KEY = "isolate_youtube_search_page"
+ISOLATE_YOUTUBE_SEARCH_QUERY_KEY = "isolate_youtube_search_query"
 ISOLATE_YOUTUBE_AUTO_DOWNLOAD_KEY = "isolate_youtube_auto_download"
 ISOLATE_YOUTUBE_DOWNLOADING_KEY = "_isolate_youtube_downloading"
 LITE_GUITAR_FELL_BACK_KEY = "_isolate_lite_guitar_fell_back"
@@ -321,6 +334,44 @@ BUSY_TAB_CLOSE_KEY = "_isolate_busy_tab_close"
 
 def _close_youtube_search_dialog() -> None:
     st.session_state[ISOLATE_YOUTUBE_SEARCH_OPEN_KEY] = False
+
+
+def _clear_youtube_search_results() -> None:
+    st.session_state.pop(ISOLATE_YOUTUBE_SEARCH_HITS_KEY, None)
+    st.session_state.pop(ISOLATE_YOUTUBE_SEARCH_ERROR_KEY, None)
+    st.session_state[ISOLATE_YOUTUBE_SEARCH_PAGE_KEY] = 1
+
+
+def _run_youtube_search(query: str, *, page: int) -> None:
+    """Fetch one page of results into session state."""
+    page = normalize_page(page)
+    st.session_state[ISOLATE_YOUTUBE_SEARCH_PAGE_KEY] = page
+    try:
+        with st.spinner("Searching YouTube…"):
+            hits = search_youtube_videos(
+                query,
+                max_results=YT_SEARCH_PAGE_SIZE,
+                offset=page_offset(page),
+            )
+        st.session_state[ISOLATE_YOUTUBE_SEARCH_HITS_KEY] = hits_as_dicts(hits)
+        st.session_state.pop(ISOLATE_YOUTUBE_SEARCH_ERROR_KEY, None)
+        if not hits:
+            st.session_state[ISOLATE_YOUTUBE_SEARCH_ERROR_KEY] = (
+                "No public videos matched that search."
+                if page <= 1
+                else "No more public videos for this search."
+            )
+    except ValueError as exc:
+        st.session_state[ISOLATE_YOUTUBE_SEARCH_HITS_KEY] = []
+        st.session_state[ISOLATE_YOUTUBE_SEARCH_ERROR_KEY] = str(exc)
+    except YouTubeSearchError as exc:
+        st.session_state[ISOLATE_YOUTUBE_SEARCH_HITS_KEY] = []
+        st.session_state[ISOLATE_YOUTUBE_SEARCH_ERROR_KEY] = str(exc)
+    except Exception as exc:
+        st.session_state[ISOLATE_YOUTUBE_SEARCH_HITS_KEY] = []
+        st.session_state[ISOLATE_YOUTUBE_SEARCH_ERROR_KEY] = (
+            f"YouTube search failed: {exc}"
+        )
 
 
 def _stage_youtube_audio(
@@ -392,89 +443,66 @@ def _youtube_search_dialog() -> None:
         "**Separate** queues the outcome already chosen on Home."
     )
     with st.form("isolate_youtube_search_form", clear_on_submit=False, border=False):
-        search_q = st.text_input(
-            "Song or artist",
-            key="isolate_youtube_search_query",
-            placeholder="e.g. artist, song title",
-        )
-        do_search = st.form_submit_button(
-            "Search",
-            width="stretch",
-        )
-    action_cols = st.columns([1, 1])
-    with action_cols[0]:
+        search_cols = st.columns([4, 1], vertical_alignment="bottom")
+        with search_cols[0]:
+            search_q = st.text_input(
+                "Song or artist",
+                key=ISOLATE_YOUTUBE_SEARCH_QUERY_KEY,
+                placeholder="e.g. artist, song title",
+            )
+        with search_cols[1]:
+            do_search = st.form_submit_button(
+                "Search",
+                type="primary",
+                width="stretch",
+            )
+    secondary = st.columns([1, 1, 4], vertical_alignment="center")
+    with secondary[0]:
         if st.button(
-            "Clear results",
+            "Clear",
             key="isolate_youtube_search_clear",
+            type="secondary",
             width="stretch",
         ):
-            st.session_state.pop("isolate_youtube_search_hits", None)
-            st.session_state.pop("isolate_youtube_search_error", None)
+            _clear_youtube_search_results()
             st.rerun()
-    with action_cols[1]:
+    with secondary[1]:
         if st.button(
             "Close",
             key="isolate_youtube_search_close",
+            type="secondary",
             width="stretch",
         ):
             _close_youtube_search_dialog()
             st.rerun()
     if do_search:
-        try:
-            with st.spinner("Searching YouTube…"):
-                hits = search_youtube_videos(search_q, max_results=5)
-            st.session_state["isolate_youtube_search_hits"] = [
-                {
-                    "video_id": h.video_id,
-                    "title": h.title,
-                    "channel": h.channel,
-                    "duration_sec": h.duration_sec,
-                    "url": h.url,
-                    "thumbnail_url": h.thumbnail_url,
-                }
-                for h in hits
-            ]
-            st.session_state.pop("isolate_youtube_search_error", None)
-            if not hits:
-                st.session_state["isolate_youtube_search_error"] = (
-                    "No public videos matched that search."
-                )
-        except ValueError as exc:
-            st.session_state["isolate_youtube_search_hits"] = []
-            st.session_state["isolate_youtube_search_error"] = str(exc)
-        except YouTubeSearchError as exc:
-            st.session_state["isolate_youtube_search_hits"] = []
-            st.session_state["isolate_youtube_search_error"] = str(exc)
-        except Exception as exc:
-            st.session_state["isolate_youtube_search_hits"] = []
-            st.session_state["isolate_youtube_search_error"] = (
-                f"YouTube search failed: {exc}"
-            )
-    search_error = st.session_state.get("isolate_youtube_search_error")
+        _run_youtube_search(search_q, page=1)
+    search_error = st.session_state.get(ISOLATE_YOUTUBE_SEARCH_ERROR_KEY)
     if search_error:
         st.warning(str(search_error))
     downloading_title = st.session_state.get(ISOLATE_YOUTUBE_DOWNLOADING_KEY)
     if downloading_title:
         st.info(f"Downloading **{downloading_title}**…")
-    hits_state = st.session_state.get("isolate_youtube_search_hits") or []
-    if isinstance(hits_state, list) and hits_state:
-        st.caption(f"{len(hits_state)} result(s)")
-        busy = bool(downloading_title)
+    page = normalize_page(st.session_state.get(ISOLATE_YOUTUBE_SEARCH_PAGE_KEY, 1))
+    hits_state = st.session_state.get(ISOLATE_YOUTUBE_SEARCH_HITS_KEY) or []
+    if not isinstance(hits_state, list):
+        hits_state = []
+    busy = bool(downloading_title)
+    if hits_state:
+        st.caption(result_range_caption(page, len(hits_state)))
         for hit in hits_state:
             if not isinstance(hit, dict):
                 continue
             vid = str(hit.get("video_id") or "")
             title = str(hit.get("title") or "Untitled")
-            channel = str(hit.get("channel") or "")
             dur = format_youtube_duration(hit.get("duration_sec"))
             url = str(hit.get("url") or "").strip()
             thumb = str(hit.get("thumbnail_url") or "").strip()
-            meta_bits = [b for b in (channel, dur) if b]
-            meta = " · ".join(meta_bits)
-            row = st.columns([1, 2.6, 1.4], vertical_alignment="center")
+            meta = meta_line(hit, duration_label=dur)
+            row = st.columns([1.5, 3.2, 1.3], vertical_alignment="center")
             with row[0]:
                 if thumb:
-                    st.image(thumb, width=120)
+                    st.image(thumb, width=168)
             with row[1]:
                 st.markdown(f"**{title}**")
                 if meta:
@@ -482,18 +510,19 @@ def _youtube_search_dialog() -> None:
             with row[2]:
                 if st.button(
                     "Use",
-                    key=f"isolate_youtube_pick_{vid}",
+                    key=f"isolate_youtube_pick_p{page}_{vid}",
+                    type="primary",
                     disabled=not url or busy,
                     width="stretch",
                     help="Download this track’s audio into New.",
                 ):
                     queue_youtube_url(st.session_state, url, title=title)
-                    st.session_state.pop("isolate_youtube_search_error", None)
+                    st.session_state.pop(ISOLATE_YOUTUBE_SEARCH_ERROR_KEY, None)
                     # Download in the dialog so Use shows progress instead of
                     # closing first and leaving a blank gap.
                     err = _download_youtube_with_status(url, title=title)
                     if err:
-                        st.session_state["isolate_youtube_search_error"] = err
+                        st.session_state[ISOLATE_YOUTUBE_SEARCH_ERROR_KEY] = err
                         st.rerun()
                     _close_youtube_search_dialog()
                     st.session_state.pop(ISOLATE_YOUTUBE_AUTO_DOWNLOAD_KEY, None)
@@ -503,16 +532,17 @@ def _youtube_search_dialog() -> None:
                     st.rerun()
                 if st.button(
                     "Separate",
-                    key=f"isolate_youtube_separate_{vid}",
+                    key=f"isolate_youtube_separate_p{page}_{vid}",
+                    type="secondary",
                     disabled=not url or busy,
                     width="stretch",
                     help="Download this track and queue the outcome already chosen on Home.",
                 ):
                     queue_youtube_url(st.session_state, url, title=title)
-                    st.session_state.pop("isolate_youtube_search_error", None)
+                    st.session_state.pop(ISOLATE_YOUTUBE_SEARCH_ERROR_KEY, None)
                     err = _download_youtube_with_status(url, title=title)
                     if err:
-                        st.session_state["isolate_youtube_search_error"] = err
+                        st.session_state[ISOLATE_YOUTUBE_SEARCH_ERROR_KEY] = err
                         st.rerun()
                     _close_youtube_search_dialog()
                     st.session_state.pop(ISOLATE_YOUTUBE_AUTO_DOWNLOAD_KEY, None)
@@ -521,7 +551,7 @@ def _youtube_search_dialog() -> None:
             with st.expander(
                 "Preview",
                 expanded=False,
-                key=f"isolate_youtube_preview_{vid}",
+                key=f"isolate_youtube_preview_p{page}_{vid}",
             ):
                 if url:
                     # Avoid Streamlit's YouTube iframe embed: many official/label
@@ -537,7 +567,36 @@ def _youtube_search_dialog() -> None:
                     st.markdown(f"[Open on YouTube]({url})")
                 else:
                     st.caption("No preview URL for this result.")
-
+    if hits_state or page > 1:
+        nav = st.columns([1, 2, 1], vertical_alignment="center")
+        with nav[0]:
+            if st.button(
+                "Previous",
+                key="isolate_youtube_search_prev",
+                type="secondary",
+                disabled=page <= 1 or busy,
+                width="stretch",
+            ):
+                _run_youtube_search(
+                    str(st.session_state.get(ISOLATE_YOUTUBE_SEARCH_QUERY_KEY) or ""),
+                    page=page - 1,
+                )
+                st.rerun()
+        with nav[1]:
+            st.caption(result_range_caption(page, len(hits_state)))
+        with nav[2]:
+            if st.button(
+                "Next",
+                key="isolate_youtube_search_next",
+                type="secondary",
+                disabled=not has_next_page(len(hits_state)) or busy,
+                width="stretch",
+            ):
+                _run_youtube_search(
+                    str(st.session_state.get(ISOLATE_YOUTUBE_SEARCH_QUERY_KEY) or ""),
+                    page=page + 1,
+                )
+                st.rerun()
 
 def _stateful_expander(label: str, *, key: str, default: bool = False):
     """
@@ -2319,8 +2378,9 @@ def _render_separation_controls() -> dict:
         )
     with url_row[1]:
         if st.button(
-            "Search songs",
+            "Search",
             key="isolate_youtube_search_open_btn",
+            type="secondary",
             width="stretch",
             help="Open a search panel to find a public video by song or artist.",
         ):
@@ -4607,8 +4667,9 @@ def main() -> None:
         _scroll_main_to_top(isolate_scroll_top_token(st.session_state))
 
         owner = browser_id if isinstance(browser_id, str) else None
+        # Tabs flex; Queue/Refresh keep readable min widths via app.py CSS.
         tabs_col, queue_col, refresh_col = st.columns(
-            [5.5, 1.15, 1], vertical_alignment="center"
+            [6, 1.35, 1.2], vertical_alignment="center"
         )
         with tabs_col:
             _mix_tab_strip_fragment(owner)

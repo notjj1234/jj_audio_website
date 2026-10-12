@@ -222,6 +222,65 @@ def test_search_youtube_videos_uses_ytsearch_and_maps_hits():
     assert hits[1].thumbnail_url.endswith("/hqdefault.jpg")
 
 
+def test_search_youtube_videos_offset_slices_page():
+    entries = [
+        {
+            "id": f"vid{i}",
+            "title": f"Song {i}",
+            "channel": "Artist",
+            "duration": 100 + i,
+        }
+        for i in range(1, 16)
+    ]
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, query, download=False):
+            assert download is False
+            assert query.startswith("ytsearch15:")
+            return {"entries": entries}
+
+    with patch("yt_dlp.YoutubeDL", FakeYDL):
+        hits = search_youtube_videos("paged query", max_results=5, offset=10)
+    assert [h.video_id for h in hits] == ["vid11", "vid12", "vid13", "vid14", "vid15"]
+    assert hits[0].title == "Song 11"
+
+
+def test_search_youtube_videos_clamps_fetch_to_50():
+    seen: list[str] = []
+
+    class FakeYDL:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, query, download=False):
+            seen.append(query)
+            return {"entries": []}
+
+    with patch("yt_dlp.YoutubeDL", FakeYDL):
+        hits = search_youtube_videos("deep", max_results=20, offset=40)
+    assert hits == []
+    assert seen == ["ytsearch50:deep"]
+
+    with patch("yt_dlp.YoutubeDL", FakeYDL):
+        assert search_youtube_videos("past end", max_results=10, offset=50) == []
+    assert seen == ["ytsearch50:deep"]
+
+
 def test_search_youtube_videos_rejects_blank_query():
     with pytest.raises(ValueError, match="search query"):
         search_youtube_videos("   ")

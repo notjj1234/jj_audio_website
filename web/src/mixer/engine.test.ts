@@ -246,6 +246,7 @@ describe("mixer helpers", () => {
     class FakeSource extends FakeNode {
       buffer: unknown = null;
       onended: (() => void) | null = null;
+      playbackRate = new FakeParam();
       start() {}
       stop() {}
       constructor() {
@@ -292,6 +293,33 @@ describe("mixer helpers", () => {
     await engine.play();
     expect(internal.playing).toBe(true);
     expect(internal.sources.size).toBe(1);
+  });
+
+  it("scales currentTime by effective practice rate when SoundTouch is present", () => {
+    const engine = new StemMixerEngine();
+    const internal = engine as unknown as {
+      ctx: { currentTime: number } | null;
+      playing: boolean;
+      offset: number;
+      startedAt: number;
+      duration: number;
+      soundTouch: object | null;
+      practiceRate: number;
+    };
+    internal.ctx = { currentTime: 5 };
+    internal.playing = true;
+    internal.offset = 1;
+    internal.startedAt = 3;
+    internal.duration = 60;
+    internal.soundTouch = { ok: true };
+    internal.practiceRate = 0.5;
+    // audio seconds = 1 + (5 - 3) * 0.5
+    expect(engine.currentTime()).toBeCloseTo(2);
+    internal.practiceRate = 2;
+    // clamped effective uses stored rate when ST present; 1 + 2*2 = 5
+    expect(engine.currentTime()).toBeCloseTo(5);
+    internal.soundTouch = null;
+    expect(engine.currentTime()).toBeCloseTo(3);
   });
 
   it("wires a master DynamicsCompressor near −1 dBTP for solo peaks", async () => {

@@ -9,11 +9,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@soundtouchjs/audio-worklet": "2.1.1",
     "streamlit-component-lib": "^2.0.0"
   },
   "devDependencies": {
+    "@types/node": "^20.11.0",
     "typescript": "^5.4.0",
-    "vite": "^5.2.0",
-    "@types/node": "^20.11.0"
+    "vite": "^5.2.0"
   }
 }

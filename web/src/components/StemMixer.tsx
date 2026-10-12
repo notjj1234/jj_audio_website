@@ -18,6 +18,21 @@ import {
   type PlaybackPreset,
   type StemInfo,
 } from "../mixer/engine";
+import {
+  PRACTICE_KEY_DEFAULT,
+  PRACTICE_KEY_MAX,
+  PRACTICE_KEY_MIN,
+  PRACTICE_RATE_DEFAULT,
+  PRACTICE_RATE_MAX,
+  PRACTICE_RATE_MIN,
+  PRACTICE_RATE_STEP,
+  clampPracticeRate,
+  clampPracticeSemitones,
+  formatPracticeKeyLabel,
+  formatPracticeSpeedLabel,
+  loadPracticeSettings,
+  savePracticeSettings,
+} from "../mixer/practice";
 
 function formatTime(sec: number): string {
   if (!isFinite(sec) || sec < 0) sec = 0;
@@ -42,6 +57,12 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
   const [mixError, setMixError] = useState<string | null>(null);
   const [mixBusy, setMixBusy] = useState(false);
   const [preset, setPreset] = useState<PlaybackPreset | "custom">("all");
+  const initialPractice = loadPracticeSettings();
+  const [practiceRate, setPracticeRate] = useState(initialPractice.rate);
+  const [practiceSemitones, setPracticeSemitones] = useState(
+    initialPractice.semitones
+  );
+  const [practiceStatus, setPracticeStatus] = useState<string | null>(null);
 
   const stemIds = useMemo(() => stems.map((s) => s.id), [stems]);
   const stemKey = useMemo(
@@ -57,6 +78,11 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
     engine.setSoftPauseCallback(() => {
       /* Blur and sleep are not a user Pause — keepPlaying recovery handles them. */
     });
+    const practice = loadPracticeSettings();
+    setPracticeRate(practice.rate);
+    setPracticeSemitones(practice.semitones);
+    void engine.setPracticeRate(practice.rate);
+    void engine.setPracticeSemitones(practice.semitones);
     engine.setMediaInfo(
       stems.map((s) => s.label).filter(Boolean).join(" · ") || "Stem mix"
     );
@@ -169,6 +195,40 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
   };
   const masterDb = state.masterVolumeDb ?? DB_DEFAULT;
 
+  const persistPractice = (rate: number, semitones: number) => {
+    setPracticeRate(rate);
+    setPracticeSemitones(semitones);
+    savePracticeSettings({ rate, semitones });
+  };
+
+  const applyPracticeRate = (raw: number) => {
+    const next = clampPracticeRate(raw);
+    void engineRef.current.setPracticeRate(next).then((r) => {
+      if (!r.ok && r.message) setPracticeStatus(r.message);
+      else setPracticeStatus(null);
+      const settings = engineRef.current.getPracticeSettings();
+      persistPractice(settings.rate, settings.semitones);
+    });
+  };
+
+  const applyPracticeKey = (raw: number) => {
+    const next = clampPracticeSemitones(raw);
+    void engineRef.current.setPracticeSemitones(next).then((r) => {
+      if (!r.ok && r.message) setPracticeStatus(r.message);
+      else setPracticeStatus(null);
+      const settings = engineRef.current.getPracticeSettings();
+      persistPractice(settings.rate, settings.semitones);
+    });
+  };
+
+  const resetPractice = () => {
+    void engineRef.current.resetPractice().then((r) => {
+      if (!r.ok && r.message) setPracticeStatus(r.message);
+      else setPracticeStatus(null);
+      persistPractice(PRACTICE_RATE_DEFAULT, PRACTICE_KEY_DEFAULT);
+    });
+  };
+
   const downloadMix = async () => {
     setMixError(null);
     setMixBusy(true);
@@ -257,6 +317,82 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
             {masterDb.toFixed(1)}
           </span>
         </label>
+        <div
+          className="mixer-practice"
+          role="group"
+          aria-label="Practice"
+          onDoubleClick={(e) => {
+            if ((e.target as HTMLElement).closest("button, input")) return;
+            resetPractice();
+          }}
+        >
+          <div className="practice-row">
+            <span className="practice-label">
+              {formatPracticeSpeedLabel(practiceRate)}
+            </span>
+            <button
+              type="button"
+              className="ghost practice-nudge"
+              aria-label="Slower"
+              onClick={() => applyPracticeRate(practiceRate - PRACTICE_RATE_STEP)}
+            >
+              −
+            </button>
+            <input
+              type="range"
+              min={PRACTICE_RATE_MIN}
+              max={PRACTICE_RATE_MAX}
+              step={PRACTICE_RATE_STEP}
+              value={practiceRate}
+              onChange={(e) => applyPracticeRate(Number(e.target.value))}
+            />
+            <button
+              type="button"
+              className="ghost practice-nudge"
+              aria-label="Faster"
+              onClick={() => applyPracticeRate(practiceRate + PRACTICE_RATE_STEP)}
+            >
+              +
+            </button>
+          </div>
+          <div className="practice-row">
+            <span className="practice-label">
+              {formatPracticeKeyLabel(practiceSemitones)}
+            </span>
+            <button
+              type="button"
+              className="ghost practice-nudge"
+              aria-label="Lower key"
+              onClick={() => applyPracticeKey(practiceSemitones - 1)}
+            >
+              −
+            </button>
+            <input
+              type="range"
+              min={PRACTICE_KEY_MIN}
+              max={PRACTICE_KEY_MAX}
+              step={1}
+              value={practiceSemitones}
+              onChange={(e) => applyPracticeKey(Number(e.target.value))}
+            />
+            <button
+              type="button"
+              className="ghost practice-nudge"
+              aria-label="Raise key"
+              onClick={() => applyPracticeKey(practiceSemitones + 1)}
+            >
+              +
+            </button>
+          </div>
+          <button type="button" className="ghost" onClick={resetPractice}>
+            Reset practice
+          </button>
+          {practiceStatus && (
+            <p className="practice-status" aria-live="polite">
+              {practiceStatus}
+            </p>
+          )}
+        </div>
       </div>
 
       <div className="mixer-master">

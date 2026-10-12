@@ -471,6 +471,40 @@ button.danger,
   opacity: 0.78;
 }
 
+.mixer .mixer-practice {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 0.35rem;
+}
+
+.mixer .practice-row {
+  display: grid;
+  grid-template-columns: 5.5rem auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.mixer .practice-label {
+  opacity: 0.78;
+  font-variant-numeric: tabular-nums;
+}
+
+.mixer .practice-nudge {
+  min-width: 2rem;
+  min-height: 32px;
+  padding: 0.15rem 0.35rem;
+}
+
+.mixer .practice-status {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: rgba(26, 31, 28, 0.72);
+}
+
 .mixer input[type="range"] {
   padding: 12px 0;
 }

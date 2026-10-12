@@ -19,7 +19,7 @@ On Windows:
 .\scripts\dev.ps1 test
 ```
 
-How to contribute: [CONTRIBUTING.md](CONTRIBUTING.md). Desktop installers and the tester app: [DESKTOP.md](DESKTOP.md). Hosted deploy: [DEPLOY.md](DEPLOY.md).
+Desktop installers and the tester app: [DESKTOP.md](DESKTOP.md). Hosted deploy: [DEPLOY.md](DEPLOY.md).
 
 Desktop installers and local tester commands for terminal
 

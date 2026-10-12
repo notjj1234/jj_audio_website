@@ -2807,7 +2807,7 @@ def test_home_queue_is_floating_panel_not_bottom_section():
     assert 'shell != "mix"' not in main
     assert "if st.session_state.get(ISOLATE_QUEUE_PANEL_OPEN_KEY):" in fragment
     assert 'key="isolate_queue_toggle_slot"' in fragment
-    assert "[5.5, 1.15, 1]" in main
+    assert "[6, 1.35, 1.2]" in main
     assert main.find("_mix_tab_strip_fragment") < main.find("_queue_header_fragment()")
     assert main.find("_queue_header_fragment()") < main.find('key="isolate_refresh"')
     assert main.find("_queue_header_fragment()") < main.find('if shell == "mix":')
@@ -2832,6 +2832,13 @@ def test_home_queue_is_floating_panel_not_bottom_section():
     assert "420px" in css
     assert "55vh" in css
     assert "not a sidebar" in css.lower() or "not a sidebar / drawer" in css
+    chrome_css = css[
+        css.find("Refresh + Queue sit on the mix-tabs row") : css.find("Isolate Queue:")
+    ]
+    assert "white-space: nowrap !important" in chrome_css
+    assert "min-width: 6.25rem !important" in chrome_css
+    assert "flex: 0 0 auto !important" in chrome_css
+    assert "letter-wrap" in chrome_css
     queue_css = css[css.find("Isolate Queue:") : css.find("New-tab outcome")]
     assert "flex: 1 1 100%" not in queue_css
     assert "min-width: 5.5rem" not in queue_css

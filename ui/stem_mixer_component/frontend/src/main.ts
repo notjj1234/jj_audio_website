@@ -18,6 +18,21 @@ import {
   metronomeClickTimes,
   metronomePeaksFromTimes,
 } from "./metronomeClicks";
+// @soundtouchjs/audio-worklet@2.1.1 — MPL-2.0 (not GPL Rubber Band).
+import type { SoundTouchNode } from "@soundtouchjs/audio-worklet";
+import soundTouchProcessorUrl from "@soundtouchjs/audio-worklet/processor?url";
+import {
+  PRACTICE_KEY_DEFAULT,
+  PRACTICE_RATE_DEFAULT,
+  PRACTICE_RATE_STEP,
+  clampPracticeRate,
+  clampPracticeSemitones,
+  formatPracticeKeyLabel,
+  formatPracticeSpeedLabel,
+  loadPracticeSettings,
+  savePracticeSettings,
+  type PracticeSettings,
+} from "./practice";
 
 const DB_MIN = -25;
 const DB_MAX = 25;
@@ -126,6 +141,11 @@ class StemMixerEngine {
   private sources = new Map<string, AudioBufferSourceNode>();
   private masterGain: GainNode | null = null;
   private limiter: DynamicsCompressorNode | null = null;
+  /** One shared SoundTouch on the master bus — stems stay phase-aligned, lower CPU. */
+  private soundTouch: SoundTouchNode | null = null;
+  private soundTouchFailed = false;
+  private practiceRate = PRACTICE_RATE_DEFAULT;
+  private practiceSemitones = PRACTICE_KEY_DEFAULT;
   private streamDest: MediaStreamAudioDestinationNode | null = null;
   private outputEl: HTMLAudioElement | null = null;
   private stemIds: string[] = [];
@@ -193,16 +213,30 @@ class StemMixerEngine {
   currentTime(): number {
     if (!this.ctx) return this.offset;
     if (!this.playing) return this.offset;
+    const rate = this.effectivePlaybackRate();
     return Math.min(
       this.duration,
-      this.offset + (this.ctx.currentTime - this.startedAt)
+      this.offset + (this.ctx.currentTime - this.startedAt) * rate
     );
+  }
+
+  getPracticeSettings(): PracticeSettings {
+    return { rate: this.practiceRate, semitones: this.practiceSemitones };
+  }
+
+  isPracticeAvailable(): boolean {
+    return this.soundTouch !== null && !this.soundTouchFailed;
+  }
+
+  private effectivePlaybackRate(): number {
+    return this.soundTouch ? this.practiceRate : PRACTICE_RATE_DEFAULT;
   }
 
   /** Create a context for decode only. Never resume — pywebview blocks that without a click. */
   createContextForDecode(): AudioContext {
     if (!this.ctx || this.ctx.state === "closed") {
       this.ctx = new AudioContext();
+      this.teardownSoundTouch();
       this.masterGain = null;
       this.limiter = null;
     }
@@ -233,7 +267,7 @@ class StemMixerEngine {
   }
 
   /**
-   * Master gain → limiter → MediaStreamDestination → HTMLAudioElement.
+   * Master gain → [SoundTouch] → limiter → MediaStreamDestination → HTMLAudioElement.
    * Routing through a media element keeps WKWebView/WebView2 from treating
    * the mix as silent Web Audio that can suspend on window blur.
    */
@@ -257,6 +291,134 @@ class StemMixerEngine {
     } else {
       this.limiter.connect(this.ctx.destination);
     }
+  }
+
+  private teardownSoundTouch(): void {
+    if (this.soundTouch) {
+      try {
+        this.soundTouch.disconnect();
+      } catch {
+        /* */
+      }
+      this.soundTouch = null;
+    }
+  }
+
+  /**
+   * Insert one SoundTouch node on the master bus after stem gains.
+   * Failure leaves the graph at 1× / 0 semitones (no chipmunk fallback).
+   */
+  async ensureSoundTouch(): Promise<boolean> {
+    if (this.soundTouchFailed) return false;
+    if (this.soundTouch) return true;
+    if (!this.ctx) return false;
+    this.ensureMasterBus();
+    if (!this.masterGain || !this.limiter) return false;
+    try {
+      const { SoundTouchNode: ST } = await import("@soundtouchjs/audio-worklet");
+      await ST.register(this.ctx, soundTouchProcessorUrl);
+      const st = new ST({ context: this.ctx });
+      this.masterGain.disconnect();
+      this.masterGain.connect(st);
+      st.connect(this.limiter);
+      this.soundTouch = st;
+      this.applyPracticeToGraph();
+      return true;
+    } catch {
+      this.soundTouchFailed = true;
+      this.practiceRate = PRACTICE_RATE_DEFAULT;
+      this.practiceSemitones = PRACTICE_KEY_DEFAULT;
+      try {
+        this.masterGain.disconnect();
+        this.masterGain.connect(this.limiter);
+      } catch {
+        /* */
+      }
+      return false;
+    }
+  }
+
+  private applyPracticeToGraph(): void {
+    const rate = this.effectivePlaybackRate();
+    const semis = this.soundTouch ? this.practiceSemitones : PRACTICE_KEY_DEFAULT;
+    if (this.soundTouch) {
+      this.soundTouch.playbackRate.value = rate;
+      this.soundTouch.pitch.value = 1;
+      this.soundTouch.pitchSemitones.value = semis;
+    }
+    for (const src of this.sources.values()) {
+      try {
+        src.playbackRate.value = rate;
+      } catch {
+        /* */
+      }
+    }
+  }
+
+  async setPracticeRate(rate: number): Promise<{ ok: boolean; message?: string }> {
+    const next = clampPracticeRate(rate);
+    if (this.soundTouchFailed && next !== PRACTICE_RATE_DEFAULT) {
+      this.practiceRate = PRACTICE_RATE_DEFAULT;
+      this.applyPracticeToGraph();
+      return {
+        ok: false,
+        message: "Speed/Key unavailable — practice worklet failed to load.",
+      };
+    }
+    if (this.playing && this.ctx) {
+      this.offset = this.currentTime();
+      this.startedAt = this.ctx.currentTime;
+    }
+    this.practiceRate = next;
+    if (this.ctx) {
+      const ready = await this.ensureSoundTouch();
+      if (!ready && next !== PRACTICE_RATE_DEFAULT) {
+        this.practiceRate = PRACTICE_RATE_DEFAULT;
+        this.applyPracticeToGraph();
+        return {
+          ok: false,
+          message: "Speed/Key unavailable — practice worklet failed to load.",
+        };
+      }
+    }
+    this.applyPracticeToGraph();
+    return { ok: true };
+  }
+
+  async setPracticeSemitones(
+    semitones: number
+  ): Promise<{ ok: boolean; message?: string }> {
+    const next = clampPracticeSemitones(semitones);
+    if (this.soundTouchFailed && next !== PRACTICE_KEY_DEFAULT) {
+      this.practiceSemitones = PRACTICE_KEY_DEFAULT;
+      this.applyPracticeToGraph();
+      return {
+        ok: false,
+        message: "Speed/Key unavailable — practice worklet failed to load.",
+      };
+    }
+    this.practiceSemitones = next;
+    if (this.ctx) {
+      const ready = await this.ensureSoundTouch();
+      if (!ready && next !== PRACTICE_KEY_DEFAULT) {
+        this.practiceSemitones = PRACTICE_KEY_DEFAULT;
+        this.applyPracticeToGraph();
+        return {
+          ok: false,
+          message: "Speed/Key unavailable — practice worklet failed to load.",
+        };
+      }
+    }
+    this.applyPracticeToGraph();
+    return { ok: true };
+  }
+
+  async resetPractice(): Promise<{ ok: boolean; message?: string }> {
+    const rate = await this.setPracticeRate(PRACTICE_RATE_DEFAULT);
+    const key = await this.setPracticeSemitones(PRACTICE_KEY_DEFAULT);
+    if (!rate.ok) return rate;
+    if (!key.ok) return key;
+    return { ok: true };
   }
 
   private ensureOutputElement(): void {
@@ -347,6 +509,8 @@ class StemMixerEngine {
       }
     }
     this.gains.clear();
+    this.teardownSoundTouch();
+    this.soundTouchFailed = false;
     this.masterGain = null;
     this.limiter = null;
     this.streamDest = null;
@@ -400,6 +564,7 @@ class StemMixerEngine {
       if (this.playing && this.ctx) this.offset = this.currentTime();
       if (this.ctx?.state === "closed") this.rebuildGraphKeepingBuffers();
       await this.ensureContext();
+      await this.ensureSoundTouch();
       if (!this.ctx || (this.ctx.state as string) !== "running") return;
       await this.startStreamOutput();
       if (this.playing && this.sources.size > 0) return;
@@ -527,6 +692,7 @@ class StemMixerEngine {
     if (gain && offset < buf.duration) {
       const src = this.ctx.createBufferSource();
       src.buffer = buf;
+      src.playbackRate.value = this.effectivePlaybackRate();
       src.connect(gain);
       src.start(this.ctx.currentTime, offset);
       this.sources.set(id, src);
@@ -572,6 +738,7 @@ class StemMixerEngine {
     this.startedAt = startAt;
     this.offset = offset;
     this.playing = true;
+    const rate = this.effectivePlaybackRate();
 
     for (const id of this.stemIds) {
       const buf = this.buffers.get(id);
@@ -580,6 +747,7 @@ class StemMixerEngine {
       if (offset >= buf.duration) continue;
       const src = this.ctx.createBufferSource();
       src.buffer = buf;
+      src.playbackRate.value = rate;
       src.connect(gain);
       src.start(startAt, offset);
       src.onended = () => {
@@ -587,12 +755,14 @@ class StemMixerEngine {
       };
       this.sources.set(id, src);
     }
+    this.applyPracticeToGraph();
     this.tick();
   }
 
   async play(): Promise<void> {
     this.keepPlaying = true;
     await this.ensureContext();
+    await this.ensureSoundTouch();
     // After sleep, playing may stay true with dead sources — force restart.
     if (this.playing) {
       const healthy =
@@ -801,8 +971,8 @@ type VideoLayout = {
 };
 
 function videoSnap(value: unknown): VideoSnap {
-  if (value === "right" || value === "above" || value === "below") return value;
-  return "left";
+  if (value === "left" || value === "right" || value === "below") return value;
+  return "above";
 }
 
 function dockedVideoLayout(layout: VideoLayout): VideoLayout {
@@ -817,16 +987,27 @@ function dockedVideoLayout(layout: VideoLayout): VideoLayout {
 
 let videoLayout: VideoLayout = {
   placed: false,
-  snap: "left",
+  snap: "above",
   width: 0,
   x: 0,
   y: 0,
 };
 
-function clampVideoWidth(width: number, frameWidth: number): number {
-  const max = Math.max(VIDEO_MIN_WIDTH, frameWidth - VIDEO_STEM_GUTTER);
-  const w = Number.isFinite(width) ? width : VIDEO_MIN_WIDTH;
-  return Math.max(VIDEO_MIN_WIDTH, Math.min(max, w));
+function videoWidthGutter(snap: VideoSnap): number {
+  // Stacked Top/Bottom can use nearly the full frame; side-by-side keeps stem room.
+  return snap === "above" || snap === "below" ? 8 : VIDEO_STEM_GUTTER;
+}
+
+function clampVideoWidth(
+  width: number,
+  frameWidth: number,
+  snap: VideoSnap = videoLayout.snap
+): number {
+  const gutter = videoWidthGutter(videoSnap(snap));
+  const max = Math.max(1, frameWidth - gutter);
+  const min = Math.min(VIDEO_MIN_WIDTH, max);
+  const w = Number.isFinite(width) ? width : min;
+  return Math.max(min, Math.min(max, w));
 }
 
 function clampVideoBox(
@@ -835,9 +1016,10 @@ function clampVideoBox(
   width: number,
   frameWidth: number,
   frameHeight: number,
-  boxHeight: number
+  boxHeight: number,
+  snap: VideoSnap = videoLayout.snap
 ): { x: number; y: number; width: number } {
-  const w = clampVideoWidth(width, frameWidth);
+  const w = clampVideoWidth(width, frameWidth, snap);
   const h =
     Number.isFinite(boxHeight) && boxHeight > 0 ? boxHeight : (w * 9) / 16;
   const maxX = Math.max(0, frameWidth - w);
@@ -1529,7 +1711,9 @@ function updateMediaSessionPosition(): void {
   try {
     ms.setPositionState({
       duration: dur,
-      playbackRate: 1,
+      playbackRate: engine.isPracticeAvailable()
+        ? engine.getPracticeSettings().rate
+        : 1,
       position: Math.min(dur, Math.max(0, engine.currentTime())),
     });
   } catch {
@@ -1742,6 +1926,24 @@ function updateSnapChrome(): void {
   });
 }
 
+function syncStackedStemWidth(snap: VideoSnap, placed: boolean): void {
+  const stemsWrap = document.querySelector<HTMLElement>(".mixer-stems-wrap");
+  const stage = document.querySelector(".mixer-stage");
+  if (!stemsWrap) return;
+  const stacked = !placed && (snap === "above" || snap === "below");
+  const sized = stacked && videoLayout.width > 0;
+  if (stage instanceof HTMLElement) {
+    stage.classList.toggle("is-video-sized", sized);
+  }
+  if (sized) {
+    stemsWrap.style.width = `${videoLayout.width}px`;
+    stemsWrap.style.maxWidth = "100%";
+  } else {
+    stemsWrap.style.width = "";
+    stemsWrap.style.maxWidth = "";
+  }
+}
+
 function applyVideoLayout(): void {
   const wrap = document.getElementById("mixer-video-wrap");
   const frame = mixerFrame();
@@ -1754,9 +1956,9 @@ function applyVideoLayout(): void {
   const frameRect = frame.getBoundingClientRect();
   const frameW = frameRect.width || frame.clientWidth;
   const frameH = frameRect.height || frame.clientHeight;
-  const measurable = frameW >= VIDEO_MIN_WIDTH + VIDEO_STEM_GUTTER && frameH > 0;
-  if (videoLayout.width > 0 && measurable) {
-    videoLayout.width = clampVideoWidth(videoLayout.width, frameW);
+  // Always reclamp when we have a measured frame so window shrink/grow fits.
+  if (videoLayout.width > 0 && frameW > 0) {
+    videoLayout.width = clampVideoWidth(videoLayout.width, frameW, snap);
   }
   wrap.classList.toggle("is-sized", videoLayout.width > 0);
   wrap.classList.toggle("is-placed", videoLayout.placed);
@@ -1764,15 +1966,18 @@ function applyVideoLayout(): void {
     wrap.style.left = "";
     wrap.style.top = "";
     wrap.style.width = videoLayout.width > 0 ? `${videoLayout.width}px` : "";
+    syncStackedStemWidth(snap, false);
     updateSnapChrome();
     scheduleFrameHeight();
     return;
   }
   wrap.style.width = `${videoLayout.width}px`;
-  if (!measurable) {
+  syncStackedStemWidth(snap, true);
+  if (!(frameW > 0 && frameH > 0)) {
     wrap.style.left = `${videoLayout.x}px`;
     wrap.style.top = `${videoLayout.y}px`;
     updateSnapChrome();
+    scheduleFrameHeight();
     return;
   }
   const boxH = wrap.offsetHeight || (videoLayout.width * 9) / 16;
@@ -1782,7 +1987,8 @@ function applyVideoLayout(): void {
     videoLayout.width,
     frameW,
     frameH,
-    boxH
+    boxH,
+    snap
   );
   videoLayout.x = clamped.x;
   videoLayout.y = clamped.y;
@@ -1791,6 +1997,36 @@ function applyVideoLayout(): void {
   wrap.style.left = `${clamped.x}px`;
   wrap.style.top = `${clamped.y}px`;
   updateSnapChrome();
+  scheduleFrameHeight();
+}
+
+let layoutResizeObserver: ResizeObserver | null = null;
+let layoutResizeSaveTimer: number | null = null;
+let layoutResizeListening = false;
+
+function onMixerFrameResized(): void {
+  applyVideoLayout();
+  if (layoutResizeSaveTimer !== null) window.clearTimeout(layoutResizeSaveTimer);
+  layoutResizeSaveTimer = window.setTimeout(() => {
+    layoutResizeSaveTimer = null;
+    saveVideoLayout();
+  }, 160);
+}
+
+function bindLayoutResizeObserver(): void {
+  layoutResizeObserver?.disconnect();
+  layoutResizeObserver = null;
+  const frame = mixerFrame();
+  if (frame && typeof ResizeObserver !== "undefined") {
+    layoutResizeObserver = new ResizeObserver(() => {
+      onMixerFrameResized();
+    });
+    layoutResizeObserver.observe(frame);
+  }
+  if (!layoutResizeListening) {
+    layoutResizeListening = true;
+    window.addEventListener("resize", onMixerFrameResized);
+  }
 }
 
 function trackVideoPointer(
@@ -1846,7 +2082,8 @@ function bindVideoFrameGestures(): void {
       const frameRect = frame.getBoundingClientRect();
       videoLayout.width = clampVideoWidth(
         startW + (ev.clientX - startX),
-        frameRect.width || frame.clientWidth
+        frameRect.width || frame.clientWidth,
+        videoLayout.snap
       );
       applyVideoLayout();
     });
@@ -1917,13 +2154,29 @@ function renderUI(theme?: Theme): void {
             min="${DB_MIN}" max="${DB_MAX}" step="0.5" value="${state.masterVolumeDb}" />
           <span id="master-vol-val" class="stem-db">${state.masterVolumeDb.toFixed(1)}</span>
         </label>
+        <div class="mixer-practice" role="group" aria-label="Practice">
+          <div class="practice-row">
+            <span class="practice-label" id="practice-speed-label">Speed 1.00×</span>
+            <button type="button" class="ghost practice-nudge" id="btn-speed-down" aria-label="Slower">−</button>
+            <input type="range" id="practice-speed" min="0.5" max="1.5" step="0.05" value="1" />
+            <button type="button" class="ghost practice-nudge" id="btn-speed-up" aria-label="Faster">+</button>
+          </div>
+          <div class="practice-row">
+            <span class="practice-label" id="practice-key-label">Key 0</span>
+            <button type="button" class="ghost practice-nudge" id="btn-key-down" aria-label="Lower key">−</button>
+            <input type="range" id="practice-key" min="-6" max="6" step="1" value="0" />
+            <button type="button" class="ghost practice-nudge" id="btn-key-up" aria-label="Raise key">+</button>
+          </div>
+          <button type="button" class="ghost" id="btn-practice-reset">Reset practice</button>
+          <p class="practice-status" id="practice-status" hidden></p>
+        </div>
       </div>
       <div class="mixer-master">
-        <div class="mixer-presets">
-          <button type="button" class="ghost" data-preset="all">All</button>
-          <button type="button" class="ghost" data-preset="karaoke">Karaoke</button>
-          <button type="button" class="ghost" data-preset="acapella">Acapella</button>
-          <button type="button" class="ghost" data-preset="drumsBass">Drums + Bass</button>
+        <div class="mixer-presets" role="group" aria-label="Mix presets">
+          <button type="button" class="preset-chip" data-preset="all">All</button>
+          <button type="button" class="preset-chip" data-preset="karaoke">Karaoke</button>
+          <button type="button" class="preset-chip" data-preset="acapella">Acapella</button>
+          <button type="button" class="preset-chip" data-preset="drumsBass">Drums + Bass</button>
         </div>
         <button type="button" class="ghost" id="btn-muteall">Mute all</button>
         <button type="button" class="ghost" id="btn-reset">Reset mix</button>
@@ -1933,13 +2186,18 @@ function renderUI(theme?: Theme): void {
       <div class="mixer-stage">
         <div class="mixer-video-wrap" id="mixer-video-wrap" hidden>
           <div class="mixer-video-toolbar">
-            <button type="button" class="ghost mixer-video-drag" id="btn-drag-video" aria-label="Move video">Move</button>
-            <button type="button" class="ghost" id="btn-dock-video" hidden>Dock</button>
-            <button type="button" class="ghost" data-snap="left" aria-pressed="true">Left</button>
-            <button type="button" class="ghost" data-snap="right" aria-pressed="false">Right</button>
-            <button type="button" class="ghost" data-snap="above" aria-pressed="false">Top</button>
-            <button type="button" class="ghost" data-snap="below" aria-pressed="false">Bottom</button>
-            <button type="button" class="ghost" id="btn-hide-video">Hide video</button>
+            <div class="video-toolbar-group" role="group" aria-label="Place video">
+              <button type="button" class="video-toolbar-btn mixer-video-drag" id="btn-drag-video" aria-label="Move video">Move</button>
+              <button type="button" class="video-toolbar-btn" id="btn-dock-video" hidden>Dock</button>
+              <button type="button" class="video-toolbar-btn" id="btn-hide-video">Hide video</button>
+            </div>
+            <span class="video-toolbar-divider" aria-hidden="true"></span>
+            <div class="video-toolbar-group" role="group" aria-label="Video position">
+              <button type="button" class="video-toolbar-btn video-snap-btn" data-snap="above" aria-pressed="true">Top</button>
+              <button type="button" class="video-toolbar-btn video-snap-btn" data-snap="below" aria-pressed="false">Bottom</button>
+              <button type="button" class="video-toolbar-btn video-snap-btn" data-snap="left" aria-pressed="false">Left</button>
+              <button type="button" class="video-toolbar-btn video-snap-btn" data-snap="right" aria-pressed="false">Right</button>
+            </div>
           </div>
           <div class="mixer-video" id="yt-player-slot"></div>
           <div class="mixer-video-resize" id="btn-resize-video" role="separator" aria-label="Resize video"></div>
@@ -2158,6 +2416,8 @@ function renderUI(theme?: Theme): void {
     reportState(true);
   };
 
+  bindPracticeControls();
+
   stemsEl.querySelectorAll<HTMLInputElement>(".vol-slider").forEach((el) => {
     el.oninput = () => {
       const id = el.dataset.id!;
@@ -2237,6 +2497,7 @@ function renderUI(theme?: Theme): void {
 
   updateTrackTitleDisplay();
   applyVideoLayout();
+  bindLayoutResizeObserver();
   mountPicture();
   scheduleFrameHeight();
 }
@@ -2251,6 +2512,94 @@ function updateTrackTitleDisplay(): void {
     el.textContent = "";
     el.style.display = "none";
   }
+}
+
+function showPracticeStatus(message: string | null): void {
+  const el = document.getElementById("practice-status");
+  if (!el) return;
+  if (message) {
+    el.hidden = false;
+    el.textContent = message;
+  } else {
+    el.hidden = true;
+    el.textContent = "";
+  }
+}
+
+function syncPracticeChrome(settings: PracticeSettings): void {
+  const speed = document.getElementById("practice-speed") as HTMLInputElement | null;
+  const key = document.getElementById("practice-key") as HTMLInputElement | null;
+  const speedLabel = document.getElementById("practice-speed-label");
+  const keyLabel = document.getElementById("practice-key-label");
+  if (speed) speed.value = String(settings.rate);
+  if (key) key.value = String(settings.semitones);
+  if (speedLabel) speedLabel.textContent = formatPracticeSpeedLabel(settings.rate);
+  if (keyLabel) keyLabel.textContent = formatPracticeKeyLabel(settings.semitones);
+}
+
+function bindPracticeControls(): void {
+  const speed = document.getElementById("practice-speed") as HTMLInputElement | null;
+  const key = document.getElementById("practice-key") as HTMLInputElement | null;
+  if (!speed || !key) return;
+
+  const persisted = loadPracticeSettings();
+  syncPracticeChrome(persisted);
+  void engine.setPracticeRate(persisted.rate).then((r) => {
+    if (!r.ok && r.message) showPracticeStatus(r.message);
+  });
+  void engine.setPracticeSemitones(persisted.semitones).then((r) => {
+    if (!r.ok && r.message) showPracticeStatus(r.message);
+    syncPracticeChrome(engine.getPracticeSettings());
+  });
+
+  const persist = () => {
+    const settings = engine.getPracticeSettings();
+    savePracticeSettings(settings);
+    syncPracticeChrome(settings);
+  };
+
+  const applyRate = (raw: number) => {
+    const next = clampPracticeRate(raw);
+    void engine.setPracticeRate(next).then((r) => {
+      if (!r.ok && r.message) showPracticeStatus(r.message);
+      else showPracticeStatus(null);
+      persist();
+    });
+  };
+  const applyKey = (raw: number) => {
+    const next = clampPracticeSemitones(raw);
+    void engine.setPracticeSemitones(next).then((r) => {
+      if (!r.ok && r.message) showPracticeStatus(r.message);
+      else showPracticeStatus(null);
+      persist();
+    });
+  };
+
+  speed.oninput = () => applyRate(Number(speed.value));
+  key.oninput = () => applyKey(Number(key.value));
+  document.getElementById("btn-speed-down")!.onclick = () =>
+    applyRate(Number(speed.value) - PRACTICE_RATE_STEP);
+  document.getElementById("btn-speed-up")!.onclick = () =>
+    applyRate(Number(speed.value) + PRACTICE_RATE_STEP);
+  document.getElementById("btn-key-down")!.onclick = () =>
+    applyKey(Number(key.value) - 1);
+  document.getElementById("btn-key-up")!.onclick = () =>
+    applyKey(Number(key.value) + 1);
+  document.getElementById("btn-practice-reset")!.onclick = () => {
+    void engine.resetPractice().then((r) => {
+      if (!r.ok && r.message) showPracticeStatus(r.message);
+      else showPracticeStatus(null);
+      persist();
+    });
+  };
+  const practiceGroup = document.querySelector(".mixer-practice");
+  practiceGroup?.addEventListener("dblclick", (ev) => {
+    if ((ev.target as HTMLElement).closest("button, input")) return;
+    void engine.resetPractice().then(() => {
+      showPracticeStatus(null);
+      persist();
+    });
+  });
 }
 
 function allMuted(): boolean {

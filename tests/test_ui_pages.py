@@ -162,6 +162,39 @@ def test_save_youtube_audio_skips_download_when_wav_exists(youtube_audio_page, t
     assert saved.read_bytes() == b"ok"
 
 
+def test_youtube_search_page_helpers() -> None:
+    from audio_to_tab.ingest import YouTubeSearchHit
+    from ui.youtube_search import (
+        PAGE_SIZE,
+        has_next_page,
+        hits_as_dicts,
+        meta_line,
+        normalize_page,
+        page_offset,
+        result_range_caption,
+    )
+
+    assert PAGE_SIZE == 10
+    assert page_offset(1) == 0
+    assert page_offset(2) == 10
+    assert normalize_page(0) == 1
+    assert normalize_page("3") == 3
+    assert has_next_page(10)
+    assert not has_next_page(9)
+    assert result_range_caption(2, 10) == "Page 2 · results 11–20"
+    assert result_range_caption(3, 0) == "Page 3 · no results"
+    hit = YouTubeSearchHit(
+        video_id="abc",
+        title="T",
+        channel="C",
+        duration_sec=90,
+        url="https://www.youtube.com/watch?v=abc",
+        thumbnail_url="https://img.example/t.jpg",
+    )
+    assert hits_as_dicts([hit])[0]["video_id"] == "abc"
+    assert meta_line({"channel": "C"}, duration_label="1:30") == "C · 1:30"
+
+
 def test_save_youtube_audio_convert_failure_keeps_wav(youtube_audio_page, tmp_path) -> None:
     wav = tmp_path / "ready.wav"
     wav.write_bytes(b"staged")

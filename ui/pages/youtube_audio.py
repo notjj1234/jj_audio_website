@@ -16,6 +16,15 @@ from ui.desktop_export import (
     open_path_in_os,
 )
 from ui.isolate_state import is_pro_mode
+from ui.youtube_search import (
+    PAGE_SIZE as YT_SEARCH_PAGE_SIZE,
+    has_next_page,
+    hits_as_dicts,
+    meta_line,
+    normalize_page,
+    page_offset,
+    result_range_caption,
+)
 
 ensure_src_path()
 
@@ -41,6 +50,7 @@ YT_AUDIO_SEARCH_OPEN_KEY = "yt_audio_search_open"
 YT_AUDIO_SEARCH_HITS_KEY = "yt_audio_search_hits"
 YT_AUDIO_SEARCH_ERROR_KEY = "yt_audio_search_error"
 YT_AUDIO_SEARCH_QUERY_KEY = "yt_audio_search_query"
+YT_AUDIO_SEARCH_PAGE_KEY = "yt_audio_search_page"
 YT_AUDIO_PICKER_NOTE_KEY = "yt_audio_picker_note"
 YT_AUDIO_ERROR_KEY = "yt_audio_error"
 YT_AUDIO_SUCCESS_KEY = "yt_audio_success"
@@ -107,6 +117,41 @@ def _close_search_dialog() -> None:
     st.session_state[YT_AUDIO_SEARCH_OPEN_KEY] = False
 
 
+def _clear_search_results() -> None:
+    st.session_state.pop(YT_AUDIO_SEARCH_HITS_KEY, None)
+    st.session_state.pop(YT_AUDIO_SEARCH_ERROR_KEY, None)
+    st.session_state[YT_AUDIO_SEARCH_PAGE_KEY] = 1
+
+
+def _run_search(query: str, *, page: int) -> None:
+    page = normalize_page(page)
+    st.session_state[YT_AUDIO_SEARCH_PAGE_KEY] = page
+    try:
+        with st.spinner("Searching YouTube…"):
+            hits = search_youtube_videos(
+                query,
+                max_results=YT_SEARCH_PAGE_SIZE,
+                offset=page_offset(page),
+            )
+        st.session_state[YT_AUDIO_SEARCH_HITS_KEY] = hits_as_dicts(hits)
+        st.session_state.pop(YT_AUDIO_SEARCH_ERROR_KEY, None)
+        if not hits:
+            st.session_state[YT_AUDIO_SEARCH_ERROR_KEY] = (
+                "No public videos matched that search."
+                if page <= 1
+                else "No more public videos for this search."
+            )
+    except ValueError as exc:
+        st.session_state[YT_AUDIO_SEARCH_HITS_KEY] = []
+        st.session_state[YT_AUDIO_SEARCH_ERROR_KEY] = str(exc)
+    except YouTubeSearchError as exc:
+        st.session_state[YT_AUDIO_SEARCH_HITS_KEY] = []
+        st.session_state[YT_AUDIO_SEARCH_ERROR_KEY] = str(exc)
+    except Exception as exc:
+        st.session_state[YT_AUDIO_SEARCH_HITS_KEY] = []
+        st.session_state[YT_AUDIO_SEARCH_ERROR_KEY] = f"YouTube search failed: {exc}"
+
+
 def _download_wav(url: str, *, title: str) -> tuple[Path | None, str | None]:
     """Download into a new staging dir. Returns (path, error)."""
     prev_work = st.session_state.get(YT_AUDIO_WORK_DIR_KEY)
@@ -150,72 +195,66 @@ def _youtube_search_dialog() -> None:
         "to a folder."
     )
     with st.form("yt_audio_search_form", clear_on_submit=False, border=False):
-        search_q = st.text_input(
-            "Song or artist",
-            key=YT_AUDIO_SEARCH_QUERY_KEY,
-            placeholder="e.g. artist, song title",
-        )
-        do_search = st.form_submit_button("Search", width="stretch")
-    action_cols = st.columns([1, 1])
-    with action_cols[0]:
-        if st.button("Clear results", key="yt_audio_search_clear", width="stretch"):
-            st.session_state.pop(YT_AUDIO_SEARCH_HITS_KEY, None)
-            st.session_state.pop(YT_AUDIO_SEARCH_ERROR_KEY, None)
+        search_cols = st.columns([4, 1], vertical_alignment="bottom")
+        with search_cols[0]:
+            search_q = st.text_input(
+                "Song or artist",
+                key=YT_AUDIO_SEARCH_QUERY_KEY,
+                placeholder="e.g. artist, song title",
+            )
+        with search_cols[1]:
+            do_search = st.form_submit_button(
+                "Search",
+                type="primary",
+                width="stretch",
+            )
+    secondary = st.columns([1, 1, 4], vertical_alignment="center")
+    with secondary[0]:
+        if st.button(
+            "Clear",
+            key="yt_audio_search_clear",
+            type="secondary",
+            width="stretch",
+        ):
+            _clear_search_results()
             st.rerun()
-    with action_cols[1]:
-        if st.button("Close", key="yt_audio_search_close", width="stretch"):
+    with secondary[1]:
+        if st.button(
+            "Close",
+            key="yt_audio_search_close",
+            type="secondary",
+            width="stretch",
+        ):
             _close_search_dialog()
             st.rerun()
     if do_search:
-        try:
-            with st.spinner("Searching YouTube…"):
-                hits = search_youtube_videos(search_q, max_results=5)
-            st.session_state[YT_AUDIO_SEARCH_HITS_KEY] = [
-                {
-                    "video_id": h.video_id,
-                    "title": h.title,
-                    "channel": h.channel,
-                    "duration_sec": h.duration_sec,
-                    "url": h.url,
-                    "thumbnail_url": h.thumbnail_url,
-                }
-                for h in hits
-            ]
-            st.session_state.pop(YT_AUDIO_SEARCH_ERROR_KEY, None)
-            if not hits:
-                st.session_state[YT_AUDIO_SEARCH_ERROR_KEY] = (
-                    "No public videos matched that search."
-                )
-        except ValueError as exc:
-            st.session_state[YT_AUDIO_SEARCH_HITS_KEY] = []
-            st.session_state[YT_AUDIO_SEARCH_ERROR_KEY] = str(exc)
-        except YouTubeSearchError as exc:
-            st.session_state[YT_AUDIO_SEARCH_HITS_KEY] = []
-            st.session_state[YT_AUDIO_SEARCH_ERROR_KEY] = str(exc)
-        except Exception as exc:
-            st.session_state[YT_AUDIO_SEARCH_HITS_KEY] = []
-            st.session_state[YT_AUDIO_SEARCH_ERROR_KEY] = f"YouTube search failed: {exc}"
+        _run_search(search_q, page=1)
     search_error = st.session_state.get(YT_AUDIO_SEARCH_ERROR_KEY)
     if search_error:
         st.warning(str(search_error))
+    downloading_title = st.session_state.get(YT_AUDIO_DOWNLOADING_KEY)
+    if downloading_title:
+        st.info(f"Downloading **{downloading_title}**…")
+    page = normalize_page(st.session_state.get(YT_AUDIO_SEARCH_PAGE_KEY, 1))
     hits_state = st.session_state.get(YT_AUDIO_SEARCH_HITS_KEY) or []
-    if isinstance(hits_state, list) and hits_state:
-        st.caption(f"{len(hits_state)} result(s)")
+    if not isinstance(hits_state, list):
+        hits_state = []
+    busy = bool(downloading_title)
+    if hits_state:
+        st.caption(result_range_caption(page, len(hits_state)))
         for hit in hits_state:
             if not isinstance(hit, dict):
                 continue
             vid = str(hit.get("video_id") or "")
             title = str(hit.get("title") or "Untitled")
-            channel = str(hit.get("channel") or "")
             dur = format_youtube_duration(hit.get("duration_sec"))
             url = str(hit.get("url") or "").strip()
             thumb = str(hit.get("thumbnail_url") or "").strip()
-            meta_bits = [b for b in (channel, dur) if b]
-            meta = " · ".join(meta_bits)
-            row = st.columns([1, 3, 1], vertical_alignment="center")
+            meta = meta_line(hit, duration_label=dur)
+            row = st.columns([1.5, 3.2, 1.3], vertical_alignment="center")
             with row[0]:
                 if thumb:
-                    st.image(thumb, width=120)
+                    st.image(thumb, width=168)
             with row[1]:
                 st.markdown(f"**{title}**")
                 if meta:
@@ -223,30 +262,35 @@ def _youtube_search_dialog() -> None:
             with row[2]:
                 if st.button(
                     "Use",
-                    key=f"yt_audio_pick_{vid}",
-                    disabled=not url,
+                    key=f"yt_audio_pick_p{page}_{vid}",
+                    type="primary",
+                    disabled=not url or busy,
                     width="stretch",
                     help="Download this track and prepare to save it to a folder.",
                 ):
                     _queue_url(url)
                     st.session_state.pop(YT_AUDIO_SEARCH_ERROR_KEY, None)
                     # Download to staging so main page can save directly
-                    title = hit.get("title", "YouTube audio")
-                    with st.status(f"Downloading \"{title}\"…", expanded=True) as status:
+                    with st.status(f'Downloading "{title}"…', expanded=True) as status:
                         st.write("Fetching audio from YouTube. This can take a minute.")
                         path, err = _download_wav(url, title=title)
                         if err:
                             status.update(label="Download failed", state="error")
                             st.session_state[YT_AUDIO_SEARCH_ERROR_KEY] = err
                         else:
-                            status.update(label=f"Ready: {Path(path).stem}", state="complete")
-                            st.session_state[YT_AUDIO_FLASH_KEY] = f"Downloaded **{title}**. Click **Save to folder**."
+                            status.update(
+                                label=f"Ready: {Path(path).stem}",
+                                state="complete",
+                            )
+                            st.session_state[YT_AUDIO_FLASH_KEY] = (
+                                f"Downloaded **{title}**. Click **Save to folder**."
+                            )
                     _close_search_dialog()
                     st.rerun()
             with st.expander(
                 "Preview",
                 expanded=False,
-                key=f"yt_audio_preview_{vid}",
+                key=f"yt_audio_preview_p{page}_{vid}",
             ):
                 if url:
                     if thumb:
@@ -259,7 +303,36 @@ def _youtube_search_dialog() -> None:
                     st.markdown(f"[Open on YouTube]({url})")
                 else:
                     st.caption("No preview URL for this result.")
-
+    if hits_state or page > 1:
+        nav = st.columns([1, 2, 1], vertical_alignment="center")
+        with nav[0]:
+            if st.button(
+                "Previous",
+                key="yt_audio_search_prev",
+                type="secondary",
+                disabled=page <= 1 or busy,
+                width="stretch",
+            ):
+                _run_search(
+                    str(st.session_state.get(YT_AUDIO_SEARCH_QUERY_KEY) or ""),
+                    page=page - 1,
+                )
+                st.rerun()
+        with nav[1]:
+            st.caption(result_range_caption(page, len(hits_state)))
+        with nav[2]:
+            if st.button(
+                "Next",
+                key="yt_audio_search_next",
+                type="secondary",
+                disabled=not has_next_page(len(hits_state)) or busy,
+                width="stretch",
+            ):
+                _run_search(
+                    str(st.session_state.get(YT_AUDIO_SEARCH_QUERY_KEY) or ""),
+                    page=page + 1,
+                )
+                st.rerun()
 
 def _run_save_flow(url: str, fmt: str, *, already_staged: Path | None) -> None:
     """Download if needed, then native folder picker, then convert."""
@@ -336,8 +409,9 @@ def main() -> None:
         )
     with url_row[1]:
         if st.button(
-            "Search songs",
+            "Search",
             key="yt_audio_search_open_btn",
+            type="secondary",
             width="stretch",
             help="Open a search panel to find a public video by song or artist." if pro else None,
         ):

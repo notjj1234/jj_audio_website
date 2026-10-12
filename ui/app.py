@@ -386,16 +386,41 @@ st.html(
 
   /* Refresh + Queue sit on the mix-tabs row (visible sticky band).
      The open Queue card is position:fixed; its in-flow wrapper must not
-     stretch this row, or Refresh drops below Queue while a job is open. */
+     stretch this row, or Refresh drops below Queue while a job is open.
+     Action columns stay content-sized so "Refresh" / "Queue (N)" never
+     letter-wrap when the window shrinks; the tab strip flexes instead. */
   [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) {
     align-items: center !important;
     overflow: visible !important;
+    flex-wrap: nowrap !important;
+    gap: 0.4rem !important;
   }
   [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) [data-testid="stColumn"],
   [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) [data-testid="column"] {
     display: flex !important;
     align-items: center !important;
     overflow: visible !important;
+  }
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh)
+    [data-testid="stColumn"]:has(.st-key-isolate_mix_tabs_strip),
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh)
+    [data-testid="column"]:has(.st-key-isolate_mix_tabs_strip) {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    width: auto !important;
+  }
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh)
+    [data-testid="stColumn"]:has(.st-key-isolate_queue_toggle_slot),
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh)
+    [data-testid="column"]:has(.st-key-isolate_queue_toggle_slot),
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh)
+    [data-testid="stColumn"]:has(.st-key-isolate_refresh),
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh)
+    [data-testid="column"]:has(.st-key-isolate_refresh) {
+    flex: 0 0 auto !important;
+    width: auto !important;
+    min-width: 6.25rem !important;
+    max-width: none !important;
   }
   [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) [data-testid="stLayoutWrapper"],
   [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) [data-testid="stElementContainer"],
@@ -426,7 +451,8 @@ st.html(
     display: flex;
     align-items: center;
     justify-content: flex-end;
-    width: 100%;
+    width: auto !important;
+    min-width: 6.25rem !important;
     margin-top: 0 !important;
     margin-bottom: 0 !important;
     padding-top: 0 !important;
@@ -437,8 +463,42 @@ st.html(
     box-sizing: border-box !important;
     height: 2.5rem !important;
     min-height: 2.5rem !important;
-    width: 100% !important;
+    width: auto !important;
+    min-width: 6.25rem !important;
+    max-width: none !important;
     margin: 0 !important;
+    padding-left: 0.75rem !important;
+    padding-right: 0.75rem !important;
+    white-space: nowrap !important;
+  }
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) .st-key-isolate_refresh button p,
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) .st-key-isolate_queue_toggle button p,
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) .st-key-isolate_refresh button div,
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_refresh) .st-key-isolate_queue_toggle button div {
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: clip !important;
+  }
+
+  /* URL + Search rows (Isolation / YouTube to MP3): keep Search on one line. */
+  [data-testid="stHorizontalBlock"]:has(.st-key-isolate_youtube_search_open_btn)
+    [data-testid="stColumn"]:has(.st-key-isolate_youtube_search_open_btn),
+  [data-testid="stHorizontalBlock"]:has(.st-key-yt_audio_search_open_btn)
+    [data-testid="stColumn"]:has(.st-key-yt_audio_search_open_btn) {
+    flex: 0 0 auto !important;
+    width: auto !important;
+    min-width: 5.5rem !important;
+  }
+  .st-key-isolate_youtube_search_open_btn button,
+  .st-key-yt_audio_search_open_btn button,
+  [data-testid="stElementContainer"]:has(.st-key-isolate_youtube_search_open_btn) button,
+  [data-testid="stElementContainer"]:has(.st-key-yt_audio_search_open_btn) button {
+    white-space: nowrap !important;
+    min-width: 5.5rem !important;
+  }
+  .st-key-isolate_youtube_search_open_btn button p,
+  .st-key-yt_audio_search_open_btn button p {
+    white-space: nowrap !important;
   }
 
   /* Isolate Queue: non-modal floating activity panel (not a sidebar / drawer). */

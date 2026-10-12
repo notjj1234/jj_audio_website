@@ -317,16 +317,31 @@ def _thumbnail_url_for_entry(entry: dict, video_id: str) -> str:
     return ""
 
 
-def search_youtube_videos(query: str, *, max_results: int = 5) -> list[YouTubeSearchHit]:
+# yt-dlp ``ytsearchN`` returns the first N matches only. Paging fetches
+# offset+page_size then slices; this caps how deep a search can go.
+_SEARCH_MAX_FETCH = 50
+
+
+def search_youtube_videos(
+    query: str,
+    *,
+    max_results: int = 5,
+    offset: int = 0,
+) -> list[YouTubeSearchHit]:
     """Search public YouTube videos via yt-dlp (no API key).
 
-    Uses ``ytsearchN:query``. Returns watch URLs compatible with
-    ``download_youtube_audio``.
+    Uses ``ytsearchN:query`` where N is ``offset + max_results`` (clamped).
+    Returns the page slice ``[offset:offset+max_results]`` of mapped hits.
+    Watch URLs are compatible with ``download_youtube_audio``.
     """
     q = (query or "").strip()
     if not q:
         raise ValueError("Enter a search query")
-    limit = max(1, min(int(max_results), 10))
+    page_size = max(1, min(int(max_results), _SEARCH_MAX_FETCH))
+    start = max(0, int(offset))
+    if start >= _SEARCH_MAX_FETCH:
+        return []
+    fetch_n = min(_SEARCH_MAX_FETCH, start + page_size)
     import yt_dlp
 
     opts = {
@@ -338,7 +353,7 @@ def search_youtube_videos(query: str, *, max_results: int = 5) -> list[YouTubeSe
     }
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(f"ytsearch{limit}:{q}", download=False)
+            info = ydl.extract_info(f"ytsearch{fetch_n}:{q}", download=False)
     except Exception as exc:
         detail = str(exc).strip() or "unknown error"
         raise YouTubeSearchError(
@@ -382,9 +397,9 @@ def search_youtube_videos(query: str, *, max_results: int = 5) -> list[YouTubeSe
                 thumbnail_url=_thumbnail_url_for_entry(entry, video_id),
             )
         )
-        if len(hits) >= limit:
+        if len(hits) >= fetch_n:
             break
-    return hits
+    return hits[start : start + page_size]
 
 
 def download_youtube_audio(url: str, output_dir: str | Path) -> Path:

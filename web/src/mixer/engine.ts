@@ -1,5 +1,16 @@
 /** Standalone Web Audio stem mixer (ported from Streamlit component). */
 
+// @soundtouchjs/audio-worklet@2.1.1 — MPL-2.0 (not GPL Rubber Band).
+import type { SoundTouchNode } from "@soundtouchjs/audio-worklet";
+import soundTouchProcessorUrl from "@soundtouchjs/audio-worklet/processor?url";
+import {
+  PRACTICE_KEY_DEFAULT,
+  PRACTICE_RATE_DEFAULT,
+  clampPracticeRate,
+  clampPracticeSemitones,
+  type PracticeSettings,
+} from "./practice";
+
 export const DB_MIN = -25;
 export const DB_MAX = 25;
 export const DB_DEFAULT = 0;
@@ -222,6 +233,11 @@ export class StemMixerEngine {
   private sources = new Map<string, AudioBufferSourceNode>();
   private masterGain: GainNode | null = null;
   private limiter: DynamicsCompressorNode | null = null;
+  /** One shared SoundTouch on the master bus — stems stay phase-aligned, lower CPU. */
+  private soundTouch: SoundTouchNode | null = null;
+  private soundTouchFailed = false;
+  private practiceRate = PRACTICE_RATE_DEFAULT;
+  private practiceSemitones = PRACTICE_KEY_DEFAULT;
   private streamDest: MediaStreamAudioDestinationNode | null = null;
   private outputEl: HTMLAudioElement | null = null;
   private stemIds: string[] = [];
@@ -292,7 +308,23 @@ export class StemMixerEngine {
   currentTime(): number {
     if (!this.ctx) return this.offset;
     if (!this.playing) return this.offset;
-    return Math.min(this.duration, this.offset + (this.ctx.currentTime - this.startedAt));
+    const rate = this.effectivePlaybackRate();
+    return Math.min(
+      this.duration,
+      this.offset + (this.ctx.currentTime - this.startedAt) * rate
+    );
+  }
+
+  getPracticeSettings(): PracticeSettings {
+    return { rate: this.practiceRate, semitones: this.practiceSemitones };
+  }
+
+  isPracticeAvailable(): boolean {
+    return this.soundTouch !== null && !this.soundTouchFailed;
+  }
+
+  private effectivePlaybackRate(): number {
+    return this.soundTouch ? this.practiceRate : PRACTICE_RATE_DEFAULT;
   }
 
   async ensureContext(): Promise<AudioContext> {
@@ -301,6 +333,8 @@ export class StemMixerEngine {
     });
     if (next !== this.ctx) {
       this.ctx = next;
+      this.teardownSoundTouch();
+      this.soundTouchFailed = false;
       this.masterGain = null;
       this.limiter = null;
       this.streamDest = null;
@@ -314,7 +348,7 @@ export class StemMixerEngine {
   }
 
   /**
-   * Master gain → limiter → MediaStreamDestination → HTMLAudioElement.
+   * Master gain → [SoundTouch] → limiter → MediaStreamDestination → HTMLAudioElement.
    * Keeps WKWebView/WebView2 from suspending silent Web Audio on blur.
    */
   private ensureMasterBus(): void {
@@ -336,6 +370,131 @@ export class StemMixerEngine {
     } else {
       this.limiter.connect(this.ctx.destination);
     }
+  }
+
+  private teardownSoundTouch(): void {
+    if (this.soundTouch) {
+      try {
+        this.soundTouch.disconnect();
+      } catch {
+        /* */
+      }
+      this.soundTouch = null;
+    }
+  }
+
+  /** Insert one SoundTouch node on the master bus after stem gains. */
+  async ensureSoundTouch(): Promise<boolean> {
+    if (this.soundTouchFailed) return false;
+    if (this.soundTouch) return true;
+    if (!this.ctx) return false;
+    this.ensureMasterBus();
+    if (!this.masterGain || !this.limiter) return false;
+    try {
+      const { SoundTouchNode: ST } = await import("@soundtouchjs/audio-worklet");
+      await ST.register(this.ctx, soundTouchProcessorUrl);
+      const st = new ST({ context: this.ctx });
+      this.masterGain.disconnect();
+      this.masterGain.connect(st);
+      st.connect(this.limiter);
+      this.soundTouch = st;
+      this.applyPracticeToGraph();
+      return true;
+    } catch {
+      this.soundTouchFailed = true;
+      this.practiceRate = PRACTICE_RATE_DEFAULT;
+      this.practiceSemitones = PRACTICE_KEY_DEFAULT;
+      try {
+        this.masterGain.disconnect();
+        this.masterGain.connect(this.limiter);
+      } catch {
+        /* */
+      }
+      return false;
+    }
+  }
+
+  private applyPracticeToGraph(): void {
+    const rate = this.effectivePlaybackRate();
+    const semis = this.soundTouch ? this.practiceSemitones : PRACTICE_KEY_DEFAULT;
+    if (this.soundTouch) {
+      this.soundTouch.playbackRate.value = rate;
+      this.soundTouch.pitch.value = 1;
+      this.soundTouch.pitchSemitones.value = semis;
+    }
+    for (const src of this.sources.values()) {
+      try {
+        src.playbackRate.value = rate;
+      } catch {
+        /* */
+      }
+    }
+  }
+
+  async setPracticeRate(rate: number): Promise<{ ok: boolean; message?: string }> {
+    const next = clampPracticeRate(rate);
+    if (this.soundTouchFailed && next !== PRACTICE_RATE_DEFAULT) {
+      this.practiceRate = PRACTICE_RATE_DEFAULT;
+      this.applyPracticeToGraph();
+      return {
+        ok: false,
+        message: "Speed/Key unavailable — practice worklet failed to load.",
+      };
+    }
+    if (this.playing && this.ctx) {
+      this.offset = this.currentTime();
+      this.startedAt = this.ctx.currentTime;
+    }
+    this.practiceRate = next;
+    if (this.ctx) {
+      const ready = await this.ensureSoundTouch();
+      if (!ready && next !== PRACTICE_RATE_DEFAULT) {
+        this.practiceRate = PRACTICE_RATE_DEFAULT;
+        this.applyPracticeToGraph();
+        return {
+          ok: false,
+          message: "Speed/Key unavailable — practice worklet failed to load.",
+        };
+      }
+    }
+    this.applyPracticeToGraph();
+    return { ok: true };
+  }
+
+  async setPracticeSemitones(
+    semitones: number
+  ): Promise<{ ok: boolean; message?: string }> {
+    const next = clampPracticeSemitones(semitones);
+    if (this.soundTouchFailed && next !== PRACTICE_KEY_DEFAULT) {
+      this.practiceSemitones = PRACTICE_KEY_DEFAULT;
+      this.applyPracticeToGraph();
+      return {
+        ok: false,
+        message: "Speed/Key unavailable — practice worklet failed to load.",
+      };
+    }
+    this.practiceSemitones = next;
+    if (this.ctx) {
+      const ready = await this.ensureSoundTouch();
+      if (!ready && next !== PRACTICE_KEY_DEFAULT) {
+        this.practiceSemitones = PRACTICE_KEY_DEFAULT;
+        this.applyPracticeToGraph();
+        return {
+          ok: false,
+          message: "Speed/Key unavailable — practice worklet failed to load.",
+        };
+      }
+    }
+    this.applyPracticeToGraph();
+    return { ok: true };
+  }
+
+  async resetPractice(): Promise<{ ok: boolean; message?: string }> {
+    const rate = await this.setPracticeRate(PRACTICE_RATE_DEFAULT);
+    const key = await this.setPracticeSemitones(PRACTICE_KEY_DEFAULT);
+    if (!rate.ok) return rate;
+    if (!key.ok) return key;
+    return { ok: true };
   }
 
   private ensureOutputElement(): void {
@@ -445,6 +604,8 @@ export class StemMixerEngine {
       }
     }
     this.gains.clear();
+    this.teardownSoundTouch();
+    this.soundTouchFailed = false;
     this.masterGain = null;
     this.limiter = null;
     this.streamDest = null;
@@ -497,6 +658,7 @@ export class StemMixerEngine {
       if (this.playing && this.ctx) this.offset = this.currentTime();
       if (this.ctx?.state === "closed") this.rebuildGraphKeepingBuffers();
       await this.ensureContext();
+      await this.ensureSoundTouch();
       if (!this.ctx || (this.ctx.state as string) !== "running") return;
       await this.startStreamOutput();
       if (this.playing && this.sources.size > 0) return;
@@ -530,6 +692,8 @@ export class StemMixerEngine {
     // Some browsers need a context to decode — create but don't resume until Play.
     if ((!this.ctx || this.ctx.state === "closed") && (options?.createContext ?? true)) {
       this.ctx = new AudioContext();
+      this.teardownSoundTouch();
+      this.soundTouchFailed = false;
       this.masterGain = null;
       this.limiter = null;
     }
@@ -612,6 +776,7 @@ export class StemMixerEngine {
     this.startedAt = startAt;
     this.offset = offset;
     this.playing = true;
+    const rate = this.effectivePlaybackRate();
 
     for (const id of this.stemIds) {
       const buf = this.buffers.get(id);
@@ -620,16 +785,19 @@ export class StemMixerEngine {
       if (offset >= buf.duration) continue;
       const src = this.ctx.createBufferSource();
       src.buffer = buf;
+      src.playbackRate.value = rate;
       src.connect(gain);
       src.start(startAt, offset);
       this.sources.set(id, src);
     }
+    this.applyPracticeToGraph();
     this.tick();
   }
 
   async play(): Promise<void> {
     this.keepPlaying = true;
     await this.ensureContext();
+    await this.ensureSoundTouch();
     if (this.playing) {
       const healthy = this.ctx?.state === "running" && this.sources.size > 0;
       if (healthy) {
@@ -798,7 +966,7 @@ export class StemMixerEngine {
     try {
       ms.setPositionState({
         duration: this.duration,
-        playbackRate: 1,
+        playbackRate: this.effectivePlaybackRate(),
         position: Math.min(this.duration, Math.max(0, this.currentTime())),
       });
     } catch {

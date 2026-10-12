@@ -110,7 +110,7 @@ def test_mix_tabs_strip_is_sticky_in_app_css():
     assert "_mix_tab_strip_fragment" in chrome
     assert 'key="isolate_refresh"' in chrome
     assert "_queue_header_fragment()" in chrome
-    assert "[5.5, 1.15, 1]" in chrome
+    assert "[6, 1.35, 1.2]" in chrome
     assert 'st.title("Audio Isolation"' not in chrome
     assert main.find('st.title("Audio Isolation"') < main.find('key="isolate_sticky_chrome"')
     assert main.find('st.title("Audio Isolation"') < main.find("_mix_tab_strip_fragment")

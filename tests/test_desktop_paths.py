@@ -1054,7 +1054,8 @@ def test_youtube_audio_page_nav_order_and_freeze_import():
     assert 'title="Tab PDF (demo)"' in nav_block
     assert 'st.title(\n        "YouTube to MP3"' in page
     assert "ui.pages.youtube_audio" in spec
-    assert "Search songs" in page
+    assert '"Search"' in page or "Search" in page
+    assert "yt_audio_search_open_btn" in page
     assert "Save to folder" in page
     assert "Interface Lite/Pro" not in page
     assert "Alt+Tab" in page

@@ -195,6 +195,7 @@ def test_mixer_playback_presets_and_youtube_frame_are_wired():
     assert 'data-preset="acapella"' in text
     assert 'data-preset="drumsBass"' in text
     assert "Drums + Bass" in text
+    assert 'class="preset-chip"' in text
     assert "presetSoloMap" in text
     assert 'id !== "vocals" && id !== "metronome"' in text
     assert "function videoNeedsSeek" in text
@@ -272,16 +273,28 @@ def test_mixer_video_size_and_position_stay_inside_frame():
     text = _mixer_main_ts()
     assert "function clampVideoWidth" in text
     assert "function clampVideoBox" in text
+    assert "function videoWidthGutter" in text
+    assert "function bindLayoutResizeObserver" in text
+    assert "function onMixerFrameResized" in text
+    assert "ResizeObserver" in text
     assert 'id="btn-drag-video"' in text
     assert 'id="btn-resize-video"' in text
     assert "is-placed" in text
     assert "VIDEO_MIN_WIDTH = 160" in text
     assert "VIDEO_STEM_GUTTER = 160" in text
     assert "videoLayout" in text
+    assert "bindLayoutResizeObserver()" in text
+    assert "onMixerFrameResized" in text
+    apply = text[text.find("function applyVideoLayout") : text.find("function trackVideoPointer")]
+    assert "frameW > 0" in apply
+    assert "onMixerFrameResized" in text
 
-    def clamp_video_width(width: float, frame_width: float) -> float:
-        min_w = 160.0
-        max_w = max(min_w, frame_width - 160.0)
+    def clamp_video_width(
+        width: float, frame_width: float, snap: str = "left"
+    ) -> float:
+        gutter = 8.0 if snap in {"above", "below"} else 160.0
+        max_w = max(1.0, frame_width - gutter)
+        min_w = min(160.0, max_w)
         w = width if width == width else min_w  # NaN check
         return max(min_w, min(max_w, w))
 
@@ -292,8 +305,9 @@ def test_mixer_video_size_and_position_stay_inside_frame():
         frame_width: float,
         frame_height: float,
         box_height: float,
+        snap: str = "left",
     ) -> tuple[float, float, float]:
-        w = clamp_video_width(width, frame_width)
+        w = clamp_video_width(width, frame_width, snap)
         h = box_height if box_height > 0 else w * 9 / 16
         max_x = max(0.0, frame_width - w)
         max_y = max(0.0, frame_height - h)
@@ -306,6 +320,8 @@ def test_mixer_video_size_and_position_stay_inside_frame():
     assert clamp_video_width(80, 800) == 160
     assert clamp_video_width(900, 800) == 640
     assert clamp_video_width(320, 800) == 320
+    assert clamp_video_width(900, 800, "above") == 792
+    assert clamp_video_width(500, 300, "above") == 292
     x, y, w = clamp_video_box(700, 500, 200, 800, 400, 112.5)
     assert w == 200
     assert x == 600
@@ -326,6 +342,7 @@ def test_mixer_video_dock_and_snaps():
     assert ">Bottom</button>" in text
     assert ">Above</button>" not in text
     assert ">Below</button>" not in text
+    assert 'snap: "above"' in text
     assert "function dockedVideoLayout" in text
     assert "function videoSnap" in text
     mount_yt = text[text.find("function mountYoutubePlayer") : text.find("function updateYoutubeChrome")]
@@ -335,20 +352,39 @@ def test_mixer_video_dock_and_snaps():
     dock = text[text.find("function dockedVideoLayout") : text.find("let videoLayout")]
     assert "placed: false" in dock
     snap = text[text.find("function videoSnap") : text.find("function dockedVideoLayout")]
-    assert 'return "left"' in snap
+    assert 'return "above"' in snap
+    assert 'value === "left"' in snap
     handler = text[text.find('id="btn-dock-video"') :]
     assert "dockedVideoLayout(videoLayout)" in handler
     assert "videoLayout.placed = false" in handler
     layout = text[text.find("function applyVideoLayout") : text.find("function trackVideoPointer")]
+    assert "function syncStackedStemWidth" in text
+    assert "syncStackedStemWidth(" in layout
     docked_at = layout.find("if (!videoLayout.placed)")
     docked = layout[docked_at : layout.find("return;", docked_at)]
     assert "scheduleFrameHeight()" in docked
+    assert "syncStackedStemWidth(snap, false)" in docked
     render = text[text.find("function renderUI") : text.find("function updateTrackTitleDisplay")]
     assert render.rfind("applyVideoLayout()") < render.rfind("scheduleFrameHeight()")
     assert render.rfind("mountPicture()") < render.rfind("scheduleFrameHeight()")
+    toolbar = render[render.find("mixer-video-toolbar") : render.find('id="yt-player-slot"')]
+    assert 'aria-label="Place video"' in toolbar
+    assert 'aria-label="Video position"' in toolbar
+    assert "video-toolbar-divider" in toolbar
+    top_at = toolbar.find('data-snap="above"')
+    bottom_at = toolbar.find('data-snap="below"')
+    left_at = toolbar.find('data-snap="left"')
+    right_at = toolbar.find('data-snap="right"')
+    assert 0 <= top_at < bottom_at < left_at < right_at
+    hide_at = toolbar.find("btn-hide-video")
+    assert 0 <= hide_at < top_at
+    assert 'class="preset-chip"' in render
+    assert 'class="video-toolbar-btn' in render
 
     def docked_video_layout(layout: dict) -> dict:
-        snap_name = layout["snap"] if layout["snap"] in {"right", "above", "below"} else "left"
+        snap_name = (
+            layout["snap"] if layout["snap"] in {"left", "right", "below"} else "above"
+        )
         return {
             "placed": False,
             "snap": snap_name,
@@ -366,9 +402,41 @@ def test_mixer_video_dock_and_snaps():
     unknown = docked_video_layout(
         {"placed": True, "snap": "floating", "width": 180, "x": 1, "y": 2}
     )
-    assert unknown["snap"] == "left"
+    assert unknown["snap"] == "above"
     assert unknown["width"] == 180
 
+    def sync_stacked_stem_width(
+        snap_name: str, placed: bool, width: float
+    ) -> tuple[bool, bool]:
+        stacked = (not placed) and snap_name in {"above", "below"}
+        sized = stacked and width > 0
+        return stacked, sized
+
+    assert sync_stacked_stem_width("above", False, 320) == (True, True)
+    assert sync_stacked_stem_width("above", False, 0) == (True, False)
+    assert sync_stacked_stem_width("left", False, 320) == (False, False)
+    assert sync_stacked_stem_width("above", True, 320) == (False, False)
+
+    css = (
+        Path(__file__).resolve().parents[1]
+        / "ui"
+        / "stem_mixer_component"
+        / "frontend"
+        / "src"
+        / "style.css"
+    ).read_text(encoding="utf-8")
+    presets = css[css.find(".mixer-presets {") : css.find(".mixer-stage {")]
+    assert "preset-chip" in presets
+    assert "var(--secondary)" in presets
+    assert ".video-toolbar-btn" in css
+    assert ".video-snap-btn" in css
+    assert "video-toolbar-divider" in css
+    assert "is-video-sized" in css
+    assert "align-items: stretch" in css[
+        css.find('.mixer-stage[data-snap="above"]') : css.find(
+            '.mixer-stage[data-snap="below"] .mixer-video-wrap'
+        )
+    ]
 
 def test_mixer_picture_play_starts_stems_after_metadata():
     text = _mixer_main_ts()
