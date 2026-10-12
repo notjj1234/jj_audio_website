@@ -240,10 +240,6 @@ export function IsolatePage() {
   useEffect(() => {
     previewStopRef.current?.();
     previewStopRef.current = null;
-    // A new file's length is unknown until onLoadedMetadata fires. Reset the
-    // previous file's duration and region here, so Start stays blocked
-    // (sectionReady === duration !== null) and can never submit the old
-    // file's section bounds for the new one (#56).
     setDuration(null);
     setRegionStart(0);
     setRegionEnd(30);
