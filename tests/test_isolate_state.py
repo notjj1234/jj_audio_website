@@ -1371,7 +1371,7 @@ def test_youtube_search_use_queues_hit_title():
     assert use_block.find("_download_youtube_with_status(") < use_block.find(
         "_close_youtube_search_dialog()"
     )
-    assert 'key=f"isolate_youtube_separate_{vid}"' in dialog
+    assert 'key=f"isolate_youtube_separate_p{page}_{vid}"' in dialog
     assert 'st.session_state["isolate_search_enqueue"] = True' in dialog
     workspace = source[
         source.find("def _render_new_workspace") : source.find("def _render_mixer_region_caption")
