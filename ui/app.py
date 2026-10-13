@@ -218,6 +218,22 @@ st.html(
     animation: none !important;
   }
 
+  /* Theme uses the same orange for primaryColor and textColor. Streamlit then
+     paints primary form-submit labels in textColor on a primaryColor fill —
+     "Search" in the YouTube dialog becomes invisible. Force contrast. */
+  [data-testid="stFormSubmitButton"] button,
+  [data-testid="stFormSubmitButton"] button p,
+  [data-testid="stFormSubmitButton"] button span,
+  [data-testid="stFormSubmitButton"] button div {
+    color: #192542 !important;
+    -webkit-text-fill-color: #192542 !important;
+    opacity: 1 !important;
+  }
+  [data-testid="stFormSubmitButton"] button {
+    min-width: 5.5rem !important;
+    white-space: nowrap !important;
+  }
+
   /* Subtle iOS-adjacent button press/hover. Transform + opacity only.
      Do not put transition on wrappers (sticky chrome / queue float). */
   [data-testid="stButton"] button,

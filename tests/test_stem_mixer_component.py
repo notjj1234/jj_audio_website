@@ -250,6 +250,30 @@ def test_mixer_remounts_picture_after_paint_and_offsets_seek():
     assert 'syncOrigin = "audio"' in text
     assert 'syncOrigin = "video"' in text
 
+
+def test_mixer_picture_follows_practice_speed():
+    """Practice Speed mirrors onto local/YouTube picture; Key does not."""
+    text = _mixer_main_ts()
+    assert "function applyPicturePlaybackRate" in text
+    assert "function nearestYoutubePlaybackRate" in text
+    assert "localVideoEl.playbackRate" in text
+    assert "setPlaybackRate" in text
+    assert "getAvailablePlaybackRates" in text
+    assert "getEffectivePlaybackRate" in text
+    write = text[
+        text.find("function writePictureTo") : text.find("function nudgeYoutubeToAudio")
+    ]
+    assert "applyPicturePlaybackRate()" in write
+    practice = text[
+        text.find("function bindPracticeControls") : text.find("function allMuted")
+    ]
+    assert "afterSpeedChange" in practice
+    assert "applyPicturePlaybackRate()" in practice
+    # Key path must not call afterSpeedChange / picture rate.
+    key_block = practice[practice.find("const applyKey") : practice.find("speed.oninput")]
+    assert "afterSpeedChange" not in key_block
+    assert "applyPicturePlaybackRate" not in key_block
+
     def picture_time(mixer: float, offset: float) -> float:
         offset = offset if offset > 0 else 0
         mixer = mixer if mixer > 0 else 0
@@ -694,4 +718,47 @@ def test_paused_picture_seek_moves_stems_and_ignores_our_echo():
     assert picture_seek_decision(dict(drifting, now_ms=2_500.0)) == "pull-picture"
     section = dict(base, offset_sec=12.5, picture_sec=27.5, last_picture_sec=12.5)
     assert picture_seek_decision(section) == "seek-stems"
+
+
+def test_mixer_seek_and_master_are_filled_bars():
+    """Seek = progress bar + caret; Master = level fader + capsule (not dots)."""
+    css = (
+        Path(__file__).resolve().parents[1]
+        / "ui"
+        / "stem_mixer_component"
+        / "frontend"
+        / "src"
+        / "style.css"
+    ).read_text(encoding="utf-8")
+    seek = css[css.find(".mixer .slider-seek {") : css.find(".master-vol {")]
+    master = css[
+        css.find(".mixer .slider-master {") : css.find("/* Practice = grouped panel")
+    ]
+    assert "--range-fill" in seek
+    assert 'input[type="range"].slider-seek::-webkit-slider-thumb' in seek
+    assert 'input[type="range"].slider-seek::-webkit-slider-runnable-track' in seek
+    assert "linear-gradient" in seek
+    assert "height: 10px" in seek
+    assert "width: 4px" in seek
+    assert "height: 18px" in seek
+    assert "border-radius: 2px" in seek
+    assert "-webkit-appearance: none" in seek
+    assert "border-radius: 50%" not in seek
+
+    assert "--range-fill" in master
+    assert 'input[type="range"].slider-master::-webkit-slider-thumb' in master
+    assert 'input[type="range"].slider-master::-webkit-slider-runnable-track' in master
+    assert "linear-gradient" in master
+    assert "height: 12px" in master
+    assert "width: 22px" in master
+    assert "border-radius: 999px" in master
+    assert "-webkit-appearance: none" in master
+    assert "border-radius: 50%" not in master
+
+    text = _mixer_main_ts()
+    assert "function syncRangeFill" in text
+    assert 'el.style.setProperty("--range-fill"' in text
+    assert "syncRangeFill(seek)" in text
+    assert "syncRangeFill(masterVol)" in text
+    assert "syncRangeFill(seekEl)" in text
 

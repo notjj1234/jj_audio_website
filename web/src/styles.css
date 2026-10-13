@@ -528,6 +528,108 @@ button.danger,
   height: 16px;
 }
 
+/* Seek = timeline progress bar + vertical playhead caret */
+.mixer .slider-seek {
+  --range-fill: 0%;
+  padding: 10px 0;
+}
+
+.mixer input[type="range"].slider-seek::-webkit-slider-runnable-track {
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--ink) 55%, var(--haze)) 0%,
+    color-mix(in srgb, var(--ink) 55%, var(--haze)) var(--range-fill),
+    var(--haze) var(--range-fill),
+    var(--haze) 100%
+  );
+}
+
+.mixer input[type="range"].slider-seek::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 4px;
+  height: 18px;
+  margin-top: -4px;
+  border-radius: 2px;
+  background: var(--ink);
+  border: none;
+  box-shadow: none;
+}
+
+.mixer input[type="range"].slider-seek::-moz-range-track {
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--ink) 55%, var(--haze)) 0%,
+    color-mix(in srgb, var(--ink) 55%, var(--haze)) var(--range-fill),
+    var(--haze) var(--range-fill),
+    var(--haze) 100%
+  );
+}
+
+.mixer input[type="range"].slider-seek::-moz-range-thumb {
+  width: 4px;
+  height: 18px;
+  border-radius: 2px;
+  background: var(--ink);
+  border: none;
+  box-shadow: none;
+}
+
+/* Master = level fader bar + wide capsule thumb */
+.mixer .slider-master {
+  --range-fill: 0%;
+  padding: 10px 0;
+}
+
+.mixer input[type="range"].slider-master::-webkit-slider-runnable-track {
+  height: 12px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--moss) 0%,
+    var(--moss) var(--range-fill),
+    color-mix(in srgb, var(--moss) 18%, var(--haze)) var(--range-fill),
+    color-mix(in srgb, var(--moss) 18%, var(--haze)) 100%
+  );
+}
+
+.mixer input[type="range"].slider-master::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 22px;
+  height: 12px;
+  margin-top: 0;
+  border-radius: 999px;
+  background: var(--moss);
+  border: 2px solid var(--paper);
+  box-shadow: none;
+}
+
+.mixer input[type="range"].slider-master::-moz-range-track {
+  height: 12px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--moss) 0%,
+    var(--moss) var(--range-fill),
+    color-mix(in srgb, var(--moss) 18%, var(--haze)) var(--range-fill),
+    color-mix(in srgb, var(--moss) 18%, var(--haze)) 100%
+  );
+}
+
+.mixer input[type="range"].slider-master::-moz-range-thumb {
+  width: 22px;
+  height: 12px;
+  border-radius: 999px;
+  background: var(--moss);
+  border: 2px solid var(--paper);
+  box-shadow: none;
+}
+
 .mixer-master {
   display: flex;
   flex-wrap: wrap;

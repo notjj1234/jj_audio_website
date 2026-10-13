@@ -228,8 +228,13 @@ class StemMixerEngine {
     return this.soundTouch !== null && !this.soundTouchFailed;
   }
 
-  private effectivePlaybackRate(): number {
+  /** Wall-clock→audio rate used for stems/picture when SoundTouch is active. */
+  getEffectivePlaybackRate(): number {
     return this.soundTouch ? this.practiceRate : PRACTICE_RATE_DEFAULT;
+  }
+
+  private effectivePlaybackRate(): number {
+    return this.getEffectivePlaybackRate();
   }
 
   /** Create a context for decode only. Never resume — pywebview blocks that without a click. */
@@ -1143,6 +1148,9 @@ type YTPlayer = {
   getCurrentTime: () => number;
   mute: () => void;
   destroy: () => void;
+  setPlaybackRate?: (rate: number) => void;
+  getAvailablePlaybackRates?: () => number[];
+  getPlaybackRate?: () => number;
 };
 
 let youtubeVideoId = "";
@@ -1270,10 +1278,55 @@ function readPictureTime(): number | null {
   return null;
 }
 
+/** Closest discrete rate YouTube allows (often 0.25–2). */
+function nearestYoutubePlaybackRate(
+  desired: number,
+  available: number[] | null | undefined
+): number {
+  const list = (available || []).filter((r) => Number.isFinite(r) && r > 0);
+  if (!list.length) return 1;
+  let best = list[0]!;
+  let bestDist = Math.abs(best - desired);
+  for (let i = 1; i < list.length; i++) {
+    const r = list[i]!;
+    const d = Math.abs(r - desired);
+    if (d < bestDist) {
+      best = r;
+      bestDist = d;
+    }
+  }
+  return best;
+}
+
+/**
+ * Mirror practice Speed onto the picture so tab/tutorial videos stay locked.
+ * Key (pitch) does not change video rate. Audio remains the clock.
+ */
+function applyPicturePlaybackRate(): void {
+  const rate = engine.getEffectivePlaybackRate();
+  if (localVideoEl && !hideYoutubeVideo && localVideoUrl) {
+    try {
+      localVideoEl.playbackRate = rate;
+    } catch {
+      /* some engines reject extreme rates */
+    }
+  }
+  if (ytPlayer && !hideYoutubeVideo && youtubeVideoId) {
+    try {
+      const available = ytPlayer.getAvailablePlaybackRates?.() ?? null;
+      const ytRate = nearestYoutubePlaybackRate(rate, available);
+      ytPlayer.setPlaybackRate?.(ytRate);
+    } catch {
+      /* keep position sync; never crash the mixer */
+    }
+  }
+}
+
 function writePictureTo(pictureT: number, playing: boolean): void {
   commandedPictureSec = pictureT;
   lastPictureObserved = pictureT;
   lastMixerObserved = engine.currentTime();
+  applyPicturePlaybackRate();
   if (localVideoEl && !hideYoutubeVideo && localVideoUrl) {
     const video = localVideoEl;
     video.muted = true;
@@ -1518,6 +1571,7 @@ function mountYoutubePlayer(): void {
             } catch {
               /* audio still plays */
             }
+            applyPicturePlaybackRate();
             nudgeYoutubeToAudio();
           },
           onStateChange: (ev: { data: number }) => {
@@ -1912,6 +1966,20 @@ function formatTime(sec: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+/** Drive filled-bar CSS (`--range-fill`) for seek / master range inputs. */
+function syncRangeFill(el: HTMLInputElement | null): void {
+  if (!el) return;
+  const min = Number(el.min);
+  const max = Number(el.max);
+  const value = Number(el.value);
+  const span = max - min;
+  const pct =
+    Number.isFinite(span) && span > 0 && Number.isFinite(value)
+      ? Math.max(0, Math.min(100, ((value - min) / span) * 100))
+      : 0;
+  el.style.setProperty("--range-fill", `${pct}%`);
+}
+
 function mixerFrame(): HTMLElement | null {
   return document.querySelector(".mixer");
 }
@@ -2145,29 +2213,30 @@ function renderUI(theme?: Theme): void {
         </div>
         <label class="mixer-seek">
           <span class="visually-hidden">Seek</span>
-          <input type="range" id="seek" min="0" max="1000" value="0" step="1" disabled />
+          <input type="range" id="seek" class="slider-seek" min="0" max="1000" value="0" step="1" disabled />
         </label>
         <label class="master-vol">
           <span class="master-vol-label">Master</span>
           <span class="visually-hidden">Master volume in decibels</span>
-          <input type="range" id="master-vol" class="vol-slider"
+          <input type="range" id="master-vol" class="vol-slider slider-master"
             min="${DB_MIN}" max="${DB_MAX}" step="0.5" value="${state.masterVolumeDb}" />
           <span id="master-vol-val" class="stem-db">${state.masterVolumeDb.toFixed(1)}</span>
         </label>
         <div class="mixer-practice" role="group" aria-label="Practice">
+          <div class="practice-heading">Practice</div>
           <div class="practice-row">
             <span class="practice-label" id="practice-speed-label">Speed 1.00×</span>
             <button type="button" class="ghost practice-nudge" id="btn-speed-down" aria-label="Slower">−</button>
-            <input type="range" id="practice-speed" min="0.5" max="1.5" step="0.05" value="1" />
+            <input type="range" id="practice-speed" class="slider-speed" min="0.5" max="1.5" step="0.05" value="1" />
             <button type="button" class="ghost practice-nudge" id="btn-speed-up" aria-label="Faster">+</button>
           </div>
           <div class="practice-row">
             <span class="practice-label" id="practice-key-label">Key 0</span>
             <button type="button" class="ghost practice-nudge" id="btn-key-down" aria-label="Lower key">−</button>
-            <input type="range" id="practice-key" min="-6" max="6" step="1" value="0" />
+            <input type="range" id="practice-key" class="slider-key" min="-6" max="6" step="1" value="0" />
             <button type="button" class="ghost practice-nudge" id="btn-key-up" aria-label="Raise key">+</button>
           </div>
-          <button type="button" class="ghost" id="btn-practice-reset">Reset practice</button>
+          <button type="button" class="ghost practice-reset" id="btn-practice-reset">Reset practice</button>
           <p class="practice-status" id="practice-status" hidden></p>
         </div>
       </div>
@@ -2313,7 +2382,10 @@ function renderUI(theme?: Theme): void {
     });
     const masterEl = document.getElementById("master-vol") as HTMLInputElement | null;
     const masterVal = document.getElementById("master-vol-val");
-    if (masterEl) masterEl.value = String(DB_DEFAULT);
+    if (masterEl) {
+      masterEl.value = String(DB_DEFAULT);
+      syncRangeFill(masterEl);
+    }
     if (masterVal) masterVal.textContent = DB_DEFAULT.toFixed(1);
     applyStateGains();
     reportState();
@@ -2388,7 +2460,9 @@ function renderUI(theme?: Theme): void {
   applyStemWaveHeight();
 
   const seek = document.getElementById("seek") as HTMLInputElement;
+  syncRangeFill(seek);
   seek.oninput = () => {
+    syncRangeFill(seek);
     const dur = engine.getDuration() || 1;
     const t = (Number(seek.value) / 1000) * dur;
     syncOrigin = "audio";
@@ -2405,7 +2479,9 @@ function renderUI(theme?: Theme): void {
   });
 
   const masterVol = document.getElementById("master-vol") as HTMLInputElement;
+  syncRangeFill(masterVol);
   masterVol.oninput = () => {
+    syncRangeFill(masterVol);
     const db = Number(masterVol.value);
     state.masterVolumeDb = db;
     const label = document.getElementById("master-vol-val");
@@ -2475,6 +2551,7 @@ function renderUI(theme?: Theme): void {
       if (document.activeElement !== seekEl) {
         seekEl.value = String(dur > 0 ? Math.round((t / dur) * 1000) : 0);
       }
+      syncRangeFill(seekEl);
     }
     updatePlayheads(t, dur);
     if (!hideYoutubeVideo && (ytPlayer || localVideoEl)) {
@@ -2546,6 +2623,7 @@ function bindPracticeControls(): void {
   syncPracticeChrome(persisted);
   void engine.setPracticeRate(persisted.rate).then((r) => {
     if (!r.ok && r.message) showPracticeStatus(r.message);
+    applyPicturePlaybackRate();
   });
   void engine.setPracticeSemitones(persisted.semitones).then((r) => {
     if (!r.ok && r.message) showPracticeStatus(r.message);
@@ -2558,12 +2636,20 @@ function bindPracticeControls(): void {
     syncPracticeChrome(settings);
   };
 
+  const afterSpeedChange = () => {
+    applyPicturePlaybackRate();
+    if (!hideYoutubeVideo && (ytPlayer || localVideoEl)) {
+      nudgeYoutubeToAudio();
+    }
+  };
+
   const applyRate = (raw: number) => {
     const next = clampPracticeRate(raw);
     void engine.setPracticeRate(next).then((r) => {
       if (!r.ok && r.message) showPracticeStatus(r.message);
       else showPracticeStatus(null);
       persist();
+      afterSpeedChange();
     });
   };
   const applyKey = (raw: number) => {
@@ -2572,6 +2658,7 @@ function bindPracticeControls(): void {
       if (!r.ok && r.message) showPracticeStatus(r.message);
       else showPracticeStatus(null);
       persist();
+      // Key changes pitch only — do not change picture tempo.
     });
   };
 
@@ -2590,6 +2677,7 @@ function bindPracticeControls(): void {
       if (!r.ok && r.message) showPracticeStatus(r.message);
       else showPracticeStatus(null);
       persist();
+      afterSpeedChange();
     });
   };
   const practiceGroup = document.querySelector(".mixer-practice");
@@ -2598,6 +2686,7 @@ function bindPracticeControls(): void {
     void engine.resetPractice().then(() => {
       showPracticeStatus(null);
       persist();
+      afterSpeedChange();
     });
   });
 }

@@ -41,6 +41,13 @@ function formatTime(sec: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+function rangeFillPct(value: number, min: number, max: number): string {
+  const span = max - min;
+  if (!Number.isFinite(span) || span <= 0 || !Number.isFinite(value)) return "0%";
+  const pct = Math.max(0, Math.min(100, ((value - min) / span) * 100));
+  return `${pct}%`;
+}
+
 export function StemMixer({ stems }: { stems: StemInfo[] }) {
   const engineRef = useRef(new StemMixerEngine());
   const [status, setStatus] = useState("Ready");
@@ -288,11 +295,13 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
           <span className="visually-hidden">Seek</span>
           <input
             type="range"
+            className="slider-seek"
             min={0}
             max={1000}
             value={seek}
             disabled={!canSeek}
             aria-valuetext={formatTime(currentTime)}
+            style={{ ["--range-fill" as string]: rangeFillPct(seek, 0, 1000) }}
             onChange={(e) => {
               const dur = engineRef.current.getDuration() || 1;
               const t = (Number(e.target.value) / 1000) * dur;
@@ -305,10 +314,14 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
           <span className="visually-hidden">Master volume in decibels</span>
           <input
             type="range"
+            className="vol-slider slider-master"
             min={DB_MIN}
             max={DB_MAX}
             step={0.5}
             value={masterDb}
+            style={{
+              ["--range-fill" as string]: rangeFillPct(masterDb, DB_MIN, DB_MAX),
+            }}
             onChange={(e) =>
               apply({ ...state, masterVolumeDb: Number(e.target.value) })
             }

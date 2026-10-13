@@ -227,8 +227,9 @@ Desktop freeze + installers. How-to: `DESKTOP.md`.
 - `Install AudioTools.command` — DMG double-click copy to `/Applications`.
 - `entitlements.plist`, `pkg_component.plist` — macOS signing / pkg metadata.
 - `pkg_scripts/postinstall` — launch app after `.pkg` install.
-- `generate_icons.sh` — rebuild icons from source art.
-- `icon.png` / `icon.icns` / `icon.ico` — app icons (present in this clone; regenerate via `generate_icons.sh` if missing).
+- `generate_icons.sh` — rebuild icons from `icon-source.png` (square master) with a macOS squircle alpha mask.
+- `icon-source.png` — unmasked 1024×1024 square art (edit this, then re-run `generate_icons.sh`).
+- `icon.png` / `icon.icns` / `icon.ico` — generated app icons (squircle-masked PNG/ICNS; ICO for Windows).
 
 ### `tests/`
 
