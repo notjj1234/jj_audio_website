@@ -57,6 +57,9 @@ PROJECT_STRUCTURE.md
 CONTEXT_TREE.md
 WEBSITE_PREP_GUIDE.txt
 docs/oracle-free-memory-spike.md
+AGENTS.md
+PLANNING.md
+docs/superpowers/
 
 # Editor / local tooling
 .vscode/
@@ -64,6 +67,8 @@ docs/oracle-free-memory-spike.md
 .ruff_cache/
 packaging/_diag_*
 .streamlit/credentials.toml
+.pr_agent.toml
+.opencode/
 
 # Cursor local tooling / config (skills stay on disk, not in git)
 .cursor/

@@ -395,6 +395,13 @@ def main() -> None:
         help=title_help,
     )
     st.caption(YOUTUBE_DISCLAIMER)
+    # Always visible (Lite has no title help) — product boundary + picker friction.
+    st.caption(
+        "Saves audio to a folder only — it does not separate stems "
+        "(use **Audio Isolation** for that). "
+        "If the folder window is hidden, Alt+Tab. "
+        "Saving overwrites a same-named file."
+    )
 
     _apply_pending_url()
     if YT_AUDIO_FMT_KEY not in st.session_state:

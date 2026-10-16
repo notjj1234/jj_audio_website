@@ -35,6 +35,19 @@ DEMUCS_INSTALL_HINT = (
 )
 
 
+MIN_USABLE_TAB_NOTES = 3
+
+EMPTY_TRANSCRIPTION_MESSAGE = (
+    "Too few notes detected for a usable tab. "
+    "Try a short solo-guitar clip with Separate off, or isolate guitar first on "
+    "Audio Isolation and use Make a tab PDF (carries the guitar stem)."
+)
+
+
+class EmptyTranscriptionError(RuntimeError):
+    """Raised when transcription has fewer than MIN_USABLE_TAB_NOTES notes."""
+
+
 @dataclass
 class PipelineConfig:
     separate_stems: bool = True
@@ -137,6 +150,19 @@ def _transcription_thresholds(cfg: PipelineConfig) -> tuple[float, float, float]
     return onset, frame, min_len
 
 
+def count_midi_notes(midi_path: Path) -> int:
+    """Total note events across all instruments in a MIDI file."""
+    import pretty_midi
+
+    pm = pretty_midi.PrettyMIDI(str(midi_path))
+    return sum(len(inst.notes) for inst in pm.instruments)
+
+
+def _require_usable_transcription(midi_path: Path) -> None:
+    if count_midi_notes(midi_path) < MIN_USABLE_TAB_NOTES:
+        raise EmptyTranscriptionError(EMPTY_TRANSCRIPTION_MESSAGE)
+
+
 def run_pipeline(
     *,
     audio_path: Path | None = None,
@@ -228,6 +254,7 @@ def run_pipeline(
             cleanup=_cleanup_config_for_pipeline(cfg),
             normalize=False,
         )
+        _require_usable_transcription(midi_path)
 
         # --- Tempo ---
         progress("tempo", "Estimating tempo")

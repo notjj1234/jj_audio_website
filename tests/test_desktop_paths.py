@@ -1059,6 +1059,8 @@ def test_youtube_audio_page_nav_order_and_freeze_import():
     assert "Save to folder" in page
     assert "Interface Lite/Pro" not in page
     assert "Alt+Tab" in page
+    assert "does not separate stems" in page
+    assert "Audio Isolation" in page
     assert 'st.session_state[YT_AUDIO_FMT_KEY] = _DEFAULT_FMT' in page or '_DEFAULT_FMT = "mp3"' in page
     main = page.split("def main", 1)[1]
     display = main[main.find("if note :=") : main.find("if err :=")]

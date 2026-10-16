@@ -761,4 +761,25 @@ def test_mixer_seek_and_master_are_filled_bars():
     assert "syncRangeFill(seek)" in text
     assert "syncRangeFill(masterVol)" in text
     assert "syncRangeFill(seekEl)" in text
+    assert "syncRangeFill(speed)" in text
+    assert "syncRangeFill(key)" in text
+    assert "Speed &amp; Key" in text or "Speed & Key" in text
+    assert ">Reset<" in text or '">Reset</button>' in text
+    assert "Save current mix includes Speed" in text
+    assert "playbackRate" in text
+    assert "playbackSemitones" in text
+    assert "reportState(true)" in text[
+        text.find("const persist = ()") : text.find("const afterSpeedChange")
+    ]
+
+    speed_key = css[
+        css.find("/* Speed & Key = same filled bar") : css.find(".practice-export-note")
+    ]
+    assert 'input[type="range"].slider-speed::-webkit-slider-runnable-track' in speed_key
+    assert 'input[type="range"].slider-key::-webkit-slider-runnable-track' in speed_key
+    assert "--range-fill" in speed_key
+    assert "linear-gradient" in speed_key
+    assert "border-radius: 999px" in speed_key
+    assert "border-radius: 3px" not in speed_key
+    assert "practice-export-note" in css
 

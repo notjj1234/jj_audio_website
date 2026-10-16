@@ -331,62 +331,68 @@ body {
   background: color-mix(in srgb, var(--bg) 55%, transparent) !important;
 }
 
-/* Speed = solid primary capsule thumb on warm track */
-.mixer .slider-speed::-webkit-slider-runnable-track {
-  height: 5px;
-  background: color-mix(in srgb, var(--primary) 42%, var(--border));
+/* Speed & Key = same filled bar + primary capsule thumb (Key keeps step=1) */
+.mixer .slider-speed,
+.mixer .slider-key {
+  --range-fill: 0%;
+  padding: 10px 0;
 }
 
-.mixer .slider-speed::-webkit-slider-thumb {
+.mixer input[type="range"].slider-speed::-webkit-slider-runnable-track,
+.mixer input[type="range"].slider-key::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--primary) 0%,
+    var(--primary) var(--range-fill),
+    color-mix(in srgb, var(--primary) 22%, var(--border)) var(--range-fill),
+    color-mix(in srgb, var(--primary) 22%, var(--border)) 100%
+  );
+}
+
+.mixer input[type="range"].slider-speed::-webkit-slider-thumb,
+.mixer input[type="range"].slider-key::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
   width: 20px;
   height: 14px;
-  margin-top: -4.5px;
+  margin-top: -3px;
   border-radius: 999px;
   background: var(--primary);
   border: 2px solid var(--bg);
+  box-shadow: none;
 }
 
-.mixer .slider-speed::-moz-range-track {
-  height: 5px;
-  background: color-mix(in srgb, var(--primary) 42%, var(--border));
+.mixer input[type="range"].slider-speed::-moz-range-track,
+.mixer input[type="range"].slider-key::-moz-range-track {
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--primary) 0%,
+    var(--primary) var(--range-fill),
+    color-mix(in srgb, var(--primary) 22%, var(--border)) var(--range-fill),
+    color-mix(in srgb, var(--primary) 22%, var(--border)) 100%
+  );
 }
 
-.mixer .slider-speed::-moz-range-thumb {
+.mixer input[type="range"].slider-speed::-moz-range-thumb,
+.mixer input[type="range"].slider-key::-moz-range-thumb {
   width: 20px;
   height: 14px;
   border-radius: 999px;
   background: var(--primary);
   border: 2px solid var(--bg);
+  box-shadow: none;
 }
 
-/* Key = stepped look: square thumb, cooler/neutral track */
-.mixer .slider-key::-webkit-slider-runnable-track {
-  height: 5px;
-  background: color-mix(in srgb, var(--text) 28%, var(--border));
-}
-
-.mixer .slider-key::-webkit-slider-thumb {
-  width: 14px;
-  height: 14px;
-  margin-top: -4.5px;
-  border-radius: 3px;
-  background: var(--bg);
-  border: 2px solid var(--primary);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 50%, transparent);
-}
-
-.mixer .slider-key::-moz-range-track {
-  height: 5px;
-  background: color-mix(in srgb, var(--text) 28%, var(--border));
-}
-
-.mixer .slider-key::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
-  border-radius: 3px;
-  background: var(--bg);
-  border: 2px solid var(--primary);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 50%, transparent);
+.practice-export-note {
+  margin: 0.15rem 0 0;
+  font-size: 0.72rem;
+  font-weight: 500;
+  line-height: 1.35;
+  opacity: 0.72;
 }
 
 .practice-reset {

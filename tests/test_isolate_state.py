@@ -108,6 +108,7 @@ from ui.isolate_state import (
     should_request_isolate_scroll_top,
     ISOLATE_SCROLL_TOP_KEY,
     reset_new_tab_source,
+    resolve_tab_pdf_carry_from_isolate,
     adopt_audio_into_run,
     discard_youtube_staging,
     is_youtube_staging_path,
@@ -825,6 +826,7 @@ def test_lite_new_cta_captions_chosen_outcome_and_source():
     assert "_try_enqueue_choice(choice)" in new_ws
     assert "OUTCOME_CARD_KEY" in new_ws
     assert "_has_source_for_job(choice)" in new_ws
+    assert "disabled=not demucs_ok or not has_source" in new_ws
     assert "Custom ·" in new_ws
     css = (
         Path(__file__).resolve().parents[1] / "ui" / "app.py"
@@ -1053,6 +1055,7 @@ def test_reset_new_tab_source_remounts_uploader_without_touching_widget_keys():
         "isolate_duration_fp": "a.wav:1",
         "carry_over_audio_path": "/tmp/c.wav",
         "carry_over_audio_name": "c.wav",
+        "carry_over_is_guitar_stem": True,
         ISOLATE_OUTPUT_NAME_KEY: "Song A",
         ISOLATE_YOUTUBE_URL_KEY: "https://youtu.be/abc",
     }
@@ -1064,6 +1067,7 @@ def test_reset_new_tab_source_remounts_uploader_without_touching_widget_keys():
     assert "isolate_duration_sec" not in session
     assert "carry_over_audio_path" not in session
     assert "carry_over_audio_name" not in session
+    assert "carry_over_is_guitar_stem" not in session
     assert session[ISOLATE_OUTPUT_NAME_KEY] == "Song A"
     assert session[ISOLATE_YOUTUBE_URL_KEY] == "https://youtu.be/abc"
     assert session[ISOLATE_YOUTUBE_URL_PENDING_KEY] == ""
@@ -2945,6 +2949,10 @@ def test_mixer_builds_current_mix_on_save_click():
     assert 'key="isolate_save_mix"' in panel
     assert "Alt+Tab" in panel
     assert "overwrites a same-named" in panel
+    assert "Save current mix includes mute, solo, levels, and Speed & Key" in panel
+    assert "playback_rate" in panel
+    assert "playback_semitones" in panel
+    assert "apply_playback_transform" in source
     hint_at = panel.find("If the folder window is hidden")
     assert "is_pro_mode" not in panel[max(0, hint_at - 80) : hint_at]
 
@@ -2958,10 +2966,46 @@ def test_mixer_workspace_lite_shares_fixup_and_tab_pdf_carry_over():
     assert "Fix the guitar track" not in mixer_ws
     assert "_render_guitar_fixup_panel(" in mixer_ws
     assert "Make a tab PDF from this" in mixer_ws
-    assert "if source_audio_path" in mixer_ws
+    assert "resolve_tab_pdf_carry_from_isolate" in mixer_ws
+    assert "carry_over_is_guitar_stem" in mixer_ws
     assert "_request_loading_overlay()" in mixer_ws
     # Guitar fix-up panel called for both Lite (else branch) and Pro (if branch)
     assert mixer_ws.count("_render_guitar_fixup_panel(") == 2
+
+
+def test_resolve_tab_pdf_carry_prefers_guitar_stem(tmp_path):
+    mix = tmp_path / "mix.wav"
+    guitar = tmp_path / "guitar.wav"
+    mix.write_bytes(b"RIFF")
+    guitar.write_bytes(b"RIFF")
+    session = {
+        "isolate_source_audio_path": str(mix),
+        "isolate_artifacts": {"guitar": str(guitar)},
+    }
+    path, name, is_stem = resolve_tab_pdf_carry_from_isolate(session)
+    assert path == str(guitar)
+    assert name == "guitar.wav"
+    assert is_stem is True
+
+
+def test_resolve_tab_pdf_carry_falls_back_to_source_mix(tmp_path):
+    mix = tmp_path / "mix.wav"
+    mix.write_bytes(b"RIFF")
+    session = {
+        "isolate_source_audio_path": str(mix),
+        "isolate_artifacts": {"vocals": str(tmp_path / "missing.wav")},
+    }
+    path, name, is_stem = resolve_tab_pdf_carry_from_isolate(session)
+    assert path == str(mix)
+    assert name == "mix.wav"
+    assert is_stem is False
+
+
+def test_resolve_tab_pdf_carry_empty_when_nothing_usable():
+    path, name, is_stem = resolve_tab_pdf_carry_from_isolate({})
+    assert path is None
+    assert name is None
+    assert is_stem is False
 
 
 def test_file_ready_banner_points_at_home_not_new():

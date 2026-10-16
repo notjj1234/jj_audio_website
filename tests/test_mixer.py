@@ -12,7 +12,10 @@ from audio_to_tab.isolate import analyze_dual_guitar_candidate, split_dual_guita
 from audio_to_tab.mixer import (
     DB_MAX,
     DB_MIN,
+    apply_playback_transform,
     audible_stems,
+    clamp_playback_rate,
+    clamp_playback_semitones,
     db_to_linear,
     default_muted_for,
     default_muted_map,
@@ -218,6 +221,43 @@ def test_mix_stems_sample_rate_mismatch(tmp_path: Path):
     _write_stereo_wav(p2, tone[:2205], tone[:2205], 22050)
     with pytest.raises(ValueError, match="Sample rate mismatch"):
         mix_stems_to_wav({"a": p1, "b": p2}, ["a", "b"], tmp_path / "out.wav")
+
+
+def test_apply_playback_transform_noop_at_defaults(tmp_path: Path):
+    sr = 22050
+    t = np.linspace(0, 0.4, int(sr * 0.4), endpoint=False)
+    tone = 0.3 * np.sin(2 * np.pi * 440 * t)
+    path = tmp_path / "tone.wav"
+    _write_stereo_wav(path, tone, tone, sr)
+    before, _ = sf.read(str(path), always_2d=True)
+    apply_playback_transform(path, rate=1.0, semitones=0)
+    after, _ = sf.read(str(path), always_2d=True)
+    assert after.shape == before.shape
+    assert np.allclose(before, after, atol=1e-4)
+
+
+def test_apply_playback_transform_changes_duration_when_sped_up(tmp_path: Path):
+    sr = 22050
+    t = np.linspace(0, 1.0, sr, endpoint=False)
+    tone = 0.3 * np.sin(2 * np.pi * 440 * t)
+    path = tmp_path / "tone.wav"
+    _write_stereo_wav(path, tone, tone, sr)
+    apply_playback_transform(path, rate=1.5, semitones=0)
+    after, out_sr = sf.read(str(path), always_2d=True)
+    assert out_sr == sr
+    # 1.5× stretch shortens wall time (~2/3 of original frames).
+    assert len(after) < int(sr * 0.85)
+    assert len(after) > int(sr * 0.5)
+    assert float(np.max(np.abs(after))) > 0.05
+
+
+def test_clamp_playback_rate_and_semitones():
+    assert clamp_playback_rate(0.47) == 0.5
+    assert clamp_playback_rate(1.53) == 1.5
+    assert clamp_playback_rate(1.02) == 1.0
+    assert clamp_playback_semitones(6.4) == 6
+    assert clamp_playback_semitones(-7) == -6
+    assert clamp_playback_semitones(2.2) == 2
 
 
 def test_dual_guitar_splits_distinct_stereo(tmp_path: Path):

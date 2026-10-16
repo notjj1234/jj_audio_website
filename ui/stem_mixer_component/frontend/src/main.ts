@@ -1812,11 +1812,14 @@ function restoreTransport(): void {
 }
 
 function statePayload(): string {
+  const practice = engine.getPracticeSettings();
   return JSON.stringify({
     volumesDb: state.volumesDb,
     muted: state.muted,
     soloed: state.soloed,
     masterVolumeDb: state.masterVolumeDb,
+    playbackRate: practice.rate,
+    playbackSemitones: practice.semitones,
     metronomeOptions: metroConfig ? metroOptions : null,
     hideYoutubeVideo: hideYoutubeVideo,
     videoLayout,
@@ -1836,11 +1839,14 @@ function reportState(immediate = false): void {
     const payload = statePayload();
     if (payload === lastPublished) return;
     lastPublished = payload;
+    const practice = engine.getPracticeSettings();
     const value: Record<string, unknown> = {
       volumesDb: { ...state.volumesDb },
       muted: { ...state.muted },
       soloed: { ...state.soloed },
       masterVolumeDb: state.masterVolumeDb,
+      playbackRate: practice.rate,
+      playbackSemitones: practice.semitones,
     };
     if (metroConfig) {
       value.metronomeOptions = { ...metroOptions };
@@ -2222,8 +2228,8 @@ function renderUI(theme?: Theme): void {
             min="${DB_MIN}" max="${DB_MAX}" step="0.5" value="${state.masterVolumeDb}" />
           <span id="master-vol-val" class="stem-db">${state.masterVolumeDb.toFixed(1)}</span>
         </label>
-        <div class="mixer-practice" role="group" aria-label="Practice">
-          <div class="practice-heading">Practice</div>
+        <div class="mixer-practice" role="group" aria-label="Speed and Key">
+          <div class="practice-heading">Speed &amp; Key</div>
           <div class="practice-row">
             <span class="practice-label" id="practice-speed-label">Speed 1.00×</span>
             <button type="button" class="ghost practice-nudge" id="btn-speed-down" aria-label="Slower">−</button>
@@ -2236,7 +2242,10 @@ function renderUI(theme?: Theme): void {
             <input type="range" id="practice-key" class="slider-key" min="-6" max="6" step="1" value="0" />
             <button type="button" class="ghost practice-nudge" id="btn-key-up" aria-label="Raise key">+</button>
           </div>
-          <button type="button" class="ghost practice-reset" id="btn-practice-reset">Reset practice</button>
+          <button type="button" class="ghost practice-reset" id="btn-practice-reset">Reset</button>
+          <p class="practice-export-note">
+            Save current mix includes Speed &amp; Key. Save all tracks stays original speed/key.
+          </p>
           <p class="practice-status" id="practice-status" hidden></p>
         </div>
       </div>
@@ -2608,8 +2617,14 @@ function syncPracticeChrome(settings: PracticeSettings): void {
   const key = document.getElementById("practice-key") as HTMLInputElement | null;
   const speedLabel = document.getElementById("practice-speed-label");
   const keyLabel = document.getElementById("practice-key-label");
-  if (speed) speed.value = String(settings.rate);
-  if (key) key.value = String(settings.semitones);
+  if (speed) {
+    speed.value = String(settings.rate);
+    syncRangeFill(speed);
+  }
+  if (key) {
+    key.value = String(settings.semitones);
+    syncRangeFill(key);
+  }
   if (speedLabel) speedLabel.textContent = formatPracticeSpeedLabel(settings.rate);
   if (keyLabel) keyLabel.textContent = formatPracticeKeyLabel(settings.semitones);
 }
@@ -2634,6 +2649,7 @@ function bindPracticeControls(): void {
     const settings = engine.getPracticeSettings();
     savePracticeSettings(settings);
     syncPracticeChrome(settings);
+    reportState(true);
   };
 
   const afterSpeedChange = () => {
@@ -2662,8 +2678,14 @@ function bindPracticeControls(): void {
     });
   };
 
-  speed.oninput = () => applyRate(Number(speed.value));
-  key.oninput = () => applyKey(Number(key.value));
+  speed.oninput = () => {
+    syncRangeFill(speed);
+    applyRate(Number(speed.value));
+  };
+  key.oninput = () => {
+    syncRangeFill(key);
+    applyKey(Number(key.value));
+  };
   document.getElementById("btn-speed-down")!.onclick = () =>
     applyRate(Number(speed.value) - PRACTICE_RATE_STEP);
   document.getElementById("btn-speed-up")!.onclick = () =>

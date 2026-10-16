@@ -198,6 +198,7 @@ from ui.isolate_state import (
     discard_youtube_staging,
     resolve_outcome_card,
     resolve_speed_preset,
+    resolve_tab_pdf_carry_from_isolate,
     resolve_track_selection,
     resolve_youtube_job_name,
     roformer_speed_note,
@@ -281,6 +282,11 @@ from audio_to_tab.metronome import (  # noqa: E402
 )
 from audio_to_tab.mixer import (  # noqa: E402
     DB_DEFAULT,
+    PLAYBACK_RATE_DEFAULT,
+    PLAYBACK_SEMITONES_DEFAULT,
+    apply_playback_transform,
+    clamp_playback_rate,
+    clamp_playback_semitones,
     default_muted_for,
     effective_linear_gains,
     mix_stems_to_wav,
@@ -743,8 +749,15 @@ def _mixer_export_fingerprint(
     muted: dict,
     soloed: dict,
     master_volume_db: float = DB_DEFAULT,
+    *,
+    playback_rate: float = 1.0,
+    playback_semitones: int = 0,
 ) -> str:
-    parts = [f"master:{float(master_volume_db):.2f}"]
+    parts = [
+        f"master:{float(master_volume_db):.2f}",
+        f"rate:{float(playback_rate):.2f}",
+        f"key:{int(playback_semitones)}",
+    ]
     for name in stem_names:
         parts.append(
             f"{name}:{float(volumes_db.get(name, DB_DEFAULT)):.2f}"
@@ -999,8 +1012,13 @@ def _build_current_mix(
     muted: dict,
     soloed: dict,
     master_volume_db: float = DB_DEFAULT,
+    *,
+    playback_rate: float = PLAYBACK_RATE_DEFAULT,
+    playback_semitones: int = PLAYBACK_SEMITONES_DEFAULT,
 ) -> Path:
     mix_path = run_dir / "current_mix.wav"
+    rate = clamp_playback_rate(playback_rate)
+    semis = clamp_playback_semitones(playback_semitones)
     gains = effective_linear_gains(
         stem_names,
         muted={n: bool(muted.get(n, False)) for n in stem_names},
@@ -1009,8 +1027,15 @@ def _build_current_mix(
         master_volume_db=master_volume_db,
     )
     mix_stems_to_wav(selected_stem_paths, output_path=mix_path, gains=gains)
+    apply_playback_transform(mix_path, rate=rate, semitones=semis)
     fp = _mixer_export_fingerprint(
-        stem_names, volumes_db, muted, soloed, master_volume_db
+        stem_names,
+        volumes_db,
+        muted,
+        soloed,
+        master_volume_db,
+        playback_rate=rate,
+        playback_semitones=semis,
     )
     st.session_state["isolate_mix_ready"] = str(mix_path)
     st.session_state["isolate_mix_fp"] = fp
@@ -3462,6 +3487,14 @@ def _mixer_and_downloads_fragment(
             st.session_state["isolate_master_volume_db"] = float(
                 mixer_state["masterVolumeDb"]
             )
+        if "playbackRate" in mixer_state:
+            st.session_state["isolate_playback_rate"] = clamp_playback_rate(
+                float(mixer_state["playbackRate"])
+            )
+        if "playbackSemitones" in mixer_state:
+            st.session_state["isolate_playback_semitones"] = clamp_playback_semitones(
+                mixer_state["playbackSemitones"]
+            )
         if "hideYoutubeVideo" in mixer_state:
             st.session_state["isolate_hide_youtube_video"] = bool(
                 mixer_state["hideYoutubeVideo"]
@@ -3486,6 +3519,20 @@ def _mixer_and_downloads_fragment(
     master_volume_db = float(
         state.get("masterVolumeDb", st.session_state.get("isolate_master_volume_db", DB_DEFAULT))
     )
+    playback_rate = clamp_playback_rate(
+        float(
+            state.get(
+                "playbackRate",
+                st.session_state.get("isolate_playback_rate", PLAYBACK_RATE_DEFAULT),
+            )
+        )
+    )
+    playback_semitones = clamp_playback_semitones(
+        state.get(
+            "playbackSemitones",
+            st.session_state.get("isolate_playback_semitones", PLAYBACK_SEMITONES_DEFAULT),
+        )
+    )
 
     _render_downloads_panel(
         selected_stem_paths,
@@ -3496,6 +3543,8 @@ def _mixer_and_downloads_fragment(
         muted=muted,
         soloed=soloed,
         master_volume_db=master_volume_db,
+        playback_rate=playback_rate,
+        playback_semitones=playback_semitones,
     )
 
 
@@ -3557,9 +3606,13 @@ def _render_downloads_panel(
     muted: dict,
     soloed: dict,
     master_volume_db: float,
+    playback_rate: float = PLAYBACK_RATE_DEFAULT,
+    playback_semitones: int = PLAYBACK_SEMITONES_DEFAULT,
 ) -> None:
     """Save location and export to folder — equal-width button rows."""
     export_root = _resolved_export_dir()
+    rate = clamp_playback_rate(playback_rate)
+    semis = clamp_playback_semitones(playback_semitones)
     with st.container(border=True):
         st.caption(f"Save to: {export_root}")
         choose_col, open_col = st.columns(2)
@@ -3592,6 +3645,10 @@ def _render_downloads_panel(
 
         st.divider()
         fmt = _download_format_widget()
+        st.caption(
+            "Save current mix includes mute, solo, levels, and Speed & Key. "
+            "Save all tracks stays original speed/key."
+        )
         save_col, mix_col = st.columns(2)
         with save_col:
             if st.button(
@@ -3609,7 +3666,13 @@ def _render_downloads_panel(
                 width="stretch",
             ):
                 try:
-                    with st.spinner("Saving current mix..."):
+                    transform = abs(rate - 1.0) >= 1e-6 or semis != 0
+                    spinner = (
+                        "Saving current mix (applying Speed & Key)…"
+                        if transform
+                        else "Saving current mix..."
+                    )
+                    with st.spinner(spinner):
                         _build_current_mix(
                             selected_stem_paths,
                             run_dir,
@@ -3618,6 +3681,8 @@ def _render_downloads_panel(
                             muted,
                             soloed,
                             master_volume_db,
+                            playback_rate=rate,
+                            playback_semitones=semis,
                         )
                         ready = st.session_state.get("isolate_mix_ready")
                         if not ready or not Path(str(ready)).exists():
@@ -4390,10 +4455,11 @@ def _render_new_workspace(demucs_ok: bool) -> None:
     busy = separation_in_progress()
     if busy:
         st.caption("A separation is already running. This one starts when that finishes.")
+    has_source = _has_source_for_job(choice)
     if st.button(
         "Add to queue" if busy else "Separate tracks",
         type="primary",
-        disabled=not demucs_ok,
+        disabled=not demucs_ok or not has_source,
         key="isolate_separate",
     ):
         _try_enqueue_choice(choice)
@@ -4406,11 +4472,7 @@ def _render_new_workspace(demucs_ok: bool) -> None:
         )
         names = [CUSTOM_STEM_CHOICES[s] for s in stems]
         outcome_label = f"Custom · {', '.join(names)}" if names else "Custom"
-    source_note = (
-        "Source ready"
-        if _has_source_for_job(choice)
-        else "Upload a file or a YouTube URL"
-    )
+    source_note = "Source ready" if has_source else "Upload a file or a YouTube URL"
     st.caption(f"{outcome_label} · {source_note}")
 
 
@@ -4600,13 +4662,16 @@ def _render_mixer_workspace(browser_id: str | None) -> None:
         # Auto-opens when bass bleed is flagged. No re-separate panel.
         _render_guitar_fixup_panel(stem_paths, run_dir, artifacts_map or {}, bass_bleed)
 
-    source_audio_path = st.session_state.get("isolate_source_audio_path")
-    if source_audio_path and Path(source_audio_path).exists():
+    carry_path, carry_name, carry_is_stem = resolve_tab_pdf_carry_from_isolate(
+        st.session_state
+    )
+    if carry_path:
         st.divider()
         st.caption("Other tools")
         if st.button("Make a tab PDF from this →"):
-            st.session_state["carry_over_audio_path"] = source_audio_path
-            st.session_state["carry_over_audio_name"] = Path(source_audio_path).name
+            st.session_state["carry_over_audio_path"] = carry_path
+            st.session_state["carry_over_audio_name"] = carry_name
+            st.session_state["carry_over_is_guitar_stem"] = carry_is_stem
             _request_loading_overlay()
             st.switch_page(str(Path(__file__).with_name("tab_pdf.py")))
 

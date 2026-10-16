@@ -476,6 +476,19 @@ button.danger,
   flex-direction: column;
   gap: 0.25rem;
   margin-top: 0.35rem;
+  padding: 0.45rem 0.55rem 0.5rem;
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.45);
+  border: 1px solid var(--haze);
+}
+
+.mixer .practice-heading {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.62;
+  margin: 0 0 0.05rem;
 }
 
 .mixer .practice-row {
@@ -624,6 +637,62 @@ button.danger,
 .mixer input[type="range"].slider-master::-moz-range-thumb {
   width: 22px;
   height: 12px;
+  border-radius: 999px;
+  background: var(--moss);
+  border: 2px solid var(--paper);
+  box-shadow: none;
+}
+
+/* Speed & Key = same filled bar + moss capsule thumb */
+.mixer .slider-speed,
+.mixer .slider-key {
+  --range-fill: 0%;
+  padding: 10px 0;
+}
+
+.mixer input[type="range"].slider-speed::-webkit-slider-runnable-track,
+.mixer input[type="range"].slider-key::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--moss) 0%,
+    var(--moss) var(--range-fill),
+    color-mix(in srgb, var(--moss) 22%, var(--haze)) var(--range-fill),
+    color-mix(in srgb, var(--moss) 22%, var(--haze)) 100%
+  );
+}
+
+.mixer input[type="range"].slider-speed::-webkit-slider-thumb,
+.mixer input[type="range"].slider-key::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 14px;
+  margin-top: -3px;
+  border-radius: 999px;
+  background: var(--moss);
+  border: 2px solid var(--paper);
+  box-shadow: none;
+}
+
+.mixer input[type="range"].slider-speed::-moz-range-track,
+.mixer input[type="range"].slider-key::-moz-range-track {
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--moss) 0%,
+    var(--moss) var(--range-fill),
+    color-mix(in srgb, var(--moss) 22%, var(--haze)) var(--range-fill),
+    color-mix(in srgb, var(--moss) 22%, var(--haze)) 100%
+  );
+}
+
+.mixer input[type="range"].slider-speed::-moz-range-thumb,
+.mixer input[type="range"].slider-key::-moz-range-thumb {
+  width: 20px;
+  height: 14px;
   border-radius: 999px;
   background: var(--moss);
   border: 2px solid var(--paper);

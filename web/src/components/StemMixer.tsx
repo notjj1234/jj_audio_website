@@ -333,12 +333,13 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
         <div
           className="mixer-practice"
           role="group"
-          aria-label="Practice"
+          aria-label="Speed and Key"
           onDoubleClick={(e) => {
             if ((e.target as HTMLElement).closest("button, input")) return;
             resetPractice();
           }}
         >
+          <div className="practice-heading">Speed & Key</div>
           <div className="practice-row">
             <span className="practice-label">
               {formatPracticeSpeedLabel(practiceRate)}
@@ -353,10 +354,18 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
             </button>
             <input
               type="range"
+              className="slider-speed"
               min={PRACTICE_RATE_MIN}
               max={PRACTICE_RATE_MAX}
               step={PRACTICE_RATE_STEP}
               value={practiceRate}
+              style={{
+                ["--range-fill" as string]: rangeFillPct(
+                  practiceRate,
+                  PRACTICE_RATE_MIN,
+                  PRACTICE_RATE_MAX
+                ),
+              }}
               onChange={(e) => applyPracticeRate(Number(e.target.value))}
             />
             <button
@@ -382,10 +391,18 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
             </button>
             <input
               type="range"
+              className="slider-key"
               min={PRACTICE_KEY_MIN}
               max={PRACTICE_KEY_MAX}
               step={1}
               value={practiceSemitones}
+              style={{
+                ["--range-fill" as string]: rangeFillPct(
+                  practiceSemitones,
+                  PRACTICE_KEY_MIN,
+                  PRACTICE_KEY_MAX
+                ),
+              }}
               onChange={(e) => applyPracticeKey(Number(e.target.value))}
             />
             <button
@@ -397,8 +414,8 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
               +
             </button>
           </div>
-          <button type="button" className="ghost" onClick={resetPractice}>
-            Reset practice
+          <button type="button" className="ghost practice-reset" onClick={resetPractice}>
+            Reset
           </button>
           {practiceStatus && (
             <p className="practice-status" aria-live="polite">

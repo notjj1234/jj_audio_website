@@ -25,6 +25,7 @@ ensure_src_path()
 from audio_to_tab.pipeline import (  # noqa: E402
     YOUTUBE_DISCLAIMER,
     DEMUCS_INSTALL_HINT,
+    EmptyTranscriptionError,
     PipelineConfig,
     run_pipeline,
 )
@@ -113,21 +114,66 @@ def main() -> None:
             value="Guitar Tab",
             help="This text appears as the title on the generated tab PDF.",
         )
+        carry_over_path = st.session_state.get("carry_over_audio_path")
+        carry_over_name = st.session_state.get("carry_over_audio_name")
+        carry_is_guitar_stem = bool(st.session_state.get("carry_over_is_guitar_stem"))
+        # Solo-first default; re-seed off once when arriving with an Isolation stem.
+        if "tab_separate_stems" not in st.session_state:
+            st.session_state["tab_separate_stems"] = False
+        if (
+            carry_is_guitar_stem
+            and carry_over_path
+            and not st.session_state.get("_tab_separate_seeded_for_carry")
+        ):
+            st.session_state["tab_separate_stems"] = False
+            st.session_state["_tab_separate_seeded_for_carry"] = True
+        if "tab_safer_length" not in st.session_state:
+            st.session_state["tab_safer_length"] = True
+        if "tab_max_duration_sec" not in st.session_state:
+            st.session_state["tab_max_duration_sec"] = 90
         separate_stems = st.toggle(
-            "Separate guitar stem (needed for full mixes)",
-            value=can_separate,
+            "Separate guitar stem (full mixes only)",
             disabled=not can_separate,
+            key="tab_separate_stems",
             help=(
-                (
-                    "Turn off for solo guitar uploads (much faster). "
-                    "Install Demucs to enable: make install-demucs"
+                "Off by default for solo guitar (faster, usually better). "
+                "Turn on only for full mixes — or isolate guitar first on Audio Isolation."
+                + (
+                    f" Install Demucs to enable: {DEMUCS_INSTALL_HINT}"
                     if not can_separate
-                    else "Turn off only for solo guitar uploads (much faster)."
+                    else ""
                 )
-                if pro
-                else None
             ),
         )
+        if separate_stems and can_separate:
+            st.warning(
+                "Full mixes often leave guitar bleed and wrong notes (model limit). "
+                "Prefer **Audio Isolation** first, then **Make a tab PDF** — that carries "
+                "the guitar stem and skips a second separation."
+            )
+        safer_length = st.checkbox(
+            "Safer length (recommended)",
+            key="tab_safer_length",
+            help=(
+                "Trims long clips before transcription. Tab PDF works best on short "
+                "solo-guitar segments. Uncheck only if you need the full track."
+            ),
+        )
+        max_duration: float | None = None
+        if safer_length:
+            max_duration = float(
+                st.slider(
+                    "Max duration (seconds)",
+                    min_value=15,
+                    max_value=300,
+                    step=15,
+                    key="tab_max_duration_sec",
+                )
+            )
+        else:
+            st.caption(
+                "Full track will be processed. This is slow and often worse for Tab PDF."
+            )
         tab_model = "htdemucs_6s"
         tab_guitar_refine = False
         tab_guitar_checkpoint = None
@@ -140,7 +186,6 @@ def main() -> None:
         tempo_override = 0.0
         onset_threshold = 0.5
         frame_threshold = 0.3
-        max_duration: float | None = None
         if separate_stems and can_separate:
             if pro:
                 if "tab_low_end_restore_db" not in st.session_state:
@@ -256,41 +301,27 @@ def main() -> None:
                 )
                 onset_threshold = st.slider("Onset threshold", 0.3, 0.9, 0.5, 0.05)
                 frame_threshold = st.slider("Frame threshold", 0.2, 0.8, 0.3, 0.05)
-                limit_duration = st.checkbox(
-                    "Limit duration",
-                    value=False,
-                    help="Off = process the full track. On = trim to a max length for a faster draft.",
-                )
-                if limit_duration:
-                    max_duration = float(
-                        st.slider(
-                            "Max duration (seconds)",
-                            min_value=15,
-                            max_value=300,
-                            value=90,
-                            step=15,
-                        )
-                    )
-                else:
-                    st.caption(
-                        "Full track will be processed. This can take a long time on CPU for long songs."
-                    )
 
         uploaded = st.file_uploader(
             "Upload MP3 / WAV / FLAC / M4A",
             type=AUDIO_UPLOAD_TYPES,
         )
         st.caption(f"{max_upload_caption()} Files are processed locally.")
-        carry_over_path = st.session_state.get("carry_over_audio_path")
-        carry_over_name = st.session_state.get("carry_over_audio_name")
         using_carry_over = bool(
             not uploaded and carry_over_path and Path(carry_over_path).exists()
         )
         if using_carry_over:
-            st.caption(
-                f"Using audio carried over from Audio Isolation: **{carry_over_name}**. "
-                "Upload a file above to use something else instead."
-            )
+            if carry_is_guitar_stem:
+                st.caption(
+                    f"Using **guitar stem** from Audio Isolation: **{carry_over_name}**. "
+                    "Separate stays off so Tab PDF does not re-separate. "
+                    "Upload a file above to use something else instead."
+                )
+            else:
+                st.caption(
+                    f"Using audio carried over from Audio Isolation: **{carry_over_name}**. "
+                    "Upload a file above to use something else instead."
+                )
         youtube_url = st.text_input("Or paste a YouTube URL")
         st.caption(YOUTUBE_DISCLAIMER)
         # st.caption(
@@ -382,9 +413,13 @@ def main() -> None:
                 # Consumed — clear so it doesn't linger for unrelated future conversions.
                 st.session_state.pop("carry_over_audio_path", None)
                 st.session_state.pop("carry_over_audio_name", None)
+                st.session_state.pop("carry_over_is_guitar_stem", None)
+                st.session_state.pop("_tab_separate_seeded_for_carry", None)
                 # Rerun so Conversion settings collapses and results sit near the top.
                 st.rerun()
 
+            except EmptyTranscriptionError as exc:
+                st.error(str(exc))
             except YouTubeDownloadError as exc:
                 st.error(str(exc))
             except (FileNotFoundError, OSError) as exc:
@@ -453,6 +488,8 @@ def main() -> None:
         if st.button("Separate this in Audio Isolation →", type="primary"):
             st.session_state["carry_over_audio_path"] = source_audio_path
             st.session_state["carry_over_audio_name"] = Path(source_audio_path).name
+            st.session_state["carry_over_is_guitar_stem"] = False
+            st.session_state.pop("_tab_separate_seeded_for_carry", None)
             st.session_state["_nav_loading"] = True
             st.switch_page(str(Path(__file__).with_name("isolate.py")))
 

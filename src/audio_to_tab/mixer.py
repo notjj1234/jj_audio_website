@@ -48,8 +48,61 @@ STEM_LABELS = {
 DB_MIN = -25.0
 DB_MAX = 25.0
 DB_DEFAULT = 0.0
+# Speed & Key clamps shared with the live mixer UI (practice.ts).
+PLAYBACK_RATE_MIN = 0.5
+PLAYBACK_RATE_MAX = 1.5
+PLAYBACK_RATE_DEFAULT = 1.0
+PLAYBACK_SEMITONES_MIN = -6
+PLAYBACK_SEMITONES_MAX = 6
+PLAYBACK_SEMITONES_DEFAULT = 0
 # Master-bus ceiling shared with the live Web Audio mixer (~−1 dBTP).
 TRUE_PEAK_CEILING = 10.0 ** (-1.0 / 20.0)  # ≈ 0.89125 linear
+
+
+def clamp_playback_rate(rate: float) -> float:
+    if not np.isfinite(rate):
+        return PLAYBACK_RATE_DEFAULT
+    stepped = round(float(rate) / 0.05) * 0.05
+    return float(max(PLAYBACK_RATE_MIN, min(PLAYBACK_RATE_MAX, round(stepped, 2))))
+
+
+def clamp_playback_semitones(semitones: float | int) -> int:
+    if not np.isfinite(float(semitones)):
+        return PLAYBACK_SEMITONES_DEFAULT
+    return int(
+        max(
+            PLAYBACK_SEMITONES_MIN,
+            min(PLAYBACK_SEMITONES_MAX, round(float(semitones))),
+        )
+    )
+
+
+def apply_playback_transform(
+    wav_path: str | Path,
+    *,
+    rate: float = PLAYBACK_RATE_DEFAULT,
+    semitones: float | int = PLAYBACK_SEMITONES_DEFAULT,
+) -> Path:
+    """Apply Speed & Key offline (librosa). No-op at 1× / 0 st. In-place rewrite."""
+    import librosa
+
+    path = Path(wav_path)
+    rate_c = clamp_playback_rate(rate)
+    semis = clamp_playback_semitones(semitones)
+    if abs(rate_c - PLAYBACK_RATE_DEFAULT) < 1e-6 and semis == PLAYBACK_SEMITONES_DEFAULT:
+        return path
+
+    data, sr = sf.read(str(path), always_2d=True, dtype="float32")
+    # librosa expects (n,) or (n_channels, n); we keep stereo as channel-major.
+    y = data.T
+    if semis != PLAYBACK_SEMITONES_DEFAULT:
+        y = librosa.effects.pitch_shift(y, sr=sr, n_steps=float(semis))
+    if abs(rate_c - PLAYBACK_RATE_DEFAULT) >= 1e-6:
+        y = librosa.effects.time_stretch(y, rate=rate_c)
+    out = y.T.astype(np.float32, copy=False)
+    out = apply_true_peak_ceiling(out)
+    sf.write(str(path), out, int(sr), subtype="PCM_16")
+    return path
 
 
 def apply_true_peak_ceiling(

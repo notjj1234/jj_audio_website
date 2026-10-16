@@ -1325,6 +1325,29 @@ def discard_youtube_staging(
         return False
 
 
+def resolve_tab_pdf_carry_from_isolate(
+    session: Mapping[str, object],
+) -> tuple[str | None, str | None, bool]:
+    """Pick Tab PDF carry-over audio from Isolation results.
+
+    Prefers ``isolate_artifacts["guitar"]`` when the file exists; otherwise the
+    source mix. Returns ``(path, display_name, is_guitar_stem)``.
+    """
+    artifacts = session.get("isolate_artifacts")
+    if isinstance(artifacts, dict):
+        raw = artifacts.get("guitar")
+        if raw:
+            guitar = Path(str(raw))
+            if guitar.is_file():
+                return str(guitar), guitar.name, True
+    source = session.get("isolate_source_audio_path")
+    if source:
+        mix = Path(str(source))
+        if mix.is_file():
+            return str(mix), mix.name, False
+    return None, None, False
+
+
 def reset_new_tab_source(session: MutableMapping[str, object]) -> None:
     """Remount the uploader and clear New-tab source after a job is queued.
 
@@ -1352,6 +1375,7 @@ def reset_new_tab_source(session: MutableMapping[str, object]) -> None:
         "isolate_duration_fp",
         "carry_over_audio_path",
         "carry_over_audio_name",
+        "carry_over_is_guitar_stem",
     ):
         session.pop(key, None)
     queue_clear_youtube_url(session)
@@ -1418,6 +1442,7 @@ _DRAFT_SOURCE_LIVE_KEYS = (
     "isolate_duration_fp",
     "carry_over_audio_path",
     "carry_over_audio_name",
+    "carry_over_is_guitar_stem",
     ISOLATE_OUTPUT_NAME_KEY,
     ISOLATE_OUTPUT_NAME_PENDING_KEY,
     ISOLATE_YOUTUBE_URL_KEY,
