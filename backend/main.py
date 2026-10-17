@@ -322,7 +322,7 @@ async def create_job(
     request.state.user_id = user.id
     if not body.upload_id and not body.youtube_url:
         raise HTTPException(400, "Provide upload_id or youtube_url")
-    if body.youtube_url and not settings.allow_youtube:
+    if body.youtube_url and not settings.allow_youtssube:
         raise HTTPException(403, "YouTube ingestion is disabled")
 
     if body.processing_mode:
