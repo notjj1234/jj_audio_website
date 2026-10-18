@@ -180,6 +180,7 @@ hiddenimports += [
     "ui.common",
     "ui.media",
     "ui.isolate_state",
+    "ui.pages.home",
     "ui.pages.isolate",
     "ui.pages.youtube_audio",
     "ui.pages.tab_pdf",
@@ -471,7 +472,9 @@ exe = EXE(
     upx=False,
     console=False,
     disable_windowed_traceback=False,
-    argv_emulation=False,
+    # macOS document open arrives as an Apple Event, not argv, unless the
+    # bootloader copies it onto sys.argv. Windows ignores this flag.
+    argv_emulation=True,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,

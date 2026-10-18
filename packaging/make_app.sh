@@ -95,6 +95,33 @@ plist.write_text(
   <string>12.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Audio or video</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>mp3</string>
+        <string>wav</string>
+        <string>flac</string>
+        <string>m4a</string>
+        <string>mpeg</string>
+        <string>mp4</string>
+        <string>aac</string>
+        <string>ogg</string>
+        <string>aiff</string>
+        <string>aif</string>
+        <string>mov</string>
+        <string>webm</string>
+        <string>mkv</string>
+      </array>
+    </dict>
+  </array>
 </dict>
 </plist>
 """,

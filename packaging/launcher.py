@@ -52,21 +52,7 @@ BROWSER_FALLBACK_ENV = "AUDIO_TOOLS_ALLOW_BROWSER"
 DEV_RELOAD_ENV = "AUDIO_TOOLS_DEV"
 
 # Native open-panel filter when HTML accept MIME types fail to map (common on macOS).
-_AUDIO_OPEN_EXTENSIONS = (
-    "mp3",
-    "wav",
-    "flac",
-    "m4a",
-    "mpeg",
-    "mp4",
-    "aac",
-    "ogg",
-    "aiff",
-    "aif",
-    "mov",
-    "webm",
-    "mkv",
-)
+# The list lives in ui/opened_audio.py so Open With and this dialog stay the same.
 
 # Native window wash. Light matches the page wash in ui/theme_presets.py.
 _WINDOW_BG_DARK = "#192542"
@@ -595,6 +581,7 @@ def configure_environment(bundle: Path) -> Path:
         path.mkdir(parents=True, exist_ok=True)
 
     os.environ.setdefault("AUDIO_TOOLS_DATA_DIR", str(runs_dir))
+    os.environ.setdefault("AUDIO_TOOLS_PENDING_OPEN", str(data_root / "pending_open"))
     os.environ.setdefault("TORCH_HOME", str(torch_home))
     os.environ.setdefault("HF_HOME", str(torch_home / "huggingface"))
     os.environ["STREAMLIT_BROWSER_GATHER_USAGE_STATS"] = "false"
@@ -923,7 +910,7 @@ def _patch_webview_audio_open_dialogs() -> None:
         return
 
     original = browser_view.create_file_dialog
-    audio_filter = [["Audio or video", list(_AUDIO_OPEN_EXTENSIONS)]]
+    audio_filter = [["Audio or video", list(_audio_open_extensions())]]
 
     def create_file_dialog(
         self,
@@ -1229,6 +1216,39 @@ def _not_ready_message(url: str) -> str:
     )
 
 
+def _audio_open_extensions() -> tuple[str, ...]:
+    from ui.opened_audio import OPENED_AUDIO_EXTENSIONS
+
+    return OPENED_AUDIO_EXTENSIONS
+
+
+def _pending_open_dir() -> Path:
+    raw = os.environ.get("AUDIO_TOOLS_PENDING_OPEN", "").strip()
+    if raw:
+        return Path(raw)
+    return _user_data_root() / "pending_open"
+
+
+def _handoff_opened_files(argv: list[str] | None = None) -> None:
+    """Queue audio the OS passed on the command line for the running Isolate page.
+
+    A second launch (the app is already open) writes the queue and then focuses
+    the existing window. The first launch writes it before Streamlit starts.
+    """
+    from ui.opened_audio import enqueue_opened_paths, paths_from_argv
+
+    accepted, declined = paths_from_argv(list(sys.argv if argv is None else argv))
+    items = [{"path": str(path)} for path in accepted]
+    items.extend({"path": str(path), "declined": True} for path in declined)
+    if not items:
+        return
+    enqueue_opened_paths(_pending_open_dir(), items)
+    _log(
+        f"Queued {len(accepted)} opened file(s)"
+        + (f" and declined {len(declined)}" if declined else "")
+    )
+
+
 def run_desktop_app(workdir: Path) -> int:
     _enable_crash_log()
     if _is_frozen() and _running_from_dmg():
@@ -1237,6 +1257,8 @@ def run_desktop_app(workdir: Path) -> int:
             "Do not run it from the disk image."
         )
         return 1
+
+    _handoff_opened_files()
 
     existing = _existing_instance()
     if existing is not None:

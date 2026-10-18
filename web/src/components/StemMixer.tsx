@@ -19,6 +19,15 @@ import {
   type StemInfo,
 } from "../mixer/engine";
 import {
+  PAN_DEFAULT,
+  PAN_MAX,
+  PAN_MIN,
+  clampPan,
+  formatPan,
+  panSpoken,
+  snapPanToCenter,
+} from "../mixer/pan";
+import {
   PRACTICE_KEY_DEFAULT,
   PRACTICE_KEY_MAX,
   PRACTICE_KEY_MIN,
@@ -60,7 +69,10 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
     muted: {},
     soloed: {},
     masterVolumeDb: DB_DEFAULT,
+    pan: {},
   });
+  /** Stem whose pan slider is being dragged with a pointer (keys never snap). */
+  const panDragRef = useRef<string | null>(null);
   const [mixError, setMixError] = useState<string | null>(null);
   const [mixBusy, setMixBusy] = useState(false);
   const [preset, setPreset] = useState<PlaybackPreset | "custom">("all");
@@ -98,11 +110,13 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
       muted: {},
       soloed: {},
       masterVolumeDb: DB_DEFAULT,
+      pan: {},
     };
     for (const s of stems) {
       next.volumesDb[s.id] = DB_DEFAULT;
       next.muted[s.id] = defaultMuted(s.id);
       next.soloed[s.id] = false;
+      next.pan![s.id] = PAN_DEFAULT;
     }
     setPreset("all");
     setState(next);
@@ -142,6 +156,25 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
     engineRef.current.applyGains(effectiveGains(stemIds, next));
   };
 
+  /** Pan never changes mute, solo, or level, so it skips `apply` (gains). */
+  const setPan = (id: string, raw: number, opts?: { snap?: boolean }) => {
+    const value = opts?.snap ? snapPanToCenter(raw) : clampPan(raw);
+    const pan = { ...(state.pan ?? {}), [id]: value };
+    setState({ ...state, pan });
+    engineRef.current.applyPans(pan);
+  };
+
+  const beginPanDrag = (id: string) => {
+    panDragRef.current = id;
+    window.addEventListener("pointerup", endPanDrag, { once: true });
+    window.addEventListener("pointercancel", endPanDrag, { once: true });
+  };
+
+  const endPanDrag = () => {
+    panDragRef.current = null;
+  };
+
+  const anyPanned = stemIds.some((id) => (state.pan?.[id] ?? PAN_DEFAULT) !== PAN_DEFAULT);
   const everyMuted = allMuted(stemIds, state);
   const soloActive = anySoloed(stemIds, state);
   const canSeek = duration > 0;
@@ -487,6 +520,7 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
       <div className="mixer-stems">
         {stems.map((stem) => {
           const db = state.volumesDb[stem.id] ?? DB_DEFAULT;
+          const pan = clampPan(state.pan?.[stem.id] ?? PAN_DEFAULT);
           const muted = !!state.muted[stem.id];
           const soloed = !!state.soloed[stem.id];
           const audible = isAudible(stem.id, stemIds, state);
@@ -559,10 +593,43 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
                   {db.toFixed(1)}
                 </span>
               </label>
+              <label
+                className="stem-pan"
+                title="Pan: drag, use arrow keys, or double-click to center"
+              >
+                <span className="pan-name" aria-hidden="true">
+                  Pan
+                </span>
+                <span className="visually-hidden">{stem.label} pan</span>
+                <input
+                  type="range"
+                  className="pan-slider"
+                  min={PAN_MIN}
+                  max={PAN_MAX}
+                  step={1}
+                  value={pan}
+                  aria-valuetext={panSpoken(pan)}
+                  onPointerDown={() => beginPanDrag(stem.id)}
+                  onKeyDown={endPanDrag}
+                  onBlur={endPanDrag}
+                  onChange={(e) =>
+                    setPan(stem.id, Number(e.target.value), {
+                      snap: panDragRef.current === stem.id,
+                    })
+                  }
+                  onDoubleClick={() => setPan(stem.id, PAN_DEFAULT)}
+                />
+                <span className="pan-val" aria-hidden="true">
+                  {formatPan(pan)}
+                </span>
+              </label>
             </div>
           );
         })}
       </div>
+      {anyPanned && (
+        <p className="hint">Download current mix includes your pan.</p>
+      )}
     </div>
   );
 }

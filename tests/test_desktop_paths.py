@@ -707,6 +707,35 @@ def test_second_launch_focuses_instead_of_starting_another_server(tmp_path, monk
     assert launcher._read_lock() == {"pid": os.getpid(), "port": 8501}
 
 
+def test_second_launch_with_a_file_queues_it_and_does_not_start_a_server(tmp_path, monkeypatch):
+    launcher = _load_launcher()
+    monkeypatch.setattr(launcher, "_user_data_root", lambda: tmp_path)
+    monkeypatch.delenv("AUDIO_TOOLS_PENDING_OPEN", raising=False)
+    song = tmp_path / "Song.wav"
+    song.write_bytes(b"audio")
+    monkeypatch.setattr(launcher.sys, "argv", ["AudioTools", str(song)])
+    launcher._write_lock(8501)
+    monkeypatch.setattr(launcher, "_health_ok", lambda port: True)
+    focused: list[int] = []
+    monkeypatch.setattr(
+        launcher,
+        "_focus_existing_instance",
+        lambda pid: focused.append(pid) or True,
+    )
+
+    def _forbidden(*_args, **_kwargs):
+        raise AssertionError("a second instance must not start a server or a window")
+
+    monkeypatch.setattr(launcher, "_spawn_server", _forbidden)
+    monkeypatch.setattr(launcher, "_run_native_window", _forbidden)
+
+    assert launcher.run_desktop_app(tmp_path) == 0
+    assert focused == [os.getpid()]
+    queued = list((tmp_path / "pending_open").glob("*.json"))
+    assert len(queued) == 1
+    assert song.name in queued[0].read_text(encoding="utf-8")
+
+
 def test_unfocusable_windows_instance_is_reclaimed_not_sent_to_a_browser(tmp_path, monkeypatch):
     """An orphaned server with no window gets ended so a real window can start."""
     launcher = _load_launcher()
@@ -1045,14 +1074,18 @@ def test_youtube_audio_page_nav_order_and_freeze_import():
     spec = (root / "packaging" / "audio_tools.spec").read_text(encoding="utf-8")
     page = (root / "ui" / "pages" / "youtube_audio.py").read_text(encoding="utf-8")
     nav_block = app.split("_nav =")[1].split("pg = st.navigation")[0]
+    home_at = nav_block.find("home.py")
     isolate_at = nav_block.find("isolate.py")
     youtube_at = nav_block.find("youtube_audio.py")
     tab_at = nav_block.find("tab_pdf.py")
-    assert 0 <= isolate_at < youtube_at < tab_at
+    assert 0 <= home_at < isolate_at < youtube_at < tab_at
+    assert 'title="Home", default=True' in nav_block
+    assert 'title="Audio Isolation", default=True' not in nav_block
     assert 'title="Audio Isolation"' in nav_block
     assert 'title="YouTube to MP3"' in nav_block
     assert 'title="Tab PDF (demo)"' in nav_block
     assert 'st.title(\n        "YouTube to MP3"' in page
+    assert "ui.pages.home" in spec
     assert "ui.pages.youtube_audio" in spec
     assert '"Search"' in page or "Search" in page
     assert "yt_audio_search_open_btn" in page

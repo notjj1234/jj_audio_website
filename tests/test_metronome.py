@@ -12,9 +12,11 @@ import soundfile as sf
 from audio_to_tab.metronome import (
     METRONOME_STEM_ID,
     MetronomeRenderOptions,
+    align_click_grid_to_downbeat,
     apply_click_rate,
     attach_metronome_artifact,
     build_click_times,
+    click_grid_for_playback,
     coerce_metronome_render_options,
     detect_beats_per_measure,
     gate_unreliable_intro_beats,
@@ -390,6 +392,162 @@ def test_apply_click_rate_identity_and_half_and_double():
     doubled = apply_click_rate(gappy, rate=2.0, ref_sec=0.0)
     assert any(abs(float(t) - 0.25) < 1e-9 for t in doubled)
     assert not any(abs(float(t) - 3.0) < 0.05 for t in doubled)
+
+
+def _tone_burst(y: np.ndarray, sr: int, t0: float, freq: float, amp: float) -> None:
+    n = int(0.06 * sr)
+    start = int(round(t0 * sr))
+    if start < 0 or start >= y.size:
+        return
+    count = min(n, y.size - start)
+    tt = np.arange(count, dtype=np.float64) / float(sr)
+    env = np.exp(-tt / 0.012)
+    y[start : start + count] += (amp * env * np.sin(2.0 * np.pi * freq * tt)).astype(np.float32)
+
+
+def _kick_snare_bar(
+    sr: int,
+    duration: float,
+    *,
+    beat1_amp: float = 0.9,
+    beat3_amp: float = 0.35,
+    snare_amp: float = 1.15,
+) -> np.ndarray:
+    """4/4 at 120 BPM: kick on 1 and 3, louder snare on 2 and 4."""
+    y = np.zeros(int(sr * duration), dtype=np.float32)
+    t = 0.0
+    beat = 0.5
+    while t < duration - 0.02:
+        step = int(round(t / beat)) % 4
+        if step == 0:
+            _tone_burst(y, sr, t, 70.0, beat1_amp)
+        elif step == 2:
+            _tone_burst(y, sr, t, 70.0, beat3_amp)
+        else:
+            _tone_burst(y, sr, t, 1800.0, snare_amp)
+        t += beat
+    return y
+
+
+def test_downbeat_follows_kick_not_louder_snare():
+    """Smart + accent used to lock to the loudest hit, which is often beat 2."""
+    sr = 22050
+    duration = 8.0
+    audio = _kick_snare_bar(sr, duration)
+    times = np.arange(0.0, duration, 0.5, dtype=np.float64)
+    aligned, downbeat, doubled = align_click_grid_to_downbeat(
+        times,
+        audio,
+        sr,
+        beats_per_measure=4,
+        fallback_ref_sec=0.5,
+        duration_sec=duration,
+    )
+    assert doubled is False
+    assert abs(downbeat - 0.0) < 1e-6
+    assert abs(aligned.size - times.size) <= 1
+    one = apply_click_rate(aligned, rate=1.0, ref_sec=downbeat)
+    double = apply_click_rate(aligned, rate=2.0, ref_sec=downbeat)
+    assert any(abs(float(t) - 0.0) < 1e-6 for t in one)
+    assert any(abs(float(t) - 0.25) < 1e-6 for t in double)
+    half = apply_click_rate(aligned, rate=0.5, ref_sec=downbeat)
+    assert any(abs(float(t) - 0.0) < 1e-6 for t in half)
+    assert not any(abs(float(t) - 0.5) < 1e-6 for t in half)
+
+
+def test_half_time_backbeat_grid_includes_beat_one_at_rate_1():
+    """×2 used to be the only way to hear beat 1 when the grid sat on 2 and 4."""
+    sr = 22050
+    duration = 8.0
+    audio = _kick_snare_bar(sr, duration)
+    snares = np.arange(0.5, duration, 1.0, dtype=np.float64)
+    aligned, downbeat, doubled = align_click_grid_to_downbeat(
+        snares,
+        audio,
+        sr,
+        beats_per_measure=4,
+        fallback_ref_sec=0.5,
+        duration_sec=duration,
+    )
+    assert doubled is True
+    assert abs(downbeat - 0.0) < 1e-6
+    one = apply_click_rate(aligned, rate=1.0, ref_sec=downbeat)
+    assert any(abs(float(t) - 0.0) < 1e-6 for t in one)
+    assert any(abs(float(t) - 0.5) < 1e-6 for t in one)
+    double = apply_click_rate(aligned, rate=2.0, ref_sec=downbeat)
+    assert any(abs(float(t) - 0.25) < 1e-6 for t in double)
+    assert double.size > one.size
+
+
+def test_even_pulse_grid_is_not_doubled():
+    sr = 22050
+    duration = 8.0
+    y = np.zeros(int(sr * duration), dtype=np.float32)
+    times = np.arange(0.0, duration, 0.5, dtype=np.float64)
+    for t in times:
+        _tone_burst(y, sr, float(t), 1000.0, 0.8)
+    aligned, downbeat, doubled = align_click_grid_to_downbeat(
+        times,
+        y,
+        sr,
+        fallback_ref_sec=2.0,
+        duration_sec=duration,
+    )
+    assert doubled is False
+    assert abs(downbeat - 2.0) < 1e-6
+    np.testing.assert_allclose(aligned, times)
+
+
+def test_legacy_playback_aligns_without_rewriting_saved_grid(tmp_path: Path):
+    sr = 22050
+    duration = 8.0
+    audio = _kick_snare_bar(sr, duration)
+    drums = tmp_path / "drums.wav"
+    sf.write(str(drums), np.column_stack([audio, audio]), sr, subtype="PCM_16")
+    snares = [float(t) for t in np.arange(0.5, duration, 1.0)]
+    diag = {
+        "bpm": 60.0,
+        "body_start_sec": 0.5,
+        "beats_per_measure": 4,
+        "duration_sec": duration,
+        "click_times_1x": snares,
+    }
+    aligned, downbeat, bpm = click_grid_for_playback(np.asarray(snares), diag, drums)
+    assert abs(downbeat - 0.0) < 1e-6
+    assert bpm == pytest.approx(120.0)
+    assert any(abs(float(t) - 0.0) < 1e-6 for t in aligned)
+    assert not (tmp_path / "metronome_diagnostics.json").exists()
+    kept, ref, kept_bpm = click_grid_for_playback(
+        np.asarray(snares),
+        {**diag, "downbeat_sec": 0.5},
+        drums,
+    )
+    np.testing.assert_allclose(kept, snares)
+    assert ref == pytest.approx(0.5)
+    assert kept_bpm == pytest.approx(60.0)
+
+
+def test_rebake_does_not_realign_or_retrack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    src = tmp_path / "drums.wav"
+    _write_pulse_train(src, bpm=120.0, duration=4.0)
+    result = generate_metronome_stem(src, tmp_path / "metronome.wav", source="drums")
+    assert result is not None
+    assert result.downbeat_sec is not None
+    write_metronome_diagnostics(tmp_path / "metronome_diagnostics.json", result)
+    stored = list(result.click_times_1x)
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("beat_track should not run during rebake")
+
+    def no_align(*_args, **_kwargs):
+        raise AssertionError("rebake must keep the stored grid")
+
+    monkeypatch.setattr("librosa.beat.beat_track", boom)
+    monkeypatch.setattr("audio_to_tab.metronome.align_click_grid_to_downbeat", no_align)
+    rebaked = rebake_metronome_artifact(tmp_path, MetronomeRenderOptions(rate=2.0))
+    assert rebaked is not None
+    assert list(rebaked.click_times_1x) == stored
+    assert rebaked.downbeat_sec == pytest.approx(result.downbeat_sec)
 
 
 def test_coerce_metronome_render_options_defaults():

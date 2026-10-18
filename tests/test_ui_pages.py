@@ -315,3 +315,27 @@ def test_hosted_isolate_blocks_over_cap_and_section_until_duration() -> None:
     assert "SLEEP_RESUME_HINT" in mixer
     assert 'className="primary"' in mixer
     assert 'prev === SLEEP_RESUME_HINT' in mixer
+
+
+def test_home_relative_age_and_search_and_real_destinations() -> None:
+    from ui.pages.home import _matches, relative_age
+
+    now = 1_700_000_000.0
+    assert relative_age(now - 30, now=now) == "just now"
+    assert relative_age(now - 120, now=now) == "2 minutes ago"
+    assert relative_age(now - 3 * 3600, now=now) == "3 hours ago"
+    assert relative_age(now - 2 * 86400, now=now) == "2 days ago"
+    assert relative_age("nope") == ""
+    row = {"title": "Party Song", "source_kind": "file", "run_dir": "/tmp/r"}
+    assert _matches(row, "party")
+    assert not _matches(row, "mastering")
+    page = (
+        Path(__file__).resolve().parents[1] / "ui" / "pages" / "home.py"
+    ).read_text(encoding="utf-8")
+    assert "Mastering" not in page
+    assert "Voice Studio" not in page
+    assert "Lyric" not in page
+    assert 'open_new_separation' in page
+    assert 'youtube_audio.py' in page
+    assert 'tab_pdf.py' in page
+    assert "open_saved_run" in page

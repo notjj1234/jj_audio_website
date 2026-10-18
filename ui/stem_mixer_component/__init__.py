@@ -55,6 +55,7 @@ def stem_mixer(
     initial_volumes_db: dict[str, float] | None = None,
     initial_muted: dict[str, bool] | None = None,
     initial_soloed: dict[str, bool] | None = None,
+    initial_pan: dict[str, int] | None = None,
     initial_master_volume_db: float = 0.0,
     track_title: str = "",
     metronome: dict[str, Any] | None = None,
@@ -80,8 +81,11 @@ def stem_mixer(
     ``theme_vars`` (optional): CSS custom properties for theming the iframe.
     Pass the result of ``get_iframe_theme_vars()`` from isolate_state.
 
+    ``initial_pan`` (optional): per-stem pan in whole steps, -100 (left) to
+    100 (right), 0 = center. Pan is for live listening; saved files stay centered.
+
     Returns the latest control state from the browser, e.g.
-    ``{volumesDb, muted, soloed, masterVolumeDb, metronomeOptions?}``,
+    ``{volumesDb, pan, muted, soloed, masterVolumeDb, metronomeOptions?}``,
     or None before the first report.
     """
     if _stem_mixer is None:
@@ -94,6 +98,7 @@ def stem_mixer(
         initialVolumesDb=initial_volumes_db or {},
         initialMuted=initial_muted or {},
         initialSoloed=initial_soloed or {},
+        initialPan=initial_pan or {},
         initialMasterVolumeDb=float(initial_master_volume_db),
         trackTitle=track_title,
         metronome=metronome,

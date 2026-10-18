@@ -15,7 +15,8 @@ def test_contributor_docs_match_the_readiness_plan():
     assert "3.11" in top
 
     security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
-    assert "[MAINTAINER_EMAIL]" in security
+    assert "orallojohnjames@gmail.com" in security
+    assert "[MAINTAINER_EMAIL]" not in security
     assert "public issue" in security
     for scope in ("uploads", "auth", "YouTube fetch", "desktop packaging"):
         assert scope in security

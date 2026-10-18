@@ -1443,6 +1443,7 @@ _DRAFT_SOURCE_LIVE_KEYS = (
     "carry_over_audio_path",
     "carry_over_audio_name",
     "carry_over_is_guitar_stem",
+    "isolate_pending_video_path",
     ISOLATE_OUTPUT_NAME_KEY,
     ISOLATE_OUTPUT_NAME_PENDING_KEY,
     ISOLATE_YOUTUBE_URL_KEY,
@@ -1885,6 +1886,180 @@ def open_mix_tabs_for_session(
     session[OPEN_MIX_TABS_KEY] = tabs
     return tabs
 
+
+# One-shot message for the next Isolate paint (rendered once, then dropped).
+MIX_TAB_NOTICE_KEY = "_isolate_mix_tab_notice"
+_YOUTUBE_STAGING_DRAFT_KEYS = (
+    "isolate_pending_audio_path",
+    "isolate_pending_fp",
+    "isolate_upload_fp",
+    "isolate_duration_sec",
+    "isolate_duration_fp",
+)
+
+
+def _open_tabs_in_order(session: Mapping[str, Any]) -> list[str]:
+    return normalize_open_mix_tabs(session.get(OPEN_MIX_TABS_KEY), require_dir=False)
+
+
+def _match_open_tab(tabs: list[str], tab_id: object) -> str | None:
+    path = str(tab_id or "").strip()
+    if not path:
+        return None
+    if path in tabs:
+        return path
+    return next((p for p in tabs if mix_tab_ids_equal(p, path)), None)
+
+
+def _drop_open_tabs(
+    session: MutableMapping[str, Any], tabs: list[str], drop: set[str]
+) -> None:
+    session[OPEN_MIX_TABS_KEY] = [p for p in tabs if p not in drop]
+    sources = _draft_sources_map(session)
+    for path in drop:
+        if is_new_draft_tab(path):
+            sources.pop(path, None)
+
+
+def move_open_mix_tab(
+    session: MutableMapping[str, Any],
+    tab_id: object,
+    to_index: int | str | None,
+) -> bool:
+    """Move one tab so it ends at ``to_index`` (0-based). Home is not a slot.
+
+    Returns True only when the order changed. Out-of-range targets clamp to the
+    ends, so a drop past the last tab means "last".
+    """
+    tabs = _open_tabs_in_order(session)
+    path = _match_open_tab(tabs, tab_id)
+    if path is None:
+        return False
+    try:
+        target = int(to_index)
+    except (TypeError, ValueError):
+        return False
+    target = max(0, min(target, len(tabs) - 1))
+    current = tabs.index(path)
+    if target == current:
+        return False
+    tabs.pop(current)
+    tabs.insert(target, path)
+    session[OPEN_MIX_TABS_KEY] = tabs
+    return True
+
+
+def close_other_open_mix_tabs(
+    session: MutableMapping[str, Any],
+    keep_id: object,
+    *,
+    protect: Iterable[str] = (),
+) -> tuple[list[str], list[str]]:
+    """Close every tab except ``keep_id``. Returns ``(closed, spared)``.
+
+    ``protect`` ids (tabs whose separation is still running) stay open and come
+    back as ``spared``. Strip only: nothing is deleted from disk.
+    """
+    tabs = _open_tabs_in_order(session)
+    keep = _match_open_tab(tabs, keep_id)
+    if keep is None:
+        return [], []
+    guarded = {str(p) for p in protect}
+    others = [p for p in tabs if p != keep]
+    spared = [p for p in others if p in guarded]
+    closed = [p for p in others if p not in guarded]
+    _drop_open_tabs(session, tabs, set(closed))
+    return closed, spared
+
+
+def close_right_open_mix_tabs(
+    session: MutableMapping[str, Any],
+    anchor_id: object,
+    *,
+    protect: Iterable[str] = (),
+) -> tuple[list[str], list[str]]:
+    """Close every tab to the right of ``anchor_id``. Returns ``(closed, spared)``."""
+    tabs = _open_tabs_in_order(session)
+    anchor = _match_open_tab(tabs, anchor_id)
+    if anchor is None:
+        return [], []
+    guarded = {str(p) for p in protect}
+    right = tabs[tabs.index(anchor) + 1 :]
+    spared = [p for p in right if p in guarded]
+    closed = [p for p in right if p not in guarded]
+    _drop_open_tabs(session, tabs, set(closed))
+    return closed, spared
+
+
+def duplicate_open_mix_tab(
+    session: MutableMapping[str, Any],
+    tab_id: object,
+    *,
+    title: str | None = None,
+    source_audio_path: str | Path | None = None,
+) -> str | None:
+    """Open a second tab next to ``tab_id`` and focus it. Returns the new draft id.
+
+    Duplicate never copies stems and never touches a run on disk:
+
+    * a New draft is copied (its staged source and settings);
+    * a finished mix opens a New draft with the same song staged, named
+      "<title> copy", so the musician can separate it again another way.
+
+    A YouTube-staged draft keeps its URL but not its staging file (that folder
+    belongs to the original), so the copy downloads its own. When a mix's source
+    audio is gone, the draft opens empty and ``MIX_TAB_NOTICE_KEY`` says why.
+    """
+    tabs = _open_tabs_in_order(session)
+    origin = _match_open_tab(tabs, tab_id)
+    if origin is None:
+        return None
+    save_active_draft_source(session)
+
+    if is_new_draft_tab(origin):
+        stored = _draft_sources_map(session).get(origin)
+        snap = dict(stored) if isinstance(stored, dict) else {}
+        fp = str(snap.get("isolate_pending_fp") or snap.get("isolate_upload_fp") or "")
+        if fp.startswith("youtube:"):
+            for key in _YOUTUBE_STAGING_DRAFT_KEYS:
+                snap.pop(key, None)
+        base = title if title is not None else draft_tab_title(session, origin)
+    else:
+        snap = {}
+        base = str(title or "").strip()
+        source = str(source_audio_path or "").strip()
+        if source and Path(source).is_file():
+            snap["carry_over_audio_path"] = source
+            snap["carry_over_audio_name"] = Path(source).name
+        else:
+            session[MIX_TAB_NOTICE_KEY] = (
+                "The original audio for this mix is no longer on disk. "
+                "Upload it again to separate it a second time."
+            )
+
+    base = str(base or "").strip()
+    if base == "New":
+        base = ""
+    # The strip title reads the pending name first; never write the widget key.
+    snap.pop(ISOLATE_OUTPUT_NAME_KEY, None)
+    snap.pop(ISOLATE_OUTPUT_NAME_PENDING_KEY, None)
+    if base:
+        snap[ISOLATE_OUTPUT_NAME_PENDING_KEY] = f"{base} copy"
+
+    draft_id = make_new_draft_tab_id()
+    ordered = list(tabs)
+    ordered.insert(ordered.index(origin) + 1, draft_id)
+    session[OPEN_MIX_TABS_KEY] = normalize_open_mix_tabs(
+        ordered, require_dir=False, protect=[origin, draft_id]
+    )
+    session[SHELL_TAB_KEY] = draft_id
+    session[SHELL_VIEW_NEXT_KEY] = "home"
+    session[WORKSPACE_NEXT_KEY] = "New"
+    apply_draft_source_snapshot(session, snap)
+    _draft_sources_map(session)[draft_id] = snapshot_draft_source(session)
+    return draft_id
+
+
 def apply_workspace_tab(session: MutableMapping[str, Any], *, has_artifacts: bool) -> str:
     """Legacy New/Mixer/Queue resolver — maps onto Home/mix shell views.
 
@@ -1962,6 +2137,39 @@ def open_new_draft_tab(
     else:
         apply_draft_source_snapshot(session, None)
         _draft_sources_map(session)[draft_id] = snapshot_draft_source(session)
+    return draft_id
+
+
+def open_opened_audio_tab(
+    session: MutableMapping[str, Any],
+    staged_path: str | Path,
+    *,
+    title: str,
+    video_path: str | Path | None = None,
+) -> str:
+    """Open a new Home tab whose source is already on disk.
+
+    ``staged_path`` is a copy in the app's data dir, never the file the user
+    opened. The original run, if any, stays untouched.
+    """
+    save_active_draft_source(session)
+    draft_id = make_new_draft_tab_id()
+    add_open_mix_tab(session, draft_id)
+    staged = str(staged_path)
+    fingerprint = f"open:{staged}"
+    snap: dict[str, Any] = {
+        "isolate_pending_audio_path": staged,
+        "isolate_pending_fp": fingerprint,
+        "isolate_upload_fp": fingerprint,
+        ISOLATE_OUTPUT_NAME_PENDING_KEY: str(title or "").strip(),
+    }
+    if video_path:
+        snap["isolate_pending_video_path"] = str(video_path)
+    apply_draft_source_snapshot(session, snap)
+    session[SHELL_TAB_KEY] = draft_id
+    session[SHELL_VIEW_NEXT_KEY] = "home"
+    session[WORKSPACE_NEXT_KEY] = "New"
+    _draft_sources_map(session)[draft_id] = snapshot_draft_source(session)
     return draft_id
 
 
@@ -2652,6 +2860,11 @@ def next_unconsumed_succeeded_job(
     jobs: list[dict[str, Any]],
     consumed_ids: list[str],
     viewing_id: str | None,
+    *,
+    shell_view: str | None = None,
+    viewing_run_dir: str | None = None,
+    listen_picker: str | None = None,
+    shell_tab: str | None = None,
 ) -> tuple[dict[str, Any] | None, bool]:
     """First succeeded job not yet consumed. Bool is True when the mixer may auto-load it."""
     seen = {str(item) for item in consumed_ids if item}
@@ -2659,7 +2872,15 @@ def next_unconsumed_succeeded_job(
         jid = str(job.get("id") or "").strip()
         if not jid or jid in seen or job.get("status") != "succeeded":
             continue
-        return job, should_auto_apply_job(viewing_id, jid)
+        return job, should_auto_apply_job(
+            viewing_id,
+            jid,
+            shell_view=shell_view,
+            viewing_run_dir=viewing_run_dir,
+            listen_picker=listen_picker,
+            shell_tab=shell_tab,
+            finished_run_dir=str(job.get("run_dir") or "") or None,
+        )
     return None, False
 
 
@@ -2669,6 +2890,10 @@ def plan_isolate_job_poll(
     consumed_ids: list[str] | None,
     viewing_id: str | None,
     form_drawn: bool,
+    shell_view: str | None = None,
+    viewing_run_dir: str | None = None,
+    listen_picker: str | None = None,
+    shell_tab: str | None = None,
 ) -> dict[str, Any]:
     """Decide whether a job poll may apply a result or rerun the page.
 
@@ -2684,7 +2909,15 @@ def plan_isolate_job_poll(
             "rerun": False,
         }
     consumed = [str(item) for item in consumed_ids if item]
-    job, auto = next_unconsumed_succeeded_job(jobs, consumed, viewing_id)
+    job, auto = next_unconsumed_succeeded_job(
+        jobs,
+        consumed,
+        viewing_id,
+        shell_view=shell_view,
+        viewing_run_dir=viewing_run_dir,
+        listen_picker=listen_picker,
+        shell_tab=shell_tab,
+    )
     if job is None or not form_drawn:
         return {
             "consumed_ids": consumed,
@@ -2704,7 +2937,15 @@ def plan_isolate_job_poll(
 ISOLATE_SCROLL_TOP_KEY = "_isolate_scroll_top"
 ISOLATE_SCROLL_TOP_TOKEN_KEY = "_isolate_scroll_top_token"
 MIX_TAB_EVENT_SEQ_KEY = "_mix_tabs_last_seq"
-MIX_TAB_ACTIONS = frozenset({"home", "plus", "focus", "close"})
+MIX_TAB_ACTIONS = frozenset(
+    {
+        "home",
+        "plus",
+        "focus",
+        "close",
+        "reorder",
+    }
+)
 
 # Navigation-level Isolate actions: full remount, then scroll the main pane up.
 ISOLATE_SCROLL_TOP_ACTIONS = frozenset(
@@ -2784,6 +3025,19 @@ def consume_mix_tab_event(
     if seq <= prev:
         return prev, None, ""
     return seq, action, str(result.get("id") or "")
+
+
+def mix_tab_event_index(result: object) -> int | None:
+    """Target slot from a ``reorder`` payload, else None."""
+    if not isinstance(result, dict):
+        return None
+    raw = result.get("to")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def should_request_isolate_scroll_top(action: str) -> bool:
@@ -3229,13 +3483,57 @@ def format_eta_line(
     return f"Elapsed {elapsed} · ~{left} left"
 
 
-def should_auto_apply_job(viewing_id: str | None, job_id: str) -> bool:
-    """True when a finished job may replace the mixer (latest / unpinned / same id)."""
+def mixer_focus_run_dir(
+    *,
+    shell_view: str | None,
+    viewing_run_dir: str | None = None,
+    listen_picker: str | None = None,
+    shell_tab: str | None = None,
+) -> str | None:
+    """Library mix the user is immersed in, if Mixer shell is open on a real run.
+
+    Draft / Home tab ids are ignored so waiting on a New-tab progress slot still
+    allows auto-apply. Returns None when not in Mixer or no library mix is focused.
+    """
+    if str(shell_view or "").strip() != "mix":
+        return None
+    for candidate in (viewing_run_dir, listen_picker, shell_tab):
+        text = str(candidate or "").strip()
+        if not text or text == "home" or is_new_draft_tab(text):
+            continue
+        return text
+    return None
+
+
+def should_auto_apply_job(
+    viewing_id: str | None,
+    job_id: str,
+    *,
+    shell_view: str | None = None,
+    viewing_run_dir: str | None = None,
+    listen_picker: str | None = None,
+    shell_tab: str | None = None,
+    finished_run_dir: str | None = None,
+) -> bool:
+    """True when a finished job may replace the mixer (latest / unpinned / same id).
+
+    Also False when Mixer is open on a *different* library mix than the job's
+    ``run_dir`` — keep listening; flash + tab promote only (notify_only).
+    """
     if not job_id:
         return False
-    if viewing_id in (None, "", "latest"):
-        return True
-    return viewing_id == job_id
+    if viewing_id not in (None, "", "latest") and viewing_id != job_id:
+        return False
+    focused = mixer_focus_run_dir(
+        shell_view=shell_view,
+        viewing_run_dir=viewing_run_dir,
+        listen_picker=listen_picker,
+        shell_tab=shell_tab,
+    )
+    finished = str(finished_run_dir or "").strip()
+    if focused and finished and focused != finished:
+        return False
+    return True
 
 
 def running_progress_view(status: dict[str, Any], now: float) -> dict[str, Any]:
@@ -3327,6 +3625,23 @@ def stem_label_for_id(stem_id: str) -> str:
     return stem_display_name(stem_id)
 
 
+def stem_group_fields(stem_id: str) -> dict[str, str]:
+    """Mixer payload fields that let the iframe fold "Break down a stem" children.
+
+    ``other::guitar`` becomes ``{"group": "other", "groupLabel": "Other",
+    "shortLabel": "Guitar"}``. Plain stems return ``{}``. The separator is the one
+    ``audio_to_tab.mixer`` joins with (``tests`` pin that they match).
+    """
+    parent, sep, child = str(stem_id).partition("::")
+    if not sep or not parent or not child:
+        return {}
+    return {
+        "group": parent,
+        "groupLabel": stem_display_name(parent),
+        "shortLabel": stem_display_name(child),
+    }
+
+
 MIXER_COMPONENT_KEY_PREFIX = "stem_mixer_run_"
 ISOLATE_METRO_ACCENT_KEY = "isolate_metro_accent"
 ISOLATE_METRO_RATE_KEY = "isolate_metro_rate"
@@ -3334,6 +3649,24 @@ ISOLATE_METRO_SOUND_KEY = "isolate_metro_sound"
 ISOLATE_METRO_FOLLOW_KEY = "isolate_metro_follow"
 ISOLATE_METRO_APPLIED_KEY = "isolate_metro_applied"
 _METRO_WIDGET_RUN_KEY = "_metro_widget_run"
+
+
+MIXER_PAN_MIN = -100
+MIXER_PAN_MAX = 100
+
+
+def clamp_pan(value: object) -> int:
+    """Stem pan as a whole step in [-100, 100]; anything unreadable is center (0).
+
+    Mirrors ``clampPan`` in ``ui/stem_mixer_component/frontend/src/pan.ts``.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0
+    if number != number or number in (float("inf"), float("-inf")):
+        return 0
+    return max(MIXER_PAN_MIN, min(MIXER_PAN_MAX, int(round(number))))
 
 
 def mixer_component_key(key_source: str) -> str:

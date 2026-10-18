@@ -1425,6 +1425,9 @@ def test_enqueue_confirmed_job_opens_queue_with_loading_overlay():
     assert "apply_finished_job_poll_outcome" in poll
     assert "notify_only=bool(plan[\"notify_only\"])" in poll or "notify_only=" in poll
     assert "_open_mixer_workspace()" in poll
+    assert "shell_view=" in poll
+    assert "viewing_run_dir=" in poll
+    assert "listen_picker=" in poll
     # Picker must not be retargeted before apply (desync bug).
     assert "LISTEN_PICKER_KEY] = str(run_dir)" not in poll
     assert 'isolate_listen_applied_dir"] = run_dir' not in poll
@@ -2649,6 +2652,94 @@ def test_should_auto_apply_job_respects_pin():
     assert should_auto_apply_job("job-old", "job-a") is False
 
 
+def test_should_auto_apply_job_blocks_when_mixer_on_other_run():
+    """Unpinned / latest still must not yank focus off another open mix."""
+    assert (
+        should_auto_apply_job(
+            "latest",
+            "job-new",
+            shell_view="mix",
+            viewing_run_dir="/runs/old",
+            finished_run_dir="/runs/new",
+        )
+        is False
+    )
+    assert (
+        should_auto_apply_job(
+            None,
+            "job-new",
+            shell_view="mix",
+            listen_picker="/runs/old",
+            finished_run_dir="/runs/new",
+        )
+        is False
+    )
+    # Same mix finishing — allow auto-apply.
+    assert (
+        should_auto_apply_job(
+            "latest",
+            "job-new",
+            shell_view="mix",
+            viewing_run_dir="/runs/new",
+            finished_run_dir="/runs/new",
+        )
+        is True
+    )
+    # Home / New shell — keep auto-open.
+    assert (
+        should_auto_apply_job(
+            "latest",
+            "job-new",
+            shell_view="home",
+            viewing_run_dir="/runs/old",
+            finished_run_dir="/runs/new",
+        )
+        is True
+    )
+    # Draft tab focus is not "another song" — still auto-apply.
+    assert (
+        should_auto_apply_job(
+            "latest",
+            "job-new",
+            shell_view="mix",
+            shell_tab="__new__:abc",
+            finished_run_dir="/runs/new",
+        )
+        is True
+    )
+
+
+def test_plan_isolate_job_poll_notify_only_when_mixer_on_other_run():
+    jobs = [
+        {
+            "id": "job-new",
+            "status": "succeeded",
+            "run_dir": "/runs/new",
+        }
+    ]
+    plan = plan_isolate_job_poll(
+        jobs,
+        consumed_ids=[],
+        viewing_id="latest",
+        form_drawn=True,
+        shell_view="mix",
+        viewing_run_dir="/runs/old",
+    )
+    assert plan["apply_job"]["id"] == "job-new"
+    assert plan["notify_only"] is True
+    assert plan["rerun"] is True
+
+    auto = plan_isolate_job_poll(
+        jobs,
+        consumed_ids=[],
+        viewing_id="latest",
+        form_drawn=True,
+        shell_view="home",
+        viewing_run_dir="/runs/old",
+    )
+    assert auto["notify_only"] is False
+
+
 def test_listening_picker_uses_moises_top_strip_not_inline_buttons():
     page = Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
     source = page.read_text(encoding="utf-8")
@@ -3778,3 +3869,234 @@ def test_theme_widgets_use_zero_arg_persist_callback():
     assert "_render_custom_colors" not in page
     assert "Use default colors" not in page
     assert "The palette is dark Tyrian blue and yellow-orange." in page
+
+
+def _open_runs(tmp_path: Path, count: int) -> tuple[dict, list[str]]:
+    from ui.isolate_state import OPEN_MIX_TABS_KEY
+
+    dirs = []
+    for i in range(count):
+        d = tmp_path / f"run{i}"
+        d.mkdir()
+        dirs.append(str(d))
+    return {OPEN_MIX_TABS_KEY: list(dirs)}, dirs
+
+
+def test_move_open_mix_tab_reorders_and_clamps(tmp_path: Path):
+    from ui.isolate_state import OPEN_MIX_TABS_KEY, move_open_mix_tab
+
+    session, d = _open_runs(tmp_path, 4)
+    assert move_open_mix_tab(session, d[0], 2) is True
+    assert session[OPEN_MIX_TABS_KEY] == [d[1], d[2], d[0], d[3]]
+    # Drop past the end means last; before the start means first.
+    assert move_open_mix_tab(session, d[1], 99) is True
+    assert session[OPEN_MIX_TABS_KEY] == [d[2], d[0], d[3], d[1]]
+    assert move_open_mix_tab(session, d[1], -5) is True
+    assert session[OPEN_MIX_TABS_KEY] == [d[1], d[2], d[0], d[3]]
+    # Same slot, unknown id, and junk targets are no-ops that keep the order.
+    before = list(session[OPEN_MIX_TABS_KEY])
+    assert move_open_mix_tab(session, d[1], 0) is False
+    assert move_open_mix_tab(session, "/nope", 1) is False
+    assert move_open_mix_tab(session, d[2], "x") is False
+    assert move_open_mix_tab(session, d[2], None) is False
+    assert session[OPEN_MIX_TABS_KEY] == before
+    # Order survives the normalizer the strip runs on every paint.
+    from ui.isolate_state import open_mix_tabs_for_session
+
+    assert open_mix_tabs_for_session(session, library_dirs=d) == before
+
+
+def test_move_open_mix_tab_moves_drafts_like_mixes(tmp_path: Path):
+    from ui.isolate_state import (
+        OPEN_MIX_TABS_KEY,
+        is_new_draft_tab,
+        move_open_mix_tab,
+        open_new_draft_tab,
+    )
+
+    session, d = _open_runs(tmp_path, 2)
+    draft = open_new_draft_tab(session, fresh=False)
+    assert is_new_draft_tab(draft)
+    assert session[OPEN_MIX_TABS_KEY] == [d[0], d[1], draft]
+    assert move_open_mix_tab(session, draft, 0) is True
+    assert session[OPEN_MIX_TABS_KEY] == [draft, d[0], d[1]]
+
+
+def test_close_other_and_right_keep_anchor_and_spare_busy_tabs(tmp_path: Path):
+    from ui.isolate_state import (
+        DRAFT_SOURCES_KEY,
+        OPEN_MIX_TABS_KEY,
+        close_other_open_mix_tabs,
+        close_right_open_mix_tabs,
+        open_new_draft_tab,
+    )
+
+    session, d = _open_runs(tmp_path, 4)
+    draft = open_new_draft_tab(session, fresh=False)
+    assert draft in session[DRAFT_SOURCES_KEY]
+
+    closed, spared = close_right_open_mix_tabs(session, d[1], protect=[d[3]])
+    assert closed == [d[2], draft]
+    assert spared == [d[3]]
+    assert session[OPEN_MIX_TABS_KEY] == [d[0], d[1], d[3]]
+    # A closed draft drops its saved source; closing never touches disk.
+    assert draft not in session[DRAFT_SOURCES_KEY]
+    assert all(Path(p).is_dir() for p in d)
+
+    closed, spared = close_other_open_mix_tabs(session, d[1], protect=[d[3]])
+    assert closed == [d[0]]
+    assert spared == [d[3]]
+    assert session[OPEN_MIX_TABS_KEY] == [d[1], d[3]]
+
+    # Rightmost anchor, unknown anchor: nothing to close, nothing changes.
+    assert close_right_open_mix_tabs(session, d[3]) == ([], [])
+    assert close_other_open_mix_tabs(session, "/nope") == ([], [])
+    assert session[OPEN_MIX_TABS_KEY] == [d[1], d[3]]
+
+    closed, spared = close_other_open_mix_tabs(session, d[3])
+    assert closed == [d[1]] and spared == []
+    assert session[OPEN_MIX_TABS_KEY] == [d[3]]
+
+
+def test_duplicate_draft_copies_source_and_sits_next_to_original(tmp_path: Path):
+    from ui.isolate_state import (
+        DRAFT_SOURCES_KEY,
+        OPEN_MIX_TABS_KEY,
+        SHELL_TAB_KEY,
+        draft_tab_title,
+        duplicate_open_mix_tab,
+        is_new_draft_tab,
+        open_new_draft_tab,
+    )
+
+    session, d = _open_runs(tmp_path, 2)
+    song = tmp_path / "song_a.wav"
+    song.write_bytes(b"RIFF")
+    first = open_new_draft_tab(session, fresh=False)
+    session["isolate_pending_audio_path"] = str(song)
+    session["isolate_pending_fp"] = "upload:song_a"
+    session["isolate_output_name"] = "Song A"
+    # Another mix opened after the draft, so "next to" is not "at the end".
+    session[OPEN_MIX_TABS_KEY].append(str(tmp_path / "run_late"))
+    (tmp_path / "run_late").mkdir()
+
+    copy = duplicate_open_mix_tab(session, first)
+    assert copy and is_new_draft_tab(copy) and copy != first
+    tabs = session[OPEN_MIX_TABS_KEY]
+    assert tabs.index(copy) == tabs.index(first) + 1
+    assert session[SHELL_TAB_KEY] == copy
+    assert draft_tab_title(session, copy) == "Song A copy"
+    assert draft_tab_title(session, first) == "Song A"
+    assert session["isolate_pending_audio_path"] == str(song)
+    # The original keeps its own saved source.
+    assert session[DRAFT_SOURCES_KEY][first]["isolate_pending_audio_path"] == str(song)
+
+
+def test_duplicate_youtube_draft_keeps_url_but_not_staging_file(tmp_path: Path):
+    from ui.isolate_state import (
+        DRAFT_SOURCES_KEY,
+        duplicate_open_mix_tab,
+        open_new_draft_tab,
+    )
+
+    session: dict = {}
+    first = open_new_draft_tab(session, fresh=False)
+    staged = tmp_path / "yt.wav"
+    staged.write_bytes(b"RIFF")
+    session["isolate_pending_audio_path"] = str(staged)
+    session["isolate_pending_fp"] = "youtube:https://youtu.be/abc"
+    session["isolate_upload_fp"] = "youtube:https://youtu.be/abc"
+    session["isolate_youtube_url"] = "https://youtu.be/abc"
+
+    copy = duplicate_open_mix_tab(session, first)
+    saved = session[DRAFT_SOURCES_KEY][copy]
+    assert saved["isolate_youtube_url"] == "https://youtu.be/abc"
+    for key in ("isolate_pending_audio_path", "isolate_pending_fp", "isolate_upload_fp"):
+        assert key not in saved
+    assert not session.get("isolate_pending_audio_path")
+    # The original draft still owns its staging file.
+    assert session[DRAFT_SOURCES_KEY][first]["isolate_pending_audio_path"] == str(staged)
+
+
+def test_duplicate_mix_opens_draft_with_same_song_and_never_touches_the_run(tmp_path: Path):
+    from ui.isolate_state import (
+        MIX_TAB_NOTICE_KEY,
+        OPEN_MIX_TABS_KEY,
+        SHELL_TAB_KEY,
+        draft_tab_title,
+        duplicate_open_mix_tab,
+        is_new_draft_tab,
+    )
+
+    session, d = _open_runs(tmp_path, 2)
+    stem = Path(d[0]) / "vocals.wav"
+    stem.write_bytes(b"RIFF")
+    source = tmp_path / "original.wav"
+    source.write_bytes(b"RIFF")
+
+    copy = duplicate_open_mix_tab(
+        session, d[0], title="My Song", source_audio_path=str(source)
+    )
+    assert copy and is_new_draft_tab(copy)
+    assert session[OPEN_MIX_TABS_KEY] == [d[0], copy, d[1]]
+    assert session[SHELL_TAB_KEY] == copy
+    assert session["carry_over_audio_path"] == str(source)
+    assert draft_tab_title(session, copy) == "My Song copy"
+    assert MIX_TAB_NOTICE_KEY not in session
+    assert stem.is_file() and source.is_file()
+    assert Path(d[0]).is_dir()
+
+
+def test_duplicate_mix_without_source_says_so_and_unknown_tab_is_noop(tmp_path: Path):
+    from ui.isolate_state import (
+        MIX_TAB_NOTICE_KEY,
+        OPEN_MIX_TABS_KEY,
+        duplicate_open_mix_tab,
+    )
+
+    session, d = _open_runs(tmp_path, 1)
+    copy = duplicate_open_mix_tab(
+        session, d[0], title="Gone", source_audio_path=str(tmp_path / "missing.wav")
+    )
+    assert copy
+    assert "no longer on disk" in session[MIX_TAB_NOTICE_KEY]
+    assert not session.get("carry_over_audio_path")
+
+    before = list(session[OPEN_MIX_TABS_KEY])
+    assert duplicate_open_mix_tab(session, "/nope") is None
+    assert session[OPEN_MIX_TABS_KEY] == before
+
+
+def test_duplicate_at_the_cap_keeps_the_original_tab(tmp_path: Path):
+    from ui.isolate_state import (
+        OPEN_MIX_TABS_KEY,
+        OPEN_MIX_TABS_MAX,
+        duplicate_open_mix_tab,
+    )
+
+    session, d = _open_runs(tmp_path, OPEN_MIX_TABS_MAX)
+    copy = duplicate_open_mix_tab(session, d[0], title="Oldest")
+    tabs = session[OPEN_MIX_TABS_KEY]
+    assert len(tabs) == OPEN_MIX_TABS_MAX
+    assert d[0] in tabs and copy in tabs
+
+
+def test_consume_mix_tab_event_accepts_reorder_and_rejects_removed_toolbar_actions():
+    from ui.isolate_state import consume_mix_tab_event, mix_tab_event_index
+
+    last, got, tab_id = consume_mix_tab_event(
+        {"action": "reorder", "id": "/runs/a", "to": 1, "seq": 1}, 0
+    )
+    assert got == "reorder" and tab_id == "/runs/a" and last == 1
+    for action in ("duplicate", "close_others", "close_right"):
+        last, got, tab_id = consume_mix_tab_event(
+            {"action": action, "id": "/runs/a", "seq": 2}, 1
+        )
+        assert got is None
+        assert not tab_id
+    assert mix_tab_event_index({"action": "reorder", "id": "/a", "to": 3, "seq": 1}) == 3
+    assert mix_tab_event_index({"to": "2"}) == 2
+    assert mix_tab_event_index({"to": True}) is None
+    assert mix_tab_event_index({"to": "x"}) is None
+    assert mix_tab_event_index({"action": "reorder"}) is None
+    assert mix_tab_event_index(None) is None

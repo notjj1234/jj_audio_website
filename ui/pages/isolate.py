@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
 import sys
 import time
@@ -96,12 +97,17 @@ from ui.isolate_state import (
     ISOLATE_SKIP_REHYDRATE_KEY,
     LISTEN_PICKER_KEY,
     LISTEN_PICKER_NEXT_KEY,
+    MIX_TAB_NOTICE_KEY,
     add_open_mix_tab,
     apply_shell_view,
+    clamp_pan,
     close_open_mix_tab,
     draft_tab_job_overlays,
+    mix_tab_event_index,
+    move_open_mix_tab,
     pending_open_job_ids,
     focus_new_draft_tab,
+    open_opened_audio_tab,
     is_loaded_mix_tab,
     is_new_draft_tab,
     mark_draft_tab_processing,
@@ -113,6 +119,7 @@ from ui.isolate_state import (
     promote_job_origin_tab,
     save_active_draft_source,
     SHELL_TAB_KEY,
+    SHELL_VIEW_KEY,
     SHELL_VIEW_NEXT_KEY,
     WORKSPACE_NEXT_KEY,
     ROFORMER_BACKEND_UI_HINT,
@@ -210,6 +217,7 @@ from ui.isolate_state import (
     should_show_failed_job,
     staged_audio_for_new_tab,
     status_strip_waiting_caption,
+    stem_group_fields,
     stem_label_for_id,
     sync_output_name_on_upload,
     toggle_custom_stem_options,
@@ -217,6 +225,12 @@ from ui.isolate_state import (
     upload_fingerprint,
     write_isolate_ui_state,
     get_iframe_theme_vars,
+)
+from ui.opened_audio import (
+    PENDING_OPEN_ENV,
+    claim_opened_paths,
+    is_opened_audio,
+    is_opened_video,
 )
 from ui.media import (
     ensure_mixer_audio_paths,
@@ -275,6 +289,8 @@ from audio_to_tab.isolate import (  # noqa: E402
 )
 from audio_to_tab.metronome import (  # noqa: E402
     METRONOME_DIAGNOSTICS_NAME,
+    analysis_wav_for_downbeat,
+    click_grid_for_playback,
     coerce_metronome_render_options,
     load_metronome_diagnostics,
     rebake_metronome_artifact,
@@ -1058,10 +1074,14 @@ def _metronome_payload_for_mixer(run_dir: Path | None) -> dict | None:
         times_f = [float(t) for t in times]
     except (TypeError, ValueError):
         return None
-    ref = diag.get("body_start_sec", diag.get("first_detected_sec", times_f[0] if times_f else 0.0))
     duration = float(diag.get("duration_sec") or 0.0)
     measure = diag.get("beats_per_measure", 4)
-    bpm = float(diag.get("bpm") or 0.0)
+    times_a, ref, bpm = click_grid_for_playback(
+        times_f,
+        diag,
+        analysis_wav_for_downbeat(run_dir),
+    )
+    times_f = [float(t) for t in times_a]
     steady = steady_click_times(
         duration_sec=duration,
         bpm=bpm,
@@ -1152,6 +1172,7 @@ def _render_live_mixer(
     saved = st.session_state.get("isolate_mixer_state") or {}
     saved_muted = saved.get("muted") or {}
     saved_soloed = saved.get("soloed") or {}
+    saved_pan = saved.get("pan") if isinstance(saved.get("pan"), dict) else {}
 
     safe_base = (base_name or "stems").strip() or "stems"
     stems_arg = [
@@ -1163,6 +1184,7 @@ def _render_live_mixer(
             "downloadFilename": f"{safe_base}_{name}.wav",
             "peaks": _stem_waveform_peaks(stem_paths[name]),
             "hint": STEM_HINTS.get(name, ""),
+            **stem_group_fields(name),
         }
         for name in stem_names
         if name in urls
@@ -1185,6 +1207,7 @@ def _render_live_mixer(
             n: bool(saved_muted.get(n, default_muted_for(n))) for n in stem_names
         },
         initial_soloed={n: bool(saved_soloed.get(n, False)) for n in stem_names},
+        initial_pan={n: clamp_pan(saved_pan.get(n)) for n in stem_names},
         initial_master_volume_db=master_db,
         track_title=track_title,
         metronome=metro,
@@ -2042,6 +2065,73 @@ def _local_mixer_video_url(run_dir: Path | None) -> str | None:
         return None
 
 
+def _stage_opened_file(src: Path) -> tuple[Path | None, str | None, str | None]:
+    """Copy an OS-opened file into app storage. Video becomes wav.
+
+    Returns ``(audio_path, video_path, error)``. The user's file is not modified.
+    """
+    name = Path(src.name).name.replace("\x00", "").strip()
+    if not name or name in {".", ".."}:
+        return None, None, f"Could not open {src.name}."
+    dest = run_output_dir() / name
+    try:
+        shutil.copy2(src, dest)
+    except OSError:
+        return None, None, f"Could not open {src.name}."
+    if not is_opened_video(src):
+        return dest, None, None
+    wav = dest.with_name(f"{dest.stem}.extracted.wav")
+    try:
+        audio = normalize_audio(dest, wav)
+    except Exception as exc:
+        logger.warning("Could not read audio from opened video %s: %s", src, exc)
+        return None, None, f"Could not read audio from {src.name}."
+    return audio, str(dest), None
+
+
+def _consume_opened_audio(session=None) -> bool:
+    """Stage files the OS handed the desktop app onto new Home tabs.
+
+    Returns True when a tab was opened, so a fragment tick can remount the page.
+    A direct call from ``main`` paints the new tab in the same run.
+    """
+    state = st.session_state if session is None else session
+    folder = os.environ.get(PENDING_OPEN_ENV, "").strip()
+    if not folder:
+        return False
+    items = claim_opened_paths(Path(folder))
+    if not items:
+        return False
+    opened: list[str] = []
+    notes: list[str] = []
+    for item in items:
+        raw = str(item.get("path") or "")
+        path = Path(raw) if raw else None
+        name = path.name if path is not None and path.name else "That file"
+        declined = bool(item.get("declined")) or path is None or not is_opened_audio(path)
+        if declined or path is None or not path.is_file():
+            notes.append(f"Could not open {name}. Use an audio or video file.")
+            continue
+        staged, video, err = _stage_opened_file(path)
+        if err or staged is None:
+            notes.append(err or f"Could not open {name}.")
+            continue
+        open_opened_audio_tab(
+            state,
+            staged,
+            title=path.stem,
+            video_path=video,
+        )
+        opened.append(name)
+    if len(opened) == 1:
+        notes.insert(0, f"Opened {opened[0]} on a new tab.")
+    elif opened:
+        notes.insert(0, f"Opened {len(opened)} files on new tabs.")
+    if notes:
+        state[MIX_TAB_NOTICE_KEY] = " ".join(notes)
+    return bool(opened or notes)
+
+
 def _extract_uploaded_audio(uploaded: object) -> tuple[Path | None, str | None]:
     """Save an upload. Video files become wav through the existing ffmpeg normalizer."""
     path = save_upload(uploaded)
@@ -2480,7 +2570,7 @@ def _render_separation_controls() -> dict:
     carry_over_name = st.session_state.get("carry_over_audio_name")
     if not uploaded and carry_over_path and Path(carry_over_path).exists():
         st.caption(
-            f"Using audio carried over from Tab PDF: **{carry_over_name}**. "
+            f"Using carried-over audio: **{carry_over_name}**. "
             "Upload a file above to use something else instead."
         )
     default_name = Path(uploaded.name).stem if uploaded else Path(carry_over_name or "").stem
@@ -3394,11 +3484,19 @@ def _poll_running_jobs() -> None:
     else:
         consumed_ids = list(st.session_state.get("isolate_consumed_job_ids") or [])
     viewing = st.session_state.get("isolate_viewing_job_id")
+    shell = st.session_state.get(SHELL_VIEW_KEY)
+    viewing_run = st.session_state.get("isolate_viewing_run_dir")
+    listen = st.session_state.get(LISTEN_PICKER_KEY)
+    shell_tab = st.session_state.get(SHELL_TAB_KEY)
     plan = plan_isolate_job_poll(
         jobs,
         consumed_ids=consumed_ids,
         viewing_id=viewing if isinstance(viewing, str) else None,
         form_drawn=bool(st.session_state.get("_isolate_form_drawn")),
+        shell_view=shell if isinstance(shell, str) else None,
+        viewing_run_dir=viewing_run if isinstance(viewing_run, str) else None,
+        listen_picker=listen if isinstance(listen, str) else None,
+        shell_tab=shell_tab if isinstance(shell_tab, str) else None,
     )
     st.session_state["isolate_consumed_job_ids"] = plan["consumed_ids"]
 
@@ -4303,6 +4401,7 @@ def _render_moises_tab_strip(browser_id: str | None) -> None:
     if action is None:
         return
     st.session_state[MIX_TAB_EVENT_SEQ_KEY] = last_seq
+    st.session_state.pop(MIX_TAB_NOTICE_KEY, None)
     if action == "home":
         save_active_draft_source(st.session_state)
         open_home_shell(st.session_state)
@@ -4333,6 +4432,11 @@ def _render_moises_tab_strip(browser_id: str | None) -> None:
             return
         # Close the strip only. Queue → Delete removes the run from disk.
         _close_mix_tab(rows, tab_id)
+    elif action == "reorder" and tab_id:
+        if move_open_mix_tab(st.session_state, tab_id, mix_tab_event_index(result)):
+            _persist_isolate_ui_state()
+        # Order is strip-only: re-render this fragment, keep the page scroll.
+        _rerun_preserve_scroll()
 
 
 @st.fragment(run_every=1.0)
@@ -4341,7 +4445,11 @@ def _mix_tab_strip_fragment(browser_id: str | None) -> None:
 
     Progress ticks stay inside this fragment. Tab clicks still call
     ``_rerun_scroll_top`` from the strip, which is a full-page rerun.
+    A file opened from the OS while this window is up is claimed here, then
+    the whole page remounts so Home shows the new tab.
     """
+    if _consume_opened_audio():
+        _rerun_scroll_top()
     _render_moises_tab_strip(browser_id)
 
 
@@ -4725,6 +4833,8 @@ def main() -> None:
     _ensure_workspace_tab(
         has_artifacts=bool(st.session_state.get("isolate_artifacts"))
     )
+    # Same run paints the new tab. The strip fragment claims files that arrive later.
+    _consume_opened_audio()
     with st.container(key="isolate_sticky_chrome"):
         # The global overlay is nav-only (app.py). Job state belongs to the status
         # strip below, which stays non-blocking because the app remains usable.
@@ -4756,6 +4866,8 @@ def main() -> None:
         st.success(flash)
     else:
         _render_file_ready_banner()
+    if notice := st.session_state.pop(MIX_TAB_NOTICE_KEY, None):
+        st.info(str(notice))
 
     shell = apply_shell_view(st.session_state)
 

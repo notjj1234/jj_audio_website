@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 METRONOME_STEM_ID = "metronome"
 METRONOME_DIAGNOSTICS_NAME = "metronome_diagnostics.json"
 _ANALYSIS_STEM_PRIORITY = ("drums", "other", "guitar", "vocals", "bass")
+_PLAYBACK_ALIGN_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, float, float]] = {}
 _MIN_BEATS = 2
 _CLICK_DURATION_SEC = 0.05
 _BEAT_CLICK_HZ = 1000.0
@@ -170,6 +171,7 @@ class MetronomeResult:
     render: MetronomeRenderOptions = MetronomeRenderOptions()
     bpm_curve_t: tuple[float, ...] = ()
     bpm_curve_bpm: tuple[float, ...] = ()
+    downbeat_sec: float | None = None
 
     def slim_meta(self) -> dict[str, Any]:
         return {
@@ -939,6 +941,236 @@ def detect_beats_per_measure(
     return int(winner)
 
 
+def _beat_band_energy(
+    times: np.ndarray,
+    mono: np.ndarray,
+    sr: int,
+    *,
+    low_hz: float = 180.0,
+    win_sec: float = 0.05,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Low-band vs brighter energy just after each time. Kick is low; snare is not."""
+    count = int(np.asarray(times).size)
+    low = np.zeros(count, dtype=np.float64)
+    high = np.zeros(count, dtype=np.float64)
+    if sr <= 0 or len(mono) == 0 or count == 0:
+        return low, high
+    win = max(16, int(float(win_sec) * int(sr)))
+    n = len(mono)
+    window = np.hanning(win)
+    for i, t in enumerate(np.asarray(times, dtype=np.float64).reshape(-1)):
+        start = round(float(t) * int(sr))
+        if start < 0 or start >= n:
+            continue
+        sl = np.asarray(mono[start : min(n, start + win)], dtype=np.float64)
+        if sl.size < 16:
+            continue
+        if sl.size < win:
+            sl = np.pad(sl, (0, win - sl.size))
+        spec = np.abs(np.fft.rfft(sl[:win] * window))
+        freqs = np.fft.rfftfreq(win, 1.0 / float(sr))
+        low_mask = freqs < float(low_hz)
+        if not np.any(low_mask) or not np.any(~low_mask):
+            continue
+        low[i] = float(np.sqrt(np.mean(spec[low_mask] ** 2)))
+        high[i] = float(np.sqrt(np.mean(spec[~low_mask] ** 2)))
+    return low, high
+
+
+def _merge_click_times(*parts: np.ndarray) -> np.ndarray:
+    chunks = [np.asarray(p, dtype=np.float64).reshape(-1) for p in parts if np.asarray(p).size]
+    if not chunks:
+        return np.zeros(0, dtype=np.float64)
+    times = np.concatenate(chunks)
+    times = times[np.isfinite(times)]
+    times.sort()
+    if times.size > 1:
+        keep = np.ones(times.size, dtype=bool)
+        keep[1:] = np.diff(times) > 1e-4
+        times = times[keep]
+    return times
+
+
+def _downbeat_phase(low: np.ndarray, high: np.ndarray, beats_per_measure: int) -> int | None:
+    """Beat class of a low hit followed by a brighter one (kick, then snare).
+
+    Returns None when no class stands out, so the caller keeps its current reference.
+    """
+    meter = max(1, int(beats_per_measure))
+    if low.size < meter * 3 or high.size != low.size:
+        return None
+    nxt = np.roll(high, -1)
+    scores: list[float] = []
+    for phase in range(meter):
+        on = np.arange(low.size) % meter == phase
+        pair = low[on] * nxt[on]
+        if pair.size == 0 or float(np.median(pair)) <= 0:
+            scores.append(0.0)
+            continue
+        kick = float(np.median(low[on]))
+        other_phase = (phase + 2) % meter if meter >= 4 else phase
+        other = low[np.arange(low.size) % meter == other_phase]
+        other_kick = float(np.median(other)) if other.size else kick
+        scores.append(float(np.median(pair)) * (kick / (other_kick + 1e-9)))
+    best = max(scores)
+    ordered = sorted(scores, reverse=True)
+    runner = ordered[1] if len(ordered) > 1 else 0.0
+    if best <= 0 or best < 1.25 * max(runner, 1e-9):
+        return None
+    return int(scores.index(best))
+
+
+def align_click_grid_to_downbeat(
+    times: np.ndarray,
+    mono: np.ndarray,
+    sr: int,
+    *,
+    beats_per_measure: int = 4,
+    fallback_ref_sec: float = 0.0,
+    duration_sec: float | None = None,
+) -> tuple[np.ndarray, float, bool]:
+    """Put beat 1 on the kick that leads into the snare.
+
+    A half-time grid that only hits the backbeat (2 and 4) is filled in, because
+    that is the case where a 2x click rate is the only way to hear beat 1.
+    A quarter-note grid is left at the same density; only the accent reference moves.
+    The third value is True when the grid was doubled.
+    """
+    grid = np.asarray(times, dtype=np.float64).reshape(-1)
+    grid = np.sort(grid[np.isfinite(grid)])
+    if grid.size == 0:
+        return grid, float(fallback_ref_sec), False
+    fallback = float(fallback_ref_sec)
+    if grid.size < 8 or sr <= 0 or len(mono) == 0:
+        return grid, fallback, False
+
+    diffs = np.diff(grid)
+    period = float(np.median(diffs)) if diffs.size else 0.0
+    if period <= 1e-3:
+        return grid, fallback, False
+    doubled_bpm = 120.0 / period
+    can_double = MIN_PLAUSIBLE_BPM <= doubled_bpm <= MAX_PLAUSIBLE_BPM
+
+    close = (diffs > 0.55 * period) & (diffs < 1.6 * period)
+    mids = 0.5 * (grid[:-1] + grid[1:])
+    mids = mids[close]
+    lead = float(grid[0]) - 0.5 * period
+    tail = float(grid[-1]) + 0.5 * period
+    extras: list[float] = []
+    if lead >= -1e-6:
+        extras.append(max(0.0, lead))
+    limit = float(duration_sec) if duration_sec is not None else float(len(mono) / sr)
+    if tail < limit - 1e-4:
+        extras.append(tail)
+    if extras:
+        mids = _merge_click_times(mids, np.asarray(extras, dtype=np.float64))
+
+    low, high = _beat_band_energy(grid, mono, sr)
+    mid_low, mid_high = _beat_band_energy(mids, mono, sr)
+    doubled = False
+    if (
+        can_double
+        and mids.size >= 4
+        and float(np.median(high)) > 1.35 * max(float(np.median(low)), 1e-9)
+        and float(np.median(mid_low)) > 1.35 * max(float(np.median(low)), 1e-9)
+        and float(np.median(mid_low)) > 1.15 * max(float(np.median(mid_high)), 1e-9)
+    ):
+        grid = _merge_click_times(grid, mids)
+        low, high = _beat_band_energy(grid, mono, sr)
+        doubled = True
+
+    phase = _downbeat_phase(low, high, beats_per_measure)
+    if phase is None:
+        nearest = int(np.argmin(np.abs(grid - fallback)))
+        return grid, float(grid[nearest]), doubled
+    meter = max(1, int(beats_per_measure))
+    hits = np.flatnonzero(np.arange(grid.size) % meter == phase)
+    if hits.size == 0:
+        return grid, fallback, doubled
+    return grid, float(grid[int(hits[0])]), doubled
+
+
+def analysis_wav_for_downbeat(run_dir: str | Path) -> Path | None:
+    """Drums first: kick vs snare lives there. Never the rendered click stem."""
+    folder = Path(run_dir)
+    for name in _ANALYSIS_STEM_PRIORITY:
+        path = folder / f"{name}.wav"
+        if path.is_file():
+            return path
+    return None
+
+
+def click_grid_for_playback(
+    times: np.ndarray,
+    diag: dict[str, Any],
+    audio_path: Path | None,
+) -> tuple[np.ndarray, float, float]:
+    """Grid, accent reference, and BPM for live clicks.
+
+    Diagnostics that already store ``downbeat_sec`` are used as saved.
+    Older grids are aligned in memory from a stem wav when one is still in the
+    run. This does not rewrite ``click_times_1x`` on disk and does not beat-track.
+    """
+    grid = np.asarray(times, dtype=np.float64).reshape(-1)
+    bpm = float(diag.get("bpm") or 0.0)
+    fallback = float(
+        diag.get("body_start_sec")
+        or diag.get("first_detected_sec")
+        or (float(grid[0]) if grid.size else 0.0)
+    )
+    stored = diag.get("downbeat_sec")
+    if stored is not None:
+        try:
+            return grid, float(stored), bpm
+        except (TypeError, ValueError):
+            pass
+    if audio_path is None or not Path(audio_path).is_file():
+        return grid, fallback, bpm
+    audio_file = Path(audio_path)
+    head = float(grid[0]) if grid.size else 0.0
+    tail = float(grid[-1]) if grid.size else 0.0
+    try:
+        stat = audio_file.stat()
+        cache_key: tuple[Any, ...] | None = (
+            str(audio_file.resolve()),
+            int(stat.st_mtime_ns),
+            int(stat.st_size),
+            int(grid.size),
+            round(head, 5),
+            round(tail, 5),
+            round(fallback, 5),
+            int(diag.get("beats_per_measure") or 4),
+        )
+    except OSError:
+        cache_key = None
+    if cache_key is not None and cache_key in _PLAYBACK_ALIGN_CACHE:
+        return _PLAYBACK_ALIGN_CACHE[cache_key]
+    try:
+        audio, sr = sf.read(str(audio_file), always_2d=True)
+    except Exception:
+        logger.debug("metronome: could not read %s for downbeat align", audio_file)
+        return grid, fallback, bpm
+    mono = np.mean(np.asarray(audio, dtype=np.float64), axis=1)
+    measure = max(1, int(diag.get("beats_per_measure") or 4))
+    duration = float(diag.get("duration_sec") or (len(mono) / float(sr) if sr else 0.0))
+    aligned, downbeat, doubled = align_click_grid_to_downbeat(
+        grid,
+        mono,
+        int(sr),
+        beats_per_measure=measure,
+        fallback_ref_sec=fallback,
+        duration_sec=duration,
+    )
+    if doubled and bpm > 0:
+        bpm = float(np.clip(bpm * 2.0, MIN_PLAUSIBLE_BPM, MAX_PLAUSIBLE_BPM))
+    result = (aligned, float(downbeat), bpm)
+    if cache_key is not None:
+        if len(_PLAYBACK_ALIGN_CACHE) > 4:
+            _PLAYBACK_ALIGN_CACHE.clear()
+        _PLAYBACK_ALIGN_CACHE[cache_key] = result
+    return result
+
+
 def apply_click_rate(
     times_1x: np.ndarray,
     *,
@@ -1254,14 +1486,27 @@ def generate_metronome_stem(
     if measure == _DEFAULT_BEATS_PER_MEASURE:
         measure = detect_beats_per_measure(meter_beats, mono, native_sr, bpm)
 
+    times, downbeat_sec, doubled = align_click_grid_to_downbeat(
+        times,
+        mono,
+        native_sr,
+        beats_per_measure=measure,
+        fallback_ref_sec=float(body_start),
+        duration_sec=float(duration_sec),
+    )
+    if times.size < _MIN_BEATS:
+        return None
+    if doubled and bpm > 0:
+        bpm = float(np.clip(bpm * 2.0, MIN_PLAUSIBLE_BPM, MAX_PLAUSIBLE_BPM))
+
     n = len(mono)
-    ref_sec = float(body_start)
+    ref_sec = float(downbeat_sec)
     render_times = _render_times_for_follow(
         times,
         opts.follow,
         duration_sec=duration_sec,
         bpm=bpm,
-        body_start_sec=float(body_start),
+        body_start_sec=ref_sec,
     )
     if not render_metronome_wav(
         render_times,
@@ -1304,6 +1549,7 @@ def generate_metronome_stem(
         render=opts,
         bpm_curve_t=curve_t,
         bpm_curve_bpm=curve_b,
+        downbeat_sec=float(downbeat_sec),
     )
 
 
@@ -1323,6 +1569,8 @@ def write_metronome_diagnostics(path: Path, result: MetronomeResult) -> Path:
         "beats_per_measure": result.beats_per_measure,
         "render": result.render.to_dict(),
     }
+    if result.downbeat_sec is not None:
+        payload["downbeat_sec"] = float(result.downbeat_sec)
     if result.bpm_curve_t and result.bpm_curve_bpm:
         payload["bpm_curve"] = {
             "t": list(result.bpm_curve_t),
@@ -1392,6 +1640,13 @@ def _result_from_payload(
     source = str(payload.get("source") or "source")
     measure = max(1, int(payload.get("beats_per_measure") or 4))
     curve_t, curve_b = _bpm_curve_from_payload(payload.get("bpm_curve"))
+    stored_downbeat = payload.get("downbeat_sec")
+    downbeat_sec = None
+    if stored_downbeat is not None:
+        try:
+            downbeat_sec = float(stored_downbeat)
+        except (TypeError, ValueError):
+            downbeat_sec = None
     return MetronomeResult(
         path=dest,
         bpm=bpm,
@@ -1408,6 +1663,7 @@ def _result_from_payload(
         render=options,
         bpm_curve_t=curve_t,
         bpm_curve_bpm=curve_b,
+        downbeat_sec=downbeat_sec,
     )
 
 
@@ -1446,7 +1702,9 @@ def rebake_metronome_artifact(
     duration = float(payload.get("duration_sec") or 0.0)
     if n_samples <= 0 and sr > 0 and duration > 0:
         n_samples = round(duration * sr)
-    if "body_start_sec" in payload:
+    if "downbeat_sec" in payload:
+        ref_sec = float(payload.get("downbeat_sec") or 0.0)
+    elif "body_start_sec" in payload:
         ref_sec = float(payload.get("body_start_sec") or 0.0)
     else:
         ref_sec = float(

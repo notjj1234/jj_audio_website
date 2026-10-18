@@ -84,6 +84,15 @@ export async function me(): Promise<{ id: string; email: string }> {
   return api("/v1/auth/me");
 }
 
+export async function deleteAccount(): Promise<{
+  status: string;
+  deleted_jobs: number;
+  deleted_artifacts: number;
+  deleted_uploads: number;
+}> {
+  return api("/v1/auth/me", { method: "DELETE" });
+}
+
 export async function uploadAudio(file: File): Promise<{ upload_id: string; filename: string }> {
   const form = new FormData();
   form.append("file", file);

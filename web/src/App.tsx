@@ -1,6 +1,9 @@
 import { NavLink, Navigate, Outlet, Route, Routes, useNavigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "./auth";
+import { CookieBanner } from "./components/CookieBanner";
+import { SiteFooter } from "./components/SiteFooter";
 import { IsolatePage } from "./pages/IsolatePage";
+import { LegalPage } from "./pages/LegalPage";
 import { LoginPage } from "./pages/LoginPage";
 import { TabPage } from "./pages/TabPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -39,11 +42,14 @@ function Shell() {
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content">
+        Skip to content
+      </a>
       <header className="topbar">
         <NavLink to="/isolate" className="brand">
           Audio Tools
         </NavLink>
-        <nav className="nav">
+        <nav className="nav" aria-label="Primary">
           <NavLink to="/tab" className={({ isActive }) => (isActive ? "active" : "")}>
             Tab PDF
           </NavLink>
@@ -58,6 +64,12 @@ function Shell() {
             className={({ isActive }) => (isActive ? "active" : "")}
           >
             Settings
+          </NavLink>
+          <NavLink
+            to="/legal/privacy"
+            className={({ isActive }) => (isActive ? "active" : "")}
+          >
+            Legal
           </NavLink>
           <span className="user-info">
             {email ? `Signed in as ${email}` : "Anonymous"}
@@ -78,9 +90,11 @@ function Shell() {
           </a>
         </nav>
       </header>
-      <main>
+      <main id="main-content">
         <Outlet />
       </main>
+      <SiteFooter />
+      <CookieBanner />
     </div>
   );
 }
@@ -94,6 +108,8 @@ export function App() {
           <Route path="/tab" element={<TabPage />} />
           <Route path="/isolate" element={<IsolatePage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/legal" element={<Navigate to="/legal/privacy" replace />} />
+          <Route path="/legal/:docId" element={<LegalPage />} />
           <Route path="*" element={<Navigate to="/isolate" replace />} />
         </Route>
       </Routes>

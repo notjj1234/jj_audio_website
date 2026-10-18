@@ -102,13 +102,49 @@ function tabStops(bar: HTMLElement): HTMLElement[] {
   return Array.from(bar.querySelectorAll<HTMLElement>('[role="tab"]'));
 }
 
-/** Tabs pattern: Left/Right/Home/End move focus, Enter/Space open, Delete closes. */
+/** Polite status for keyboard reorder. Lives outside #root so a re-render keeps it. */
+function announce(message: string): void {
+  let live = document.getElementById("mt-live");
+  if (!live) {
+    live = document.createElement("div");
+    live.id = "mt-live";
+    live.className = "sr-only";
+    live.setAttribute("role", "status");
+    live.setAttribute("aria-live", "polite");
+    document.body.appendChild(live);
+  }
+  live.textContent = "";
+  window.setTimeout(() => {
+    if (live) live.textContent = message;
+  }, 30);
+}
+
+/**
+ * Tabs pattern: Left/Right/Home/End move focus, Enter/Space open, Delete closes.
+ * Shift+Left / Shift+Right move the focused mix tab one slot (reorder without a mouse).
+ */
 function bindTabStripKeys(bar: HTMLElement): void {
   bar.addEventListener("keydown", (ev: KeyboardEvent) => {
     const stops = tabStops(bar);
     const current = (ev.target as HTMLElement).closest<HTMLElement>('[role="tab"]');
     const idx = current ? stops.indexOf(current) : -1;
     if (idx < 0) return;
+    if (ev.shiftKey && (ev.key === "ArrowLeft" || ev.key === "ArrowRight")) {
+      const id = current!.dataset.id;
+      if (!id) return; // Home is not a mix tab and never moves.
+      ev.preventDefault();
+      const mixTabs = Array.from(bar.querySelectorAll<HTMLElement>(".mix-tab"));
+      const here = mixTabs.indexOf(current!);
+      const to = ev.key === "ArrowLeft" ? here - 1 : here + 1;
+      const label = current!.querySelector(".title")?.textContent || "Mix";
+      if (to < 0 || to >= mixTabs.length) {
+        announce(`${label} is already ${to < 0 ? "first" : "last"}`);
+        return;
+      }
+      announce(`${label} moved to position ${to + 1} of ${mixTabs.length}`);
+      report("reorder", id, to);
+      return;
+    }
     let next = -1;
     if (ev.key === "ArrowRight") next = (idx + 1) % stops.length;
     else if (ev.key === "ArrowLeft") next = (idx - 1 + stops.length) % stops.length;
@@ -133,13 +169,91 @@ function bindTabStripKeys(bar: HTMLElement): void {
   });
 }
 
-function report(action: string, id?: string): void {
-  const payload: { action: string; id?: string; seq: number } = {
+function report(action: string, id?: string, to?: number): void {
+  const payload: { action: string; id?: string; to?: number; seq: number } = {
     action,
     seq: nextSeq(),
   };
   if (id != null) payload.id = id;
+  if (to != null) payload.to = to;
   Streamlit.setComponentValue(payload);
+}
+
+let dragId: string | null = null;
+
+function clearDragMarks(bar: HTMLElement, includeDragging: boolean): void {
+  const selector = includeDragging ? ".dragging, .drop-before, .drop-after" : ".drop-before, .drop-after";
+  bar.querySelectorAll<HTMLElement>(selector).forEach((el) => {
+    el.classList.remove("drop-before", "drop-after");
+    if (includeDragging) el.classList.remove("dragging");
+  });
+}
+
+/** Where a pointer would drop: before/after a tab, or the end (plus / empty space). */
+function dropTarget(
+  bar: HTMLElement,
+  ev: DragEvent,
+): { slot: number; mark: HTMLElement | null; after: boolean } | null {
+  const tabs = Array.from(bar.querySelectorAll<HTMLElement>(".mix-tab"));
+  const raw = ev.target;
+  const el = raw instanceof Element ? raw : null;
+  const over = el?.closest<HTMLElement>(".mix-tab") ?? null;
+  if (over) {
+    const rect = over.getBoundingClientRect();
+    const after = ev.clientX > rect.left + rect.width / 2;
+    const at = tabs.indexOf(over);
+    return { slot: after ? at + 1 : at, mark: over, after };
+  }
+  // Past the last tab means "last". Home and anything else is not a drop zone.
+  if (el?.closest(".plus-btn, .spacer") && tabs.length) {
+    return { slot: tabs.length, mark: tabs[tabs.length - 1], after: true };
+  }
+  return null;
+}
+
+/** Drag a mix tab to reorder. A drop anywhere else cancels and the tab stays put. */
+function bindTabStripDrag(bar: HTMLElement): void {
+  bar.addEventListener("dragstart", (ev: DragEvent) => {
+    const raw = ev.target;
+    const tab = raw instanceof Element ? raw.closest<HTMLElement>(".mix-tab") : null;
+    if (!tab?.dataset.id) return;
+    dragId = tab.dataset.id;
+    tab.classList.add("dragging");
+    if (ev.dataTransfer) {
+      ev.dataTransfer.effectAllowed = "move";
+      ev.dataTransfer.setData("text/plain", dragId);
+    }
+  });
+  bar.addEventListener("dragover", (ev: DragEvent) => {
+    if (!dragId) return;
+    clearDragMarks(bar, false);
+    const hit = dropTarget(bar, ev);
+    if (!hit) return; // no preventDefault: the browser shows "not allowed"
+    ev.preventDefault();
+    if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+    hit.mark?.classList.add(hit.after ? "drop-after" : "drop-before");
+  });
+  bar.addEventListener("drop", (ev: DragEvent) => {
+    if (!dragId) return;
+    const id = dragId;
+    dragId = null;
+    const hit = dropTarget(bar, ev);
+    const tabs = Array.from(bar.querySelectorAll<HTMLElement>(".mix-tab"));
+    const from = tabs.findIndex((el) => el.dataset.id === id);
+    clearDragMarks(bar, true);
+    if (!hit || from < 0) return;
+    ev.preventDefault();
+    const to = hit.slot > from ? hit.slot - 1 : hit.slot;
+    if (to !== from) {
+      const label = tabs[from].querySelector(".title")?.textContent || "Mix";
+      announce(`${label} moved to position ${to + 1} of ${tabs.length}`);
+      report("reorder", id, to);
+    }
+  });
+  bar.addEventListener("dragend", () => {
+    dragId = null;
+    clearDragMarks(bar, true);
+  });
 }
 
 /** One listener on the strip root, so in-place tab updates cannot drop the X. */
@@ -280,7 +394,7 @@ function renderUI(args: Args): void {
       const busyClass = busy ? " busy" : "";
       const ariaBusy = busy ? ` aria-busy="true"` : "";
       return `
-        <div class="mix-tab${active ? " active" : ""}${busyClass}" data-id="${escapeHtml(id)}" data-focus-key="tab:${escapeHtml(id)}" role="tab" tabindex="${active ? 0 : -1}" aria-selected="${active}"${ariaBusy}>
+        <div class="mix-tab${active ? " active" : ""}${busyClass}" data-id="${escapeHtml(id)}" data-focus-key="tab:${escapeHtml(id)}" role="tab" draggable="true" tabindex="${active ? 0 : -1}" aria-selected="${active}"${ariaBusy}>
           ${docIcon()}
           <span class="title" title="${title}">${title}</span>
           <button type="button" class="close" data-close="${escapeHtml(id)}" tabindex="-1" aria-label="Close ${title}" title="Close tab">×</button>
@@ -294,15 +408,17 @@ function renderUI(args: Args): void {
   const prevScroll = prevBar ? prevBar.scrollLeft : 0;
 
   root.innerHTML = `
-    <div class="mix-tab-wrap">
-      <div class="mix-tab-bar" role="tablist" aria-label="Open mixes">
-        <button type="button" class="home-btn${homeActive ? " active" : ""}" data-action="home" data-focus-key="home" role="tab" tabindex="${homeActive ? 0 : -1}" aria-selected="${homeActive}">
-          ${homeIcon()}
-          <span>${escapeHtml(homeLabel)}</span>
-        </button>
-        ${tabHtml}
-        ${showPlus ? `<button type="button" class="plus-btn" data-action="plus" title="New tab" aria-label="New tab">+</button>` : ""}
-        <span class="spacer"></span>
+    <div class="mix-tab-shell">
+      <div class="mix-tab-wrap">
+        <div class="mix-tab-bar" role="tablist" aria-label="Open mixes. Shift plus left or right arrow moves the focused tab.">
+          <button type="button" class="home-btn${homeActive ? " active" : ""}" data-action="home" data-focus-key="home" role="tab" tabindex="${homeActive ? 0 : -1}" aria-selected="${homeActive}">
+            ${homeIcon()}
+            <span>${escapeHtml(homeLabel)}</span>
+          </button>
+          ${tabHtml}
+          ${showPlus ? `<button type="button" class="plus-btn" data-action="plus" title="New tab" aria-label="New tab">+</button>` : ""}
+          <span class="spacer"></span>
+        </div>
       </div>
     </div>
   `;
@@ -312,6 +428,7 @@ function renderUI(args: Args): void {
   if (wrap && bar) {
     bindTabStripWheel(bar);
     bindTabStripKeys(bar);
+    bindTabStripDrag(bar);
     const stops = tabStops(bar);
     if (!stops.some((el) => el.getAttribute("tabindex") === "0") && stops[0]) {
       stops[0].setAttribute("tabindex", "0");
@@ -320,7 +437,13 @@ function renderUI(args: Args): void {
     const selected = bar.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]');
     selected?.scrollIntoView({ block: "nearest", inline: "nearest" });
     if (focusedKey) {
-      bar.querySelector<HTMLElement>(`[data-focus-key="${CSS.escape(focusedKey)}"]`)?.focus();
+      const target = root.querySelector<HTMLElement>(
+        `[data-focus-key="${CSS.escape(focusedKey)}"]`,
+      );
+      target?.focus();
+      // The focused control may be gone (closed tab) or disabled (no tabs left to
+      // close). Keep keyboard focus in the strip instead of dropping it.
+      if (document.activeElement !== target) selected?.focus();
     }
     bar.addEventListener("scroll", () => updateOverflowFades(wrap, bar), { passive: true });
     updateOverflowFades(wrap, bar);

@@ -73,7 +73,78 @@ def test_mix_tabs_source_has_moises_chrome():
     assert ".mix-tab-wrap.fade-right::after" in style
     assert ":focus-visible" in style
     close_css = style[style.find(".mix-tab .close {") :]
-    assert "width: 24px" in close_css[: close_css.find("}")]
+    close_rule = close_css[: close_css.find("}")]
+    # Design constraint: close target at least 20x20, 28x28 preferred.
+    assert "width: 28px" in close_rule and "height: 28px" in close_rule
+
+
+def _frontend_src(name: str) -> str:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "ui"
+        / "mix_tabs_component"
+        / "frontend"
+        / "src"
+        / name
+    ).read_text(encoding="utf-8")
+
+
+def test_mix_tabs_source_has_reorder_and_no_toolbar_actions():
+    main = _frontend_src("main.ts")
+    # No duplicate / close-others / close-right toolbar (removed by preference).
+    assert "data-tab-action" not in main
+    assert "tab-actions" not in main
+    assert 'aria-label="Close ${title}"' in main or "`Close ${title}`" in main
+    # Drag reorder: only mix tabs drag, Home never does, a bad drop cancels.
+    assert 'role="tab" draggable="true"' in main
+    assert main.count('draggable="true"') == 1
+    assert "bindTabStripDrag" in main
+    assert 'report("reorder", id, to)' in main
+    assert "ev.preventDefault();\n    if (ev.dataTransfer) ev.dataTransfer.dropEffect" in main
+    # Keyboard alternative to drag.
+    assert "ev.shiftKey" in main and 'ev.key === "ArrowLeft"' in main
+    assert "Home is not a mix tab and never moves" in main
+    assert '"role", "status"' in main and '"aria-live", "polite"' in main
+    # The payload carries the target slot.
+    assert "to?: number" in main and "payload.to = to" in main
+
+
+def test_mix_tabs_style_keeps_one_row_and_a_visible_drop_mark():
+    style = _frontend_src("style.css")
+    # The host pins the iframe to 48px (ui/app.py), so the strip must not wrap.
+    assert "flex-wrap: nowrap" in style
+    assert ".tab-action" not in style
+    assert ".tab-actions" not in style
+    assert ".mix-tab.drop-before" in style and ".mix-tab.drop-after" in style
+    assert ".mix-tab.dragging" in style
+    assert ".sr-only" in style
+
+
+def test_isolate_page_handles_every_mix_tab_action():
+    page = (
+        Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py"
+    ).read_text(encoding="utf-8")
+    strip = page[
+        page.find("def _render_moises_tab_strip") : page.find("def _render_busy_tab_close_prompt")
+    ]
+    for needle in (
+        'elif action == "reorder" and tab_id:',
+        "move_open_mix_tab(",
+    ):
+        assert needle in strip, needle
+    assert 'action == "duplicate"' not in strip
+    assert "close_others" not in strip
+    assert "close_right" not in strip
+    # Reorder re-renders only the strip fragment, so the page does not jump.
+    reorder_at = strip.find('elif action == "reorder"')
+    reorder_end = strip.find("@st.fragment", reorder_at)
+    reorder = strip[reorder_at:reorder_end]
+    assert "_rerun_preserve_scroll()" in reorder
+    assert "_rerun_scroll_top()" not in reorder
+    assert "st.rerun()" not in strip
+    # Closing from the strip never deletes a run from disk.
+    assert "delete_library_run" not in strip
+    assert "MIX_TAB_NOTICE_KEY" in page[page.find("def main") :]
 
 
 def test_mix_tabs_strip_is_sticky_in_app_css():

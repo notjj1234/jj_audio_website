@@ -33,6 +33,17 @@ import {
   savePracticeSettings,
   type PracticeSettings,
 } from "./practice";
+import {
+  PAN_DEFAULT,
+  PAN_MAX,
+  PAN_MIN,
+  clampPan,
+  createStemPanner,
+  formatPan,
+  panSpoken,
+  panToUnit,
+  snapPanToCenter,
+} from "./pan";
 
 const DB_MIN = -25;
 const DB_MAX = 25;
@@ -50,10 +61,17 @@ type StemInfo = {
   downloadFilename?: string;
   peaks?: number[];
   hint?: string;
+  /** Parent stem id when this stem came from "Break down a stem" (e.g. `other`). */
+  group?: string;
+  groupLabel?: string;
+  /** Row name inside its group, without the "(from Parent)" tail. */
+  shortLabel?: string;
 };
 
 type MixerState = {
   volumesDb: Record<string, number>;
+  /** Whole steps -100 (left) .. 0 (center) .. 100 (right). Law in ./pan.ts. */
+  pan: Record<string, number>;
   muted: Record<string, boolean>;
   soloed: Record<string, boolean>;
   masterVolumeDb: number;
@@ -138,6 +156,8 @@ class StemMixerEngine {
   private ctx: AudioContext | null = null;
   private buffers = new Map<string, AudioBuffer>();
   private gains = new Map<string, GainNode>();
+  /** Per-stem pan (stem gain -> panner -> master). Absent where the browser has none. */
+  private panners = new Map<string, StereoPannerNode>();
   private sources = new Map<string, AudioBufferSourceNode>();
   private masterGain: GainNode | null = null;
   private limiter: DynamicsCompressorNode | null = null;
@@ -154,6 +174,7 @@ class StemMixerEngine {
   private offset = 0;
   private duration = 0;
   private lastGains: Record<string, number> = {};
+  private lastPans: Record<string, number> = {};
   private onTimeUpdate: ((t: number, dur: number, playing: boolean) => void) | null =
     null;
   private onSoftPause: (() => void) | null = null;
@@ -506,14 +527,15 @@ class StemMixerEngine {
     this.sources.clear();
     this.playing = false;
     cancelAnimationFrame(this.raf);
-    for (const gain of this.gains.values()) {
+    for (const node of [...this.gains.values(), ...this.panners.values()]) {
       try {
-        gain.disconnect();
+        node.disconnect();
       } catch {
         /* */
       }
     }
     this.gains.clear();
+    this.panners.clear();
     this.teardownSoundTouch();
     this.soundTouchFailed = false;
     this.masterGain = null;
@@ -533,12 +555,11 @@ class StemMixerEngine {
     this.bindContextState();
     for (const id of this.stemIds) {
       if (!this.buffers.has(id)) continue;
-      const gain = this.ctx.createGain();
-      gain.connect(this.masterGain!);
-      this.gains.set(id, gain);
+      this.addStemBus(this.ctx, id);
     }
     this.offset = savedOffset;
     this.applyGains(this.lastGains);
+    this.applyPans(this.lastPans);
   }
 
   private async softPauseFromInterrupt(): Promise<void> {
@@ -588,9 +609,10 @@ class StemMixerEngine {
     liveBuffers?: Record<string, (ctx: AudioContext, durationSec: number) => AudioBuffer>
   ): Promise<{ errors: string[] }> {
     await this.stopSources(false);
-    for (const gain of this.gains.values()) gain.disconnect();
+    for (const node of [...this.gains.values(), ...this.panners.values()]) node.disconnect();
     this.buffers.clear();
     this.gains.clear();
+    this.panners.clear();
     this.sources.clear();
     this.stemIds = stems.map((s) => s.id);
     this.offset = 0;
@@ -620,9 +642,7 @@ class StemMixerEngine {
         const buf = await ctx.decodeAudioData(arr.slice(0));
         this.buffers.set(stem.id, buf);
         this.duration = Math.max(this.duration, buf.duration);
-        const gain = ctx.createGain();
-        gain.connect(this.masterGain!);
-        this.gains.set(stem.id, gain);
+        this.addStemBus(ctx, stem.id);
       } catch (e) {
         errors.push(`${stem.label}: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -637,9 +657,7 @@ class StemMixerEngine {
         const buf = synth(ctx, this.duration);
         this.buffers.set(stem.id, buf);
         this.duration = Math.max(this.duration, buf.duration);
-        const gain = ctx.createGain();
-        gain.connect(this.masterGain!);
-        this.gains.set(stem.id, gain);
+        this.addStemBus(ctx, stem.id);
       } catch (e) {
         errors.push(`${stem.label}: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -650,6 +668,7 @@ class StemMixerEngine {
     this.applyGains(
       effectiveGains(this.stemIds, {
         volumesDb: Object.fromEntries(this.stemIds.map((id) => [id, DB_DEFAULT])),
+        pan: {},
         muted: {},
         soloed: {},
         masterVolumeDb: DB_DEFAULT,
@@ -668,9 +687,7 @@ class StemMixerEngine {
     }
     if (!this.ctx || !this.masterGain) return;
     if (!this.gains.has(id)) {
-      const gain = this.ctx.createGain();
-      gain.connect(this.masterGain);
-      this.gains.set(id, gain);
+      this.addStemBus(this.ctx, id);
       if (!this.stemIds.includes(id)) this.stemIds.push(id);
     }
     if (!this.playing) {
@@ -703,6 +720,31 @@ class StemMixerEngine {
       this.sources.set(id, src);
     }
     this.tick();
+  }
+
+  /** One stem's bus: source -> gain -> panner -> master. Law: see ./pan.ts. */
+  private addStemBus(ctx: AudioContext, id: string): void {
+    const gain = ctx.createGain();
+    const panner = createStemPanner(ctx);
+    if (panner) {
+      gain.connect(panner);
+      panner.connect(this.masterGain!);
+      panner.pan.value = panToUnit(this.lastPans[id] ?? PAN_DEFAULT);
+      this.panners.set(id, panner);
+    } else {
+      gain.connect(this.masterGain!);
+    }
+    this.gains.set(id, gain);
+  }
+
+  /** Pan per stem in whole steps (-100..100). Smoothed so a drag does not zipper. */
+  applyPans(pans: Record<string, number>): void {
+    this.lastPans = { ...pans };
+    for (const id of this.stemIds) {
+      const node = this.panners.get(id);
+      if (!node || !this.ctx) continue;
+      node.pan.setTargetAtTime(panToUnit(pans[id] ?? PAN_DEFAULT), this.ctx.currentTime, 0.015);
+    }
   }
 
   applyGains(gains: Record<string, number>): void {
@@ -834,11 +876,14 @@ engine.installWakeHooks();
 let lastStemKey = "";
 let state: MixerState = {
   volumesDb: {},
+  pan: {},
   muted: {},
   soloed: {},
   masterVolumeDb: DB_DEFAULT,
 };
 let stemInfos: StemInfo[] = [];
+/** Groups the user folded. Hiding rows never mutes them; this is view state only. */
+const collapsedGroups = new Set<string>();
 let trackTitle = "";
 let metroConfig: MetronomeConfig | null = null;
 let metroOptions: MetronomeOptions = coerceMetronomeOptions({
@@ -1815,6 +1860,7 @@ function statePayload(): string {
   const practice = engine.getPracticeSettings();
   return JSON.stringify({
     volumesDb: state.volumesDb,
+    pan: state.pan,
     muted: state.muted,
     soloed: state.soloed,
     masterVolumeDb: state.masterVolumeDb,
@@ -1842,6 +1888,7 @@ function reportState(immediate = false): void {
     const practice = engine.getPracticeSettings();
     const value: Record<string, unknown> = {
       volumesDb: { ...state.volumesDb },
+      pan: { ...state.pan },
       muted: { ...state.muted },
       soloed: { ...state.soloed },
       masterVolumeDb: state.masterVolumeDb,
@@ -1961,8 +2008,17 @@ function stopPlayback(): void {
   applyTransport();
 }
 
+/** Put one pan slider and its readout on `pan` (whole steps, -100..100). */
+function paintPan(el: HTMLInputElement, pan: number): void {
+  el.value = String(pan);
+  el.setAttribute("aria-valuetext", panSpoken(pan));
+  const label = el.parentElement?.querySelector(".pan-val");
+  if (label) label.textContent = formatPan(pan);
+}
+
 function applyStateGains(): void {
   engine.applyGains(effectiveGains(stemInfos.map((s) => s.id), state));
+  engine.applyPans(state.pan);
 }
 
 function formatTime(sec: number): string {
@@ -2205,6 +2261,9 @@ function renderUI(theme?: Theme): void {
       <header class="mixer-header">
         <div class="track-title" id="track-title"></div>
         <p class="mixer-status" id="status" aria-live="polite">Ready</p>
+        <div class="mixer-load" id="mixer-load" hidden>
+          <div class="mixer-load-bar" id="mixer-load-bar"></div>
+        </div>
       </header>
       <div class="mixer-transport">
         <div class="mixer-transport-controls">
@@ -2245,6 +2304,7 @@ function renderUI(theme?: Theme): void {
           <button type="button" class="ghost practice-reset" id="btn-practice-reset">Reset</button>
           <p class="practice-export-note">
             Save current mix includes Speed &amp; Key. Save all tracks stays original speed/key.
+            Pan is for listening here; saved files keep every track centered.
           </p>
           <p class="practice-status" id="practice-status" hidden></p>
         </div>
@@ -2294,9 +2354,9 @@ function renderUI(theme?: Theme): void {
   });
 
   const stemsEl = document.getElementById("stems")!;
-  stemsEl.innerHTML = stemInfos
-    .map((stem) => {
+  const rowHtml = (stem: StemInfo, inGroup: boolean): string => {
       const db = clampDb(state.volumesDb[stem.id] ?? DB_DEFAULT);
+      const pan = clampPan(state.pan[stem.id]);
       const muted = !!state.muted[stem.id];
       const soloed = !!state.soloed[stem.id];
       const liveMetro = stem.id === "metronome" && metroConfig != null;
@@ -2329,7 +2389,9 @@ function renderUI(theme?: Theme): void {
             aria-label="${soloed ? "Unsolo" : "Solo"} ${escapeHtml(stem.label)}"
             aria-pressed="${soloed ? "true" : "false"}">S</button>
           <div class="stem-name-block">
-            <strong class="stem-name"${nameTitle}>${escapeHtml(stem.label)}</strong>
+            <strong class="stem-name"${nameTitle}>${escapeHtml(
+              inGroup ? stem.shortLabel || stem.label : stem.label
+            )}</strong>
             ${hint}
           </div>
           <label class="stem-vol">
@@ -2338,10 +2400,26 @@ function renderUI(theme?: Theme): void {
               min="${DB_MIN}" max="${DB_MAX}" step="0.5" value="${db}" />
             <span class="vol-val stem-db">${db.toFixed(1)}</span>
           </label>
+          <label class="stem-pan" title="Pan: drag, use arrow keys, or double-click to center">
+            <span class="pan-name" aria-hidden="true">Pan</span>
+            <span class="visually-hidden">${escapeHtml(stem.label)} pan, left to right</span>
+            <input type="range" class="pan-slider" data-id="${escapeHtml(stem.id)}"
+              min="${PAN_MIN}" max="${PAN_MAX}" step="1" value="${pan}"
+              aria-valuetext="${panSpoken(pan)}" />
+            <span class="pan-val" aria-hidden="true">${formatPan(pan)}</span>
+          </label>
           ${preview}
         </div>`;
-    })
+  };
+  stemsEl.innerHTML = stemListItems(stemInfos)
+    .map((item, index) =>
+      item.kind === "stem"
+        ? rowHtml(item.stem, false)
+        : groupHtml(item, index, (stem) => rowHtml(stem, true))
+    )
     .join("");
+  bindGroupToggles(stemsEl);
+  updateGroupSummaries();
 
   document.getElementById("btn-playpause")!.onpointerdown = (event) => {
     event.preventDefault();
@@ -2381,6 +2459,7 @@ function renderUI(theme?: Theme): void {
       state.muted[stem.id] = stem.id === "metronome";
       state.soloed[stem.id] = false;
       state.volumesDb[stem.id] = DB_DEFAULT;
+      state.pan[stem.id] = PAN_DEFAULT;
     }
     state.masterVolumeDb = DB_DEFAULT;
     activePreset = "all";
@@ -2388,6 +2467,9 @@ function renderUI(theme?: Theme): void {
       el.value = String(DB_DEFAULT);
       const label = el.parentElement?.querySelector(".vol-val");
       if (label) label.textContent = DB_DEFAULT.toFixed(1);
+    });
+    stemsEl.querySelectorAll<HTMLInputElement>(".pan-slider").forEach((el) => {
+      paintPan(el, PAN_DEFAULT);
     });
     const masterEl = document.getElementById("master-vol") as HTMLInputElement | null;
     const masterVal = document.getElementById("master-vol-val");
@@ -2514,6 +2596,39 @@ function renderUI(theme?: Theme): void {
       // Live audio only while dragging — report to Streamlit on release.
     };
     el.onchange = () => {
+      reportState(true);
+    };
+  });
+
+  stemsEl.querySelectorAll<HTMLInputElement>(".pan-slider").forEach((el) => {
+    const id = el.dataset.id!;
+    // Mouse and touch drags stick to center; arrow keys step by one and never snap.
+    let dragging = false;
+    const endDrag = () => {
+      dragging = false;
+    };
+    el.addEventListener("pointerdown", () => {
+      dragging = true;
+    });
+    el.addEventListener("pointerup", endDrag);
+    el.addEventListener("pointercancel", endDrag);
+    el.addEventListener("keydown", endDrag);
+    el.addEventListener("blur", endDrag);
+    el.oninput = () => {
+      const raw = clampPan(el.value);
+      const pan = dragging ? snapPanToCenter(raw) : raw;
+      state.pan[id] = pan;
+      paintPan(el, pan);
+      // Live audio while dragging; report to Streamlit on release.
+      engine.applyPans(state.pan);
+    };
+    el.onchange = () => {
+      reportState(true);
+    };
+    el.ondblclick = () => {
+      state.pan[id] = PAN_DEFAULT;
+      paintPan(el, PAN_DEFAULT);
+      engine.applyPans(state.pan);
       reportState(true);
     };
   });
@@ -2742,10 +2857,105 @@ function updatePresetChrome(): void {
   });
 }
 
+type StemListItem =
+  | { kind: "stem"; stem: StemInfo }
+  | { kind: "group"; key: string; label: string; members: StemInfo[] };
+
+/**
+ * Stems from "Break down a stem" share a parent. Two or more of them fold under one
+ * disclosure header, placed where the first one was. A lone child stays a plain row.
+ * A group is only a way to hide rows: it has no fader and no sum, and hiding never mutes.
+ */
+function stemListItems(stems: StemInfo[]): StemListItem[] {
+  const byGroup = new Map<string, StemInfo[]>();
+  for (const s of stems) {
+    if (s.group) byGroup.set(s.group, [...(byGroup.get(s.group) ?? []), s]);
+  }
+  const items: StemListItem[] = [];
+  const emitted = new Set<string>();
+  for (const stem of stems) {
+    const members = stem.group ? byGroup.get(stem.group) : undefined;
+    if (!stem.group || !members || members.length < 2) {
+      items.push({ kind: "stem", stem });
+    } else if (!emitted.has(stem.group)) {
+      emitted.add(stem.group);
+      items.push({
+        kind: "group",
+        key: stem.group,
+        label: stem.groupLabel || stem.group,
+        members,
+      });
+    }
+  }
+  return items;
+}
+
+function groupHtml(
+  item: Extract<StemListItem, { kind: "group" }>,
+  index: number,
+  rowFor: (stem: StemInfo) => string
+): string {
+  const open = !collapsedGroups.has(item.key);
+  const bodyId = `group-rows-${index}`;
+  const members = escapeHtml(JSON.stringify(item.members.map((m) => m.id)));
+  const label = escapeHtml(item.label);
+  return `
+    <div class="stem-group" data-group="${escapeHtml(item.key)}" data-members="${members}">
+      <button type="button" class="group-toggle" aria-expanded="${open}" aria-controls="${bodyId}"
+        title="Show or hide these stems. Hidden stems keep playing with their mute, solo, level, and pan.">
+        <span class="group-caret" aria-hidden="true"></span>
+        <span class="group-name">${label}</span>
+        <span class="group-meta"></span>
+      </button>
+      <div class="stem-group-rows" id="${bodyId}" role="group" aria-label="${label} stems"${
+        open ? "" : " hidden"
+      }>
+        ${item.members.map(rowFor).join("")}
+      </div>
+    </div>`;
+}
+
+function bindGroupToggles(root: HTMLElement): void {
+  root.querySelectorAll<HTMLButtonElement>(".group-toggle").forEach((btn) => {
+    btn.onclick = () => {
+      const wrap = btn.closest<HTMLElement>(".stem-group");
+      const key = wrap?.dataset.group;
+      const body = wrap?.querySelector<HTMLElement>(".stem-group-rows");
+      if (!key || !body) return;
+      const open = btn.getAttribute("aria-expanded") !== "true";
+      if (open) collapsedGroups.delete(key);
+      else collapsedGroups.add(key);
+      btn.setAttribute("aria-expanded", open ? "true" : "false");
+      body.hidden = !open;
+      scheduleFrameHeight();
+    };
+  });
+}
+
+/** "3 stems · 1 muted · 1 solo": hidden rows still say what they are doing. */
+function updateGroupSummaries(): void {
+  document.querySelectorAll<HTMLElement>(".stem-group").forEach((el) => {
+    let ids: string[] = [];
+    try {
+      ids = JSON.parse(el.dataset.members ?? "[]") as string[];
+    } catch {
+      /* summary stays empty */
+    }
+    const muted = ids.filter((id) => state.muted[id]).length;
+    const soloed = ids.filter((id) => state.soloed[id]).length;
+    const parts = [`${ids.length} stems`];
+    if (muted) parts.push(`${muted} muted`);
+    if (soloed) parts.push(`${soloed} solo`);
+    const meta = el.querySelector(".group-meta");
+    if (meta) meta.textContent = parts.join(" · ");
+  });
+}
+
 function updateStemChrome(): void {
   const clearBtn = document.getElementById("btn-clearsolo");
   if (clearBtn) clearBtn.hidden = !anySoloed();
   updatePresetChrome();
+  updateGroupSummaries();
 
   document.querySelectorAll<HTMLElement>(".stem-row").forEach((row) => {
     const id = row.dataset.id!;
@@ -2866,6 +3076,75 @@ function peaksFromBuffer(buf: AudioBuffer, numPoints = 512): number[] {
     peaks[i] = m;
   }
   return peaks;
+}
+
+function paintDecodedWaves(): void {
+  for (const stem of stemInfos) {
+    const row = document.querySelector<HTMLElement>(
+      `.stem-row[data-id="${cssAttr(stem.id)}"]`
+    );
+    if (!row) continue;
+    const liveMetro = stem.id === "metronome" && metroConfig != null;
+    const wave = waveformSeekHtml(stem.peaks, stem.label, {
+      variant: liveMetro ? "metro" : "default",
+    });
+    if (!wave) continue;
+    const metroSlot = liveMetro ? row.querySelector<HTMLElement>(".metro-wave") : null;
+    if (metroSlot) {
+      metroSlot.querySelector(".wave-seek")?.remove();
+      metroSlot.insertAdjacentHTML("beforeend", wave);
+      continue;
+    }
+    let preview = row.querySelector<HTMLElement>(".stem-preview");
+    if (!preview) {
+      preview = document.createElement("div");
+      preview.className = "stem-preview";
+      row.appendChild(preview);
+    }
+    preview.querySelector(".wave-seek")?.remove();
+    preview.insertAdjacentHTML("afterbegin", wave);
+  }
+  document.querySelectorAll<HTMLElement>(".wave-seek").forEach((el) => {
+    el.onpointerdown = (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      seekFromWavePointer(el, event.clientX);
+    };
+  });
+}
+
+function cssAttr(value: string): string {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(value);
+  return value.replace(/["\\]/g, "\\$&");
+}
+
+function setLoadProgress(loaded: number, total: number, message: string): void {
+  const el = status();
+  if (el) el.textContent = message || `${loaded}/${total}`;
+  const track = document.getElementById("mixer-load");
+  const bar = document.getElementById("mixer-load-bar");
+  if (!track || !bar) return;
+  const ratio = total > 0 ? Math.max(0, Math.min(1, loaded / total)) : 0;
+  track.hidden = false;
+  bar.style.width = `${Math.round(ratio * 100)}%`;
+}
+
+function finishLoadProgress(message: string): void {
+  const el = status();
+  if (el) el.textContent = message;
+  const track = document.getElementById("mixer-load");
+  const bar = document.getElementById("mixer-load-bar");
+  if (bar) bar.style.width = "100%";
+  const reduce =
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduce) {
+    if (track) track.hidden = true;
+    return;
+  }
+  window.setTimeout(() => {
+    if (track) track.hidden = true;
+  }, 220);
 }
 
 function applyDecodedPeaks(): void {
@@ -3123,6 +3402,7 @@ async function onRender(event: Event): Promise<void> {
   const args = data.args as {
     stems?: StemInfo[];
     initialVolumesDb?: Record<string, number>;
+    initialPan?: Record<string, number>;
     initialMuted?: Record<string, boolean>;
     initialSoloed?: Record<string, boolean>;
     initialMasterVolumeDb?: number;
@@ -3168,6 +3448,7 @@ async function onRender(event: Event): Promise<void> {
     /* ignore */
   }
   lastStemKey = key;
+  collapsedGroups.clear();
   wantPlaying = false;
   transportBusy = false;
   transportPending = null;
@@ -3183,6 +3464,9 @@ async function onRender(event: Event): Promise<void> {
   }
   state = {
     volumesDb: volumesIn,
+    pan: Object.fromEntries(
+      stems.map((s) => [s.id, clampPan((args.initialPan ?? {})[s.id])])
+    ),
     muted: { ...(args.initialMuted ?? {}) },
     soloed: { ...(args.initialSoloed ?? {}) },
     masterVolumeDb: Number.isFinite(masterInit) ? clampDb(masterInit) : DB_DEFAULT,
@@ -3207,8 +3491,7 @@ async function onRender(event: Event): Promise<void> {
     String(args.localVideoUrl ?? ""),
     Number(args.videoOffsetSec) || 0
   );
-  const st = status();
-  if (st) st.textContent = "Loading stems…";
+  setLoadProgress(0, stems.length, "Loading stems…");
   const liveBuffers: Record<string, (ctx: AudioContext, durationSec: number) => AudioBuffer> =
     {};
   if (metroConfig) {
@@ -3224,24 +3507,24 @@ async function onRender(event: Event): Promise<void> {
   const { errors } = await engine.loadStems(
     stems,
     (loaded, total, msg) => {
-      const el = status();
-      if (el) el.textContent = msg || `${loaded}/${total}`;
+      setLoadProgress(loaded, total, msg || `${loaded}/${total}`);
       scheduleFrameHeight();
     },
     liveBuffers
   );
   applyStateGains();
   applyDecodedPeaks();
+  paintDecodedWaves();
   // Do not reportState(true) on load — that remounts the iframe via a parent
   // Streamlit rerun. Only publish when the user changes mute/solo/volume.
+  // Do not renderUI again here: a second full rebuild flashes the picture and
+  // transport after decode. Waveforms are painted into the rows already on screen.
   lastPublished = statePayload();
-  const el = status();
-  if (el) {
-    el.textContent = errors.length
+  finishLoadProgress(
+    errors.length
       ? `Loaded with errors: ${errors.join("; ")}`
-      : `Loaded ${stems.length} stem(s). Adjust levels while playing — playback will not restart.`;
-  }
-  renderUI(data.theme);
+      : `Loaded ${stems.length} stem(s). Adjust levels while playing — playback will not restart.`
+  );
   applyStateGains();
   restoreTransport();
 
@@ -3256,6 +3539,8 @@ window.addEventListener("keydown", (e) => {
   if (e.code !== "Space" && e.key !== " ") return;
   if (e.repeat || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
   if (isTypingTarget(e.target)) return;
+  // Space on a group header folds it (disclosure buttons answer Enter and Space).
+  if (e.target instanceof HTMLElement && e.target.closest(".group-toggle")) return;
   e.preventDefault();
   togglePlayPause();
 });

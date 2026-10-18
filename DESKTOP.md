@@ -55,7 +55,7 @@ Contributor install (tests/eval extras): `make install` / `./scripts/dev.sh inst
 
 1. **pip / PyTorch** — first install can download ~2 GB (CPU wheels on Windows/Linux).
 2. **Demucs weights** — `tester` prewarms `htdemucs_6s` (default 6-stem model). Extra models download if you pick other track presets. Optional **guitar-ft** weights (~330 MB) download on first use when that Advanced checkbox is on; they cache as `$TORCH_HOME/checkpoints/guitar_htdemucs_6s.pt`. Meta’s pretrained Demucs weights are provided for scientific/research use (code is MIT; see facebookresearch/demucs#327).
-3. Open **Audio Isolation**, upload a **≤90 s** clip first, leave speed on **Balanced**, click **Separate tracks**. Full band emits 4 tracks (Vocals, Drums, Bass, Guitar). Piano and Other are available under Custom. A **Metronome** click track is attached when beat-tracking succeeds (starts muted).
+3. The app opens on **Home**. Choose **Separate tracks** (or sidebar **Audio Isolation**), upload a **≤90 s** clip first, leave speed on **Balanced**, click **Separate tracks**. Full band emits 4 tracks (Vocals, Drums, Bass, Guitar). Piano and Other are available under Custom. A **Metronome** click track is attached when beat-tracking succeeds (starts muted). Finished separations show under Home **Recents** and **Library**.
 4. Use the sticky **Home | mix | +** strip: open a mix tab for the live mixer; download stems or a mix from **Downloads** (export builds on Save).
 5. Optional: open **YouTube to MP3** in the sidebar to download a public link to a folder (MP3 by default) without separating stems.
 
@@ -161,9 +161,10 @@ Missing window? Install [WebView2](https://go.microsoft.com/fwlink/p/?LinkId=212
 ## Installer first run
 
 1. First launch needs internet once to download Demucs weights (several minutes). Later runs reuse the cache.
-2. Open **Audio Isolation**, upload a **≤90 s** clip, leave speed on **Balanced**, click **Separate tracks**.
-3. Use the sticky **Home | mix | +** strip: open a mix tab; confirm mute/solo does not rebuild export until **Save**; unmute **Metronome** if present; Play, switch to another app briefly (audio should continue), then Pause; try **Custom** under “What to separate”; download a stem or mix from **Downloads**.
-4. Optional: sidebar **YouTube to MP3** — paste or search a public URL, leave format on **MP3**, **Save audio to folder**, confirm Explorer/Finder opens (if the picker is missing, Alt+Tab).
+2. The window opens on **Home**. Choose **Separate tracks**, upload a **≤90 s** clip, leave speed on **Balanced**, click **Separate tracks**.
+3. Use the sticky **Home | mix | +** strip: open a mix tab; confirm mute/solo/pan does not rebuild export until **Save**; unmute **Metronome** if present; Play, switch to another app briefly (audio should continue), then Pause; try **Custom** under “What to separate”; download a stem or mix from **Downloads**.
+4. **Open With** (installed app only, not `make ui`): Finder or Explorer → Open With → Audio Tools on an audio or video file Home already accepts (mp3, wav, flac, m4a, mpeg, mp4, aac, ogg, aiff, aif, mov, webm, mkv). The file should land on a new Home tab. The app does not become the default player and does not open MIDI. A second launch while the app is open queues the file instead of starting another window.
+5. Optional: sidebar **YouTube to MP3** — paste or search a public URL, leave format on **MP3**, **Save audio to folder**, confirm Explorer/Finder opens (if the picker is missing, Alt+Tab).
 
 CPU separation often takes about as long as the song (or longer). The **NVIDIA** Windows edition and **Apple GPU (MPS)** on eligible Macs are the default when available and are typically much faster.
 

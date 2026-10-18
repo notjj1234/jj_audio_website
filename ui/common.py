@@ -238,3 +238,29 @@ def delete_run(run_dir: str | Path) -> bool:
         return False
     shutil.rmtree(path)
     return not path.exists()
+
+
+def clear_all_local_runs() -> tuple[int, int]:
+    """Delete every direct child run directory under ``DATA_DIR``.
+
+    Returns ``(deleted_ok, failed)``. Does not remove ``DATA_DIR`` itself or
+    files that are not directories. Used by Desktop Settings (compliance C20).
+    """
+    data_root = DATA_DIR.resolve()
+    if not data_root.is_dir():
+        return 0, 0
+    deleted = 0
+    failed = 0
+    for child in list(data_root.iterdir()):
+        if not child.is_dir():
+            continue
+        if delete_run(child):
+            deleted += 1
+        else:
+            failed += 1
+    return deleted, failed
+
+
+def legal_docs_dir() -> Path:
+    """Repo ``docs/legal`` when running from source; may be missing in freezes."""
+    return _REPO_ROOT / "docs" / "legal"

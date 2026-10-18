@@ -21,6 +21,31 @@ body {
   box-sizing: border-box;
   outline: none;
   position: relative;
+  animation: mixer-settle 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes mixer-settle {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.mixer-load {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.mixer-load[hidden] {
+  display: none;
+}
+
+.mixer-load-bar {
+  height: 100%;
+  width: 0%;
+  border-radius: inherit;
+  background: var(--waveform-progress, var(--primary));
+  transition: width 180ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .visually-hidden {
@@ -697,12 +722,84 @@ body {
   }
 }
 
+/* Group: a disclosure row for stems that came from one parent. No fader, no sum. */
+.stem-group {
+  min-width: 0;
+}
+
+.mixer button.group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  min-height: 40px;
+  padding: 0.3rem 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.92rem;
+  font-weight: 600;
+  text-align: start;
+  cursor: pointer;
+}
+
+.mixer button.group-toggle:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: -2px;
+}
+
+/* Points toward the label when closed, down when open. */
+.group-caret {
+  flex: 0 0 auto;
+  width: 0;
+  height: 0;
+  margin-inline: 0.2rem;
+  border-style: solid;
+  border-width: 5px 0 5px 8px;
+  border-color: transparent transparent transparent currentColor;
+  transition: transform 0.12s ease;
+}
+
+.group-toggle[aria-expanded="true"] .group-caret {
+  transform: rotate(90deg);
+}
+
+.group-meta {
+  font-size: 0.82rem;
+  font-weight: 400;
+}
+
+.stem-group-rows {
+  margin-inline-start: 1.1rem;
+  padding-inline-start: 0.6rem;
+  border-inline-start: 2px solid var(--border);
+}
+
+.stem-group-rows[hidden] {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mixer {
+    animation: none;
+  }
+  .mixer-load-bar {
+    transition: none;
+  }
+  .group-caret {
+    transition: none;
+  }
+}
+
 .stem-row {
   display: grid;
-  grid-template-columns: 40px 40px minmax(4.5rem, 8rem) minmax(0, 1fr);
+  grid-template-columns: 40px 40px minmax(4.5rem, 8rem) minmax(0, 1fr) minmax(7.5rem, 10rem);
   grid-template-areas:
-    "mute solo name vol"
-    "preview preview preview preview";
+    "mute solo name vol pan"
+    "preview preview preview preview preview";
   align-items: center;
   gap: 0.3rem 0.45rem;
   padding: 0.4rem 0;
@@ -758,9 +855,32 @@ body {
 
 .stem-db {
   font-variant-numeric: tabular-nums;
-  font-size: 0.78rem;
+  font-size: 0.82rem;
   font-weight: 600;
   opacity: 0.7;
+  text-align: right;
+}
+
+/* Pan: slider with a text readout ("C", "L 30", "R 30"). Law lives in src/pan.ts. */
+.stem-pan {
+  grid-area: pan;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 2.6rem;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.pan-name {
+  font-size: 0.82rem;
+  font-weight: 600;
+  opacity: 0.7;
+}
+
+.pan-val {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.82rem;
+  font-weight: 600;
   text-align: right;
 }
 
@@ -983,7 +1103,19 @@ body {
     grid-template-areas:
       "mute solo name"
       "vol vol vol"
+      "pan pan pan"
       "preview preview preview";
+  }
+
+  /* Narrow: the pan value sits under the slider, not squeezed beside it. */
+  .stem-pan {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .pan-val {
+    grid-column: 2;
+    grid-row: 2;
+    text-align: left;
   }
 
   .metro-wave {

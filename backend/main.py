@@ -25,6 +25,7 @@ from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
 from audio_to_tab.isolate import SUPPORTED_MODELS
+from backend.account import delete_user_account
 from backend.auth import (
     REFRESH_COOKIE,
     create_access_token,
@@ -274,6 +275,23 @@ def logout(response: Response) -> dict:
 @app.get("/v1/auth/me")
 def me(user=Depends(get_current_user)) -> dict:
     return {"id": user.id, "email": user.email}
+
+
+@app.delete("/v1/auth/me")
+def delete_me(
+    response: Response,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Delete the current user account and associated uploads/job artifacts (C20)."""
+    if user.is_admin and not user.is_anonymous:
+        raise HTTPException(
+            400,
+            "Admin accounts cannot be self-deleted from the API. Contact the operator.",
+        )
+    counts = delete_user_account(db, user, get_storage())
+    response.delete_cookie(REFRESH_COOKIE, path="/v1/auth")
+    return {"status": "deleted", **counts}
 
 
 @app.post("/v1/uploads/audio", response_model=UploadResponse)

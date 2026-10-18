@@ -783,3 +783,179 @@ def test_mixer_seek_and_master_are_filled_bars():
     assert "border-radius: 3px" not in speed_key
     assert "practice-export-note" in css
 
+
+
+def _mixer_src(name: str) -> str:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "ui"
+        / "stem_mixer_component"
+        / "frontend"
+        / "src"
+        / name
+    ).read_text(encoding="utf-8")
+
+
+def test_pan_law_is_written_down_once_in_pan_ts():
+    pan = _mixer_src("pan.ts")
+    # The law is stated in words and math in the module header, nowhere else.
+    assert "Law: the Web Audio `StereoPannerNode` (equal-power)" in pan
+    assert "cos(x * pi/2)" in pan and "sin(x * pi/2)" in pan
+    assert "center passes the stem through unchanged" in pan
+    for name in ("PAN_MIN = -100", "PAN_MAX = 100", "PAN_DEFAULT = 0", "PAN_DETENT = 4"):
+        assert name in pan
+    for fn in ("clampPan", "panToUnit", "formatPan", "panSpoken", "snapPanToCenter", "panMatrix"):
+        assert f"export function {fn}" in pan
+    main = _mixer_main_ts()
+    assert "cos(" not in main and "Math.PI" not in main.split("class StemMixerEngine")[0]
+
+
+def test_mixer_stem_bus_pans_after_gain_and_survives_rebuild():
+    main = _mixer_main_ts()
+    # One helper builds every stem bus: gain -> panner -> master.
+    assert main.count("this.addStemBus(") == 4
+    assert "gain.connect(panner)" in main and "panner.connect(this.masterGain!)" in main
+    assert "createStemPanner(ctx)" in main
+    # Pan is kept across an AudioContext rebuild and a stem buffer hot-swap.
+    assert "this.applyPans(this.lastPans)" in main
+    assert "private panners = new Map<string, StereoPannerNode>()" in main
+    # Gains still come from effectiveGains; pan never changes mute/solo/level.
+    assert "gains[id] = audible ? dbToLinear(db) * masterLin : 0;" in main
+    assert "engine.applyPans(state.pan)" in main
+
+
+def test_mixer_pan_slider_is_live_reported_on_release_and_centers():
+    main = _mixer_main_ts()
+    assert 'class="pan-slider"' in main
+    assert 'min="${PAN_MIN}" max="${PAN_MAX}" step="1"' in main
+    assert 'aria-valuetext="${panSpoken(pan)}"' in main
+    assert '<span class="pan-val" aria-hidden="true">${formatPan(pan)}</span>' in main
+    handler = main[main.find('querySelectorAll<HTMLInputElement>(".pan-slider").forEach((el) => {\n    const id') :]
+    handler = handler[: handler.find('querySelectorAll<HTMLButtonElement>("button.toggle.mute")')]
+    # Live while dragging, then one report on release (same as the volume faders).
+    assert "engine.applyPans(state.pan)" in handler
+    assert "el.onchange = () => {\n      reportState(true);" in handler
+    # Detent applies to drags only, never to arrow keys; double-click centers.
+    assert "dragging ? snapPanToCenter(raw) : raw" in handler
+    assert 'addEventListener("keydown", endDrag)' in handler
+    assert "el.ondblclick" in handler and "PAN_DEFAULT" in handler
+    # Pan state is reported and restored.
+    assert "pan: { ...state.pan }," in main
+    assert "initialPan?: Record<string, number>;" in main
+    assert "clampPan((args.initialPan ?? {})[s.id])" in main
+    # Reset puts every stem back to center.
+    assert "state.pan[stem.id] = PAN_DEFAULT;" in main
+
+
+def test_mixer_pan_is_listening_only_and_the_ui_says_so():
+    main = _mixer_main_ts()
+    assert "Pan is for listening here; saved files keep every track centered." in main
+    # Saving is untouched: no pan argument reaches the Python mix.
+    page = (Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py").read_text(
+        encoding="utf-8"
+    )
+    build = page[page.find("def _build_current_mix") : page.find("def _metronome_payload_for_mixer")]
+    assert "pan" not in build.lower()
+
+
+def test_mixer_pan_layout_reads_in_words_and_stacks_when_narrow():
+    css = _mixer_src("style.css")
+    assert '"mute solo name vol pan"' in css
+    assert ".stem-pan {" in css and ".pan-val {" in css
+    # Readouts are at least 13px (0.82rem at a 16px root) and not dimmed.
+    pan_val = css[css.find(".pan-val {") :]
+    assert "font-size: 0.82rem" in pan_val[: pan_val.find("}")]
+    assert "opacity" not in pan_val[: pan_val.find("}")]
+    narrow = css[css.find("@media (max-width: 520px)") :]
+    assert '"pan pan pan"' in narrow
+    assert "grid-row: 2;" in narrow  # value sits under the slider
+
+
+def test_stem_mixer_accepts_initial_pan_and_isolate_passes_it_clamped():
+    from ui.stem_mixer_component import stem_mixer
+
+    params = inspect.signature(stem_mixer).parameters
+    assert "initial_pan" in params and params["initial_pan"].default is None
+    page = (Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'saved_pan = saved.get("pan") if isinstance(saved.get("pan"), dict) else {}' in page
+    assert "initial_pan={n: clamp_pan(saved_pan.get(n)) for n in stem_names}," in page
+
+
+def test_clamp_pan_matches_the_browser_clamp():
+    from ui.isolate_state import clamp_pan
+
+    assert clamp_pan(0) == 0 and clamp_pan(37) == 37 and clamp_pan(-37) == -37
+    assert clamp_pan(250) == 100 and clamp_pan(-250) == -100
+    assert clamp_pan(12.6) == 13 and clamp_pan("42") == 42
+    for junk in (None, "", "left", float("nan"), float("inf"), float("-inf"), [], {}):
+        assert clamp_pan(junk) == 0
+
+
+def test_stem_group_fields_fold_break_down_children_only():
+    from audio_to_tab.mixer import _COMPOSITE_SEPARATOR
+    from ui.isolate_state import stem_group_fields
+
+    assert _COMPOSITE_SEPARATOR == "::"  # stem_group_fields hard-codes the same separator
+    assert stem_group_fields("other::guitar") == {
+        "group": "other",
+        "groupLabel": "Other",
+        "shortLabel": "Guitar",
+    }
+    # A custom stem id still gets a readable label.
+    assert stem_group_fields("drums::hi_hat") == {
+        "group": "drums",
+        "groupLabel": "Drums",
+        "shortLabel": "Hi Hat",
+    }
+    for plain in ("vocals", "metronome", "lead_guitar", "", "::", "other::", "::guitar"):
+        assert stem_group_fields(plain) == {}
+    page = (Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py").read_text(
+        encoding="utf-8"
+    )
+    assert "**stem_group_fields(name)," in page
+
+
+def test_mixer_group_row_is_a_disclosure_with_no_fader_and_no_sum():
+    main = _mixer_main_ts()
+    start = main.find("function stemListItems")
+    end = main.find("function updateStemChrome")
+    block = main[start:end]
+    # Two or more children of one parent fold together; a lone child stays a plain row.
+    assert "members.length < 2" in block
+    assert "emitted.has(stem.group)" in block
+    # A real, labelled disclosure button: expanded state, controlled region, native button.
+    assert '<button type="button" class="group-toggle" aria-expanded="${open}"' in block
+    assert 'aria-controls="${bodyId}"' in block
+    assert "body.hidden = !open;" in block
+    assert 'btn.setAttribute("aria-expanded", open ? "true" : "false");' in block
+    # Hiding is view state only: nothing in the group code touches gains, mute, or solo.
+    # No fader, no writes to mixer state: the summary only reads mute and solo.
+    for forbidden in ("applyGains", "reportState", "state.volumesDb", "range", "= !state."):
+        assert forbidden not in block, forbidden
+    assert "state.muted[id] =" not in block and "state.soloed[id] =" not in block
+    # Hidden rows still say what they are doing, in words.
+    assert "`${ids.length} stems`" in block
+    assert "`${muted} muted`" in block and "`${soloed} solo`" in block
+    # Space on the header folds it instead of toggling play.
+    assert 'e.target.closest(".group-toggle")' in main
+    # Each new mix opens with every group expanded.
+    assert "collapsedGroups.clear();" in main
+    # Names inside a group drop the "(from Parent)" tail; labels for assistive tech keep it.
+    assert "inGroup ? stem.shortLabel || stem.label : stem.label" in main
+    assert "aria-label=\"${muted ? \"Unmute\" : \"Mute\"} ${escapeHtml(stem.label)}\"" in main
+
+
+def test_mixer_group_row_css_wins_over_button_defaults_and_points_down_when_open():
+    css = _mixer_src("style.css")
+    assert ".mixer button.group-toggle {" in css  # beats the generic `.mixer button` rule
+    toggle = css[css.find(".mixer button.group-toggle {") :]
+    toggle = toggle[: toggle.find("}")]
+    assert "min-height: 40px" in toggle and "text-align: start" in toggle
+    assert 'aria-expanded="true"] .group-caret' in css and "rotate(90deg)" in css
+    assert ".stem-group-rows[hidden]" in css and "display: none" in css
+    meta = css[css.find(".group-meta {") :]
+    meta = meta[: meta.find("}")]
+    assert "font-size: 0.82rem" in meta and "opacity" not in meta  # readable, not dimmed
+    assert "prefers-reduced-motion" in css

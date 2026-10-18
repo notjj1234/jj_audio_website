@@ -60,7 +60,10 @@ def mix_tabs(
     ``tabs`` items: ``{id, title, active?, busy?, progress?}``.
     ``busy`` / ``progress`` (0–1) paint an in-tab loading bar while a draft
     slot is separating.
-    Returns ``{action: "home"|"focus"|"close"|"plus", id?, seq}`` or None.
+    Returns ``{action, id?, to?, seq}`` or None. ``action`` is one of
+    ``home``, ``plus``, ``focus``, ``close`` (``id`` = tab), or ``reorder``
+    (``id`` = moved tab, ``to`` = its new 0-based slot among the mix tabs;
+    Home is not a slot).
 
     ``theme_vars`` (optional): CSS custom properties for theming the iframe.
     Pass the result of ``get_iframe_theme_vars()`` from isolate_state.

@@ -755,6 +755,36 @@ button.danger,
   white-space: nowrap;
 }
 
+/* Pan: own line under name / download / level. Law and words live in mixer/pan.ts. */
+.mixer .stem-pan {
+  grid-column: 3 / -1;
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr) 3.25rem;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.mixer .stem-pan .pan-name {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.mixer .stem-pan input[type="range"] {
+  min-height: 44px;
+  margin: 0;
+  padding: 0;
+}
+
+.mixer .stem-pan .pan-val {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--ink);
+  text-align: right;
+}
+
 .mixer button.toggle {
   width: 40px;
   min-width: 40px;
@@ -766,10 +796,10 @@ button.danger,
   font-size: 0.78rem;
   letter-spacing: 0.02em;
   transition:
-    background 0.12s ease,
-    color 0.12s ease,
-    border-color 0.12s ease,
-    transform 0.05s ease;
+    background 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    color 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 120ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .mixer button.toggle:active {
@@ -795,6 +825,18 @@ button.danger,
 
   .mixer .stem-vol {
     grid-column: 1 / -1;
+  }
+
+  /* Narrow: the value goes under the slider instead of being clipped. */
+  .mixer .stem-pan {
+    grid-column: 1 / -1;
+    grid-template-columns: 2rem minmax(0, 1fr);
+  }
+
+  .mixer .stem-pan .pan-val {
+    grid-column: 2;
+    grid-row: 2;
+    text-align: left;
   }
 
   .mixer-time {
@@ -838,5 +880,183 @@ button.danger,
 
   .nav button.secondary {
     order: 4;
+  }
+}
+
+/* Compliance / a11y */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 1000;
+  padding: 0.5rem 0.75rem;
+  background: var(--ink);
+  color: #fff;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.skip-link:focus {
+  left: 0.75rem;
+  top: 0.75rem;
+}
+
+:focus-visible {
+  outline: 3px solid var(--moss-deep);
+  outline-offset: 2px;
+}
+
+.site-footer {
+  margin-top: auto;
+  padding: 1.25rem 1.25rem 2rem;
+  border-top: 1px solid var(--haze);
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.site-footer-biz,
+.site-footer-links {
+  margin: 0 0 0.5rem;
+  font-size: 0.85rem;
+  color: rgba(26, 31, 28, 0.82);
+}
+
+.site-footer-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+}
+
+.site-footer a {
+  font-weight: 600;
+  color: var(--moss-deep);
+}
+
+.cookie-banner {
+  position: sticky;
+  bottom: 0;
+  z-index: 50;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.85rem 1.25rem;
+  border-top: 1px solid var(--haze);
+  background: #fff;
+  box-shadow: 0 -4px 16px rgba(26, 31, 28, 0.08);
+}
+
+.cookie-banner p {
+  margin: 0;
+  flex: 1 1 16rem;
+  font-size: 0.9rem;
+  color: rgba(26, 31, 28, 0.88);
+}
+
+.consent-check {
+  display: flex;
+  gap: 0.55rem;
+  align-items: flex-start;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: rgba(26, 31, 28, 0.88);
+}
+
+.consent-check input {
+  margin-top: 0.2rem;
+}
+
+.legal-page {
+  max-width: 42rem;
+}
+
+.legal-draft-banner {
+  padding: 0.75rem 0.9rem;
+  margin: 0 0 1rem;
+  border: 1px solid rgba(155, 44, 44, 0.35);
+  background: rgba(155, 44, 44, 0.08);
+  color: var(--danger);
+  border-radius: var(--radius);
+  font-size: 0.9rem;
+}
+
+.legal-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.85rem;
+  margin-bottom: 1.25rem;
+}
+
+.legal-nav a {
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.legal-nav a.active {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  color: var(--moss);
+}
+
+.legal-article h1 {
+  font-size: 1.75rem;
+}
+
+.legal-article h2 {
+  font-size: 1.2rem;
+  margin: 1.25rem 0 0.4rem;
+  color: var(--moss-deep);
+}
+
+.legal-table-wrap {
+  overflow-x: auto;
+  margin: 0.75rem 0 1rem;
+}
+
+.legal-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.legal-table th,
+.legal-table td {
+  border: 1px solid var(--haze);
+  padding: 0.4rem 0.5rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.settings-page {
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.settings-section {
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--haze);
+}
+
+button.danger {
+  background: var(--danger);
+  color: #fff;
+  border: none;
+  font-weight: 600;
+}
+
+button.danger:disabled {
+  opacity: 0.45;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button,
+  .btn,
+  .mixer button.toggle {
+    transition: none;
+    animation: none;
+  }
+  .mixer button.toggle:active {
+    transform: none;
   }
 }

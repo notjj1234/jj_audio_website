@@ -275,6 +275,7 @@ async function loadWave(
   const gen = ++loadGeneration;
   destroyWave(false);
   lastSourceUrl = sourceUrl;
+  waveEl.classList.add("is-loading");
   if (statusEl) statusEl.textContent = "Loading waveform…";
   if (playBtn) playBtn.disabled = true;
 
@@ -290,6 +291,7 @@ async function loadWave(
       return;
     }
     lastSourceUrl = "";
+    waveEl.classList.remove("is-loading");
     if (statusEl) statusEl.textContent = `Could not load audio: ${String(err)}`;
     scheduleFrameHeight();
     return;
@@ -319,6 +321,7 @@ async function loadWave(
 
   wavesurfer.on("ready", () => {
     if (gen !== loadGeneration) return;
+    waveEl.classList.remove("is-loading");
     const dur = wavesurfer!.getDuration();
     const endBound = Number.isFinite(end) && end > 0 ? end : dur;
     syncRegion(start, Math.min(endBound, dur), minLength);

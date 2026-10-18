@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { Navigate, useNavigate } from "react-router-dom";
+import { Link, Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth";
 
 export function LoginPage() {
@@ -7,6 +7,7 @@ export function LoginPage() {
   const navigate = useNavigate();
   const [user, setUser] = useState("admin@localhost");
   const [password, setPassword] = useState("");
+  const [acceptTerms, setAcceptTerms] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -14,6 +15,10 @@ export function LoginPage() {
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
+    if (!acceptTerms) {
+      setError("Confirm you accept the Terms and Privacy policy.");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -30,8 +35,9 @@ export function LoginPage() {
     <div className="login-hero">
       <p className="brand-hero">Audio Tools</p>
       <p className="lede">
-        Sign in to turn tracks into guitar tabs or isolate stems. Built for real
-        async jobs, not a laptop demo.
+        Sign in to try stem isolation and Tab PDF on the hosted demo. This is an
+        unfinished product — results can be wrong. Processing uses your uploads
+        and account email as described in the Privacy policy.
       </p>
       <form className="stack" onSubmit={onSubmit}>
         <label className="field">
@@ -54,8 +60,19 @@ export function LoginPage() {
             autoComplete="current-password"
           />
         </label>
+        <label className="consent-check">
+          <input
+            type="checkbox"
+            checked={acceptTerms}
+            onChange={(e) => setAcceptTerms(e.target.checked)}
+          />
+          <span>
+            I agree to the <Link to="/legal/terms">Terms</Link> and{" "}
+            <Link to="/legal/privacy">Privacy policy</Link>.
+          </span>
+        </label>
         {error && <p className="error">{error}</p>}
-        <button type="submit" disabled={busy}>
+        <button type="submit" disabled={busy || !acceptTerms}>
           {busy ? "Signing in…" : "Sign in"}
         </button>
       </form>

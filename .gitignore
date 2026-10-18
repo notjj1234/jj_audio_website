@@ -37,9 +37,15 @@ web/dist/
 # OS
 .DS_Store
 
-# Models / large artifacts
+# Models / large artifacts (weights download at runtime / first use)
 *.wav
 !eval/fixtures/*.wav
+*.pt
+*.pth
+*.onnx
+*.ckpt
+*.safetensors
+checkpoints/
 
 # Desktop packaging (downloaded at build time; do not commit binaries)
 packaging/ffmpeg/
@@ -61,7 +67,7 @@ AGENTS.md
 PLANNING.md
 docs/superpowers/
 
-# Editor / local tooling
+# Editor / local tooling / agent scratch
 .vscode/
 .pytest_cache/
 .ruff_cache/
@@ -69,6 +75,11 @@ packaging/_diag_*
 .streamlit/credentials.toml
 .pr_agent.toml
 .opencode/
+.superpowers/
+.claude/
+.agents/
+*.log
+Thumbs.db
 
 # Cursor local tooling / config (skills stay on disk, not in git)
 .cursor/

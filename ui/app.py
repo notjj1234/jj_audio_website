@@ -73,7 +73,10 @@ _MENU_ITEMS = {
     "About": (
         f"# {_WINDOW_PRODUCT} {_APP_VERSION}\n\n"
         f"{_WINDOW_PRODUCT} separates songs into stems on this computer. "
-        "Nothing is sent to an account."
+        "Nothing is sent to an account.\n\n"
+        "Legal drafts (Privacy, Terms, Refunds, Cookies) and local data clearing "
+        "are under **Settings**. Operator: Orallo John James Dalton Alvarez "
+        "(orallojohnjames@gmail.com), Japan. Demo product."
     ),
 }
 _page_config: dict[str, object] = {
@@ -273,9 +276,32 @@ st.html(
     [data-testid="stButton"] button:active:not(:disabled),
     [data-testid="stDownloadButton"] button:active:not(:disabled),
     [data-testid="stFormSubmitButton"] button:active:not(:disabled),
-    [data-testid="stPopover"] button:active:not(:disabled) {
-      transform: none;
-      opacity: 1;
+  [data-testid="stPopover"] button:active:not(:disabled) {
+    transform: none;
+    opacity: 1;
+  }
+  }
+
+  /* Keyboard focus on the same controls. Mouse clicks stay unringed. */
+  [data-testid="stButton"] button:focus-visible,
+  [data-testid="stDownloadButton"] button:focus-visible,
+  [data-testid="stFormSubmitButton"] button:focus-visible,
+  [data-testid="stPopover"] button:focus-visible,
+  [data-testid="stSidebarCollapseButton"] button:focus-visible,
+  [data-testid="stExpandSidebarButton"] button:focus-visible {
+    outline: 2px solid var(--color-accent-primary, #f6ad49) !important;
+    outline-offset: 2px !important;
+  }
+
+  /* Job progress fills ease instead of jumping in whole percents. */
+  [data-testid="stProgress"] [role="progressbar"] > div,
+  [data-testid="stProgressBar"] > div {
+    transition: width 200ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    [data-testid="stProgress"] [role="progressbar"] > div,
+    [data-testid="stProgressBar"] > div {
+      transition: none;
     }
   }
 
@@ -751,24 +777,27 @@ def _loading_overlay_html(label: str) -> str:
     from {{ transform: rotate(0deg); }}
     to {{ transform: rotate(360deg); }}
   }}
+  @keyframes audiotools-arm {{
+    from {{ pointer-events: none; }}
+    to {{ pointer-events: auto; }}
+  }}
   .audiotools-global-loading-root {{
     position: fixed;
     inset: 0;
     z-index: 9990;
-    pointer-events: auto !important;
+    pointer-events: none;
     display: flex;
     align-items: center;
     justify-content: center;
+    animation: audiotools-arm 0.4s step-end forwards;
   }}
   .audiotools-global-loading-root .audiotools-dim {{
     position: absolute;
     inset: 0;
-    background: rgba(0, 0, 0, 0.35);
-    backdrop-filter: blur(2px);
-    -webkit-backdrop-filter: blur(2px);
+    background: rgba(0, 0, 0, 0.28);
     opacity: 0;
-    animation: audiotools-dim-in 0.2s ease both;
-    animation-delay: 1s;
+    animation: audiotools-dim-in 0.18s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation-delay: 0.4s;
   }}
   .audiotools-global-loading-root .audiotools-global-loading {{
     position: relative;
@@ -776,19 +805,18 @@ def _loading_overlay_html(label: str) -> str:
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 0.85rem;
+    gap: 0.7rem;
     opacity: 0;
-    animation: audiotools-dim-in 0.2s ease both;
-    animation-delay: 1s;
+    animation: audiotools-dim-in 0.18s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation-delay: 0.4s;
   }}
   .audiotools-global-loading-root .audiotools-spinner {{
-    width: 64px;
-    height: 64px;
+    width: 28px;
+    height: 28px;
     border-radius: 50%;
-    border: 6px solid var(--text-color, rgba(255, 255, 255, 0.9));
-    border-top-color: transparent;
-    animation: audiotools-circle-spin 0.9s linear infinite;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+    border: 2.5px solid color-mix(in srgb, var(--text-color, #fff) 28%, transparent);
+    border-top-color: var(--text-color, rgba(255, 255, 255, 0.95));
+    animation: audiotools-circle-spin 0.75s linear infinite;
   }}
   @media (prefers-reduced-motion: reduce) {{
     .audiotools-global-loading-root .audiotools-dim {{
@@ -832,6 +860,10 @@ _MODE_SWITCH_HTML = """
     from { transform: rotate(0deg); }
     to { transform: rotate(360deg); }
   }
+  @keyframes audiotools-dim-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
   html:has(.audiotools-mode-switch) body * {
     pointer-events: none !important;
   }
@@ -842,11 +874,10 @@ _MODE_SWITCH_HTML = """
     display: flex !important;
     align-items: center;
     justify-content: center;
-    background: rgba(0, 0, 0, 0.55);
-    backdrop-filter: brightness(0.5) blur(2px);
-    -webkit-backdrop-filter: brightness(0.5) blur(2px);
+    background: rgba(0, 0, 0, 0.28);
     pointer-events: auto !important;
     cursor: wait;
+    animation: audiotools-dim-in 0.16s cubic-bezier(0.22, 1, 0.36, 1) both;
   }
   html:has(.audiotools-mode-switch) body .audiotools-mode-switch,
   html:has(.audiotools-mode-switch) body .audiotools-mode-switch * {
@@ -854,68 +885,44 @@ _MODE_SWITCH_HTML = """
     cursor: wait;
   }
   .audiotools-mode-switch-card {
-    width: 176px;
-    height: 176px;
-    border-radius: 50%;
     display: flex;
+    flex-direction: column;
     align-items: center;
-    justify-content: center;
+    gap: 0.7rem;
+    padding: 1.15rem 1.4rem 1rem;
+    border-radius: 16px;
     position: relative;
     background: var(--color-bg-deepest, #192542);
-    border: 4px solid var(--color-accent-primary, #f6ad49);
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+    border: 1px solid color-mix(in srgb, var(--color-accent-primary, #f6ad49) 55%, transparent);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
   }
   .audiotools-gear {
-    position: relative;
-    width: 108px;
-    height: 108px;
-    animation: audiotools-gear-spin 1.1s linear infinite;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 2.5px solid color-mix(in srgb, var(--color-accent-primary, #f6ad49) 28%, transparent);
+    border-top-color: var(--color-accent-primary, #f6ad49);
+    animation: audiotools-gear-spin 0.75s linear infinite;
   }
   @media (prefers-reduced-motion: reduce) {
+    .audiotools-mode-switch {
+      animation: none;
+    }
     .audiotools-gear {
       animation: none;
     }
   }
-  .audiotools-gear-teeth {
-    position: absolute;
-    inset: 0;
-    background: var(--color-accent-primary, #f6ad49);
-    border-radius: 14px;
-  }
-  .audiotools-gear-teeth:nth-child(1) { transform: rotate(30deg); }
-  .audiotools-gear-teeth:nth-child(2) { transform: rotate(60deg); }
-  .audiotools-gear-teeth:nth-child(3) { transform: rotate(90deg); }
-  .audiotools-gear-hub {
-    position: absolute;
-    width: 40px;
-    height: 40px;
-    margin: -20px 0 0 -20px;
-    top: 50%;
-    left: 50%;
-    border-radius: 50%;
-    background: var(--color-bg-deepest, #192542);
-    border: 4px solid var(--color-accent-primary, #f6ad49);
-    z-index: 1;
-  }
   .audiotools-mode-switch-label {
-    position: absolute;
-    top: calc(100% + 18px);
     color: #ffffff;
-    font-size: 1.35rem;
-    font-weight: 700;
-    letter-spacing: 0.03em;
+    font-size: 0.95rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
     white-space: nowrap;
-    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.9);
   }
 </style>
 <div class="audiotools-mode-switch" role="status" aria-live="polite" aria-busy="true">
   <div class="audiotools-mode-switch-card">
-    <div class="audiotools-gear" aria-hidden="true">
-      <div class="audiotools-gear-teeth"></div>
-      <div class="audiotools-gear-teeth"></div>
-      <div class="audiotools-gear-teeth"></div>
-    </div>
-    <div class="audiotools-gear-hub" aria-hidden="true"></div>
+    <div class="audiotools-gear" aria-hidden="true"></div>
     <div class="audiotools-mode-switch-label">Switching…</div>
   </div>
 </div>
@@ -961,7 +968,8 @@ st.sidebar.caption(_DEMO_BLURB)
 
 _pages = Path(__file__).parent / "pages"
 _nav = [
-    st.Page(str(_pages / "isolate.py"), title="Audio Isolation", default=True),
+    st.Page(str(_pages / "home.py"), title="Home", default=True),
+    st.Page(str(_pages / "isolate.py"), title="Audio Isolation"),
     st.Page(str(_pages / "youtube_audio.py"), title="YouTube to MP3"),
     # Always listed. The page itself carries the unfinished-product warning —
     # hiding it in Lite made the sidebar look broken when users switched modes.

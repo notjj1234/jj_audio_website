@@ -3,6 +3,7 @@
 // @soundtouchjs/audio-worklet@2.1.1 — MPL-2.0 (not GPL Rubber Band).
 import type { SoundTouchNode } from "@soundtouchjs/audio-worklet";
 import soundTouchProcessorUrl from "@soundtouchjs/audio-worklet/processor?url";
+import { PAN_DEFAULT, createStemPanner, panToUnit } from "./pan";
 import {
   PRACTICE_KEY_DEFAULT,
   PRACTICE_RATE_DEFAULT,
@@ -28,6 +29,8 @@ export type MixerState = {
   muted: Record<string, boolean>;
   soloed: Record<string, boolean>;
   masterVolumeDb?: number;
+  /** Per-stem pan, whole steps -100..100 (law in ./pan.ts). Missing = centered. */
+  pan?: Record<string, number>;
 };
 
 function clampDb(db: number): number {
@@ -230,6 +233,7 @@ export class StemMixerEngine {
   private ctx: AudioContext | null = null;
   private buffers = new Map<string, AudioBuffer>();
   private gains = new Map<string, GainNode>();
+  private panners = new Map<string, StereoPannerNode>();
   private sources = new Map<string, AudioBufferSourceNode>();
   private masterGain: GainNode | null = null;
   private limiter: DynamicsCompressorNode | null = null;
@@ -246,6 +250,7 @@ export class StemMixerEngine {
   private offset = 0;
   private duration = 0;
   private lastGains: Record<string, number> = {};
+  private lastPans: Record<string, number> = {};
   private onTimeUpdate: ((t: number, dur: number, playing: boolean) => void) | null =
     null;
   private onSoftPause: (() => void) | null = null;
@@ -561,21 +566,46 @@ export class StemMixerEngine {
   private reattachGainsToBus(): void {
     if (!this.ctx) return;
     this.ensureMasterBus();
-    for (const gain of this.gains.values()) {
+    for (const node of [...this.gains.values(), ...this.panners.values()]) {
       try {
-        gain.disconnect();
+        node.disconnect();
       } catch {
         /* */
       }
     }
     this.gains.clear();
+    this.panners.clear();
     for (const id of this.stemIds) {
       if (!this.buffers.has(id)) continue;
-      const gain = this.ctx.createGain();
-      gain.connect(this.masterGain!);
-      this.gains.set(id, gain);
+      this.addStemBus(this.ctx, id);
     }
     this.applyGains(this.lastGains);
+    this.applyPans(this.lastPans);
+  }
+
+  /** One stem's bus: source -> gain -> panner -> master. Law: see ./pan.ts. */
+  private addStemBus(ctx: AudioContext, id: string): void {
+    const gain = ctx.createGain();
+    const panner = createStemPanner(ctx);
+    if (panner) {
+      gain.connect(panner);
+      panner.connect(this.masterGain!);
+      panner.pan.value = panToUnit(this.lastPans[id] ?? PAN_DEFAULT);
+      this.panners.set(id, panner);
+    } else {
+      gain.connect(this.masterGain!);
+    }
+    this.gains.set(id, gain);
+  }
+
+  /** Pan per stem in whole steps (-100..100). Smoothed so a drag does not zipper. */
+  applyPans(pans: Record<string, number>): void {
+    this.lastPans = { ...pans };
+    for (const id of this.stemIds) {
+      const node = this.panners.get(id);
+      if (!node || !this.ctx) continue;
+      node.pan.setTargetAtTime(panToUnit(pans[id] ?? PAN_DEFAULT), this.ctx.currentTime, 0.015);
+    }
   }
 
   private rebuildGraphKeepingBuffers(): void {
@@ -596,14 +626,15 @@ export class StemMixerEngine {
     this.sources.clear();
     this.playing = false;
     cancelAnimationFrame(this.raf);
-    for (const gain of this.gains.values()) {
+    for (const node of [...this.gains.values(), ...this.panners.values()]) {
       try {
-        gain.disconnect();
+        node.disconnect();
       } catch {
         /* */
       }
     }
     this.gains.clear();
+    this.panners.clear();
     this.teardownSoundTouch();
     this.soundTouchFailed = false;
     this.masterGain = null;
@@ -623,12 +654,11 @@ export class StemMixerEngine {
     this.bindContextState();
     for (const id of this.stemIds) {
       if (!this.buffers.has(id)) continue;
-      const gain = this.ctx.createGain();
-      gain.connect(this.masterGain!);
-      this.gains.set(id, gain);
+      this.addStemBus(this.ctx, id);
     }
     this.offset = savedOffset;
     this.applyGains(this.lastGains);
+    this.applyPans(this.lastPans);
   }
 
   private async softPauseFromInterrupt(): Promise<void> {
@@ -679,6 +709,8 @@ export class StemMixerEngine {
     await this.stopSources(false);
     this.buffers.clear();
     this.gains.clear();
+    this.panners.clear();
+    this.lastPans = {};
     this.sources.clear();
     this.stemIds = stems.map((s) => s.id);
     this.offset = 0;
@@ -716,9 +748,7 @@ export class StemMixerEngine {
         const buf = await this.ctx.decodeAudioData(arr.slice(0));
         this.buffers.set(stem.id, buf);
         this.duration = Math.max(this.duration, buf.duration);
-        const gain = this.ctx.createGain();
-        gain.connect(this.masterGain!);
-        this.gains.set(stem.id, gain);
+        this.addStemBus(this.ctx, stem.id);
       } catch (e) {
         errors.push(`${stem.label}: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -857,23 +887,35 @@ export class StemMixerEngine {
     if (!(duration > 0)) {
       throw new Error("Stems have no audio");
     }
+    const gains = effectiveGains(this.stemIds, state);
+    // Same law as the live mix (./pan.ts). Only panned stems get a panner, so a mix
+    // with every stem centered renders exactly as it did before pan existed.
+    const panOf = (id: string): number => panToUnit(state.pan?.[id] ?? PAN_DEFAULT);
+    const audibleIds = this.stemIds.filter(
+      (id) => this.buffers.has(id) && (gains[id] ?? 0) > 0
+    );
+    const anyPanned = audibleIds.some((id) => panOf(id) !== 0);
     const channels = Math.max(
-      1,
+      anyPanned ? 2 : 1,
       ...[...this.buffers.values()].map((b) => b.numberOfChannels)
     );
     const frameCount = Math.max(1, Math.ceil(duration * sampleRate));
     const offline = new Offline(channels, frameCount, sampleRate);
-    const gains = effectiveGains(this.stemIds, state);
-    for (const id of this.stemIds) {
-      const buf = this.buffers.get(id);
-      const gLin = gains[id] ?? 0;
-      if (!buf || gLin <= 0) continue;
+    for (const id of audibleIds) {
+      const buf = this.buffers.get(id)!;
       const src = offline.createBufferSource();
       src.buffer = buf;
       const gain = offline.createGain();
-      gain.gain.value = gLin;
+      gain.gain.value = gains[id] ?? 0;
       src.connect(gain);
-      gain.connect(offline.destination);
+      const panner = panOf(id) !== 0 ? createStemPanner(offline) : null;
+      if (panner) {
+        panner.pan.value = panOf(id);
+        gain.connect(panner);
+        panner.connect(offline.destination);
+      } else {
+        gain.connect(offline.destination);
+      }
       src.start(0);
     }
     const rendered = await offline.startRendering();

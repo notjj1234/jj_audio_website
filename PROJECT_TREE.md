@@ -11,7 +11,7 @@ If a path is not listed, it was not on disk when this was written (see **Last ve
 
 Both products import `src/audio_to_tab/` (isolate, YouTube ingest, tab PDF pipeline). They do **not** share UI or job runners.
 
-1. **Desktop (local only)** — Streamlit `ui/app.py` behind `packaging/launcher.py`. Pages: Audio Isolation (separate/mix), YouTube to MP3 (save file only), Tab PDF (demo). Serial isolate jobs in-process (`ui/isolate_jobs.py`). No Docker.
+1. **Desktop (local only)** — Streamlit `ui/app.py` behind `packaging/launcher.py`. Boot page is **Home** (`ui/pages/home.py`); then Audio Isolation (separate/mix), YouTube to MP3 (save file only), Tab PDF (demo), Settings. Serial isolate jobs in-process (`ui/isolate_jobs.py`). No Docker.
    - **Lite / Pro** here means Streamlit **interface mode** (`ui_mode` in sidebar): mainly shapes **Audio Isolation** (and Tab PDF Pro gates). Lite shows goal outcome cards and auto-profiles speed/device/guitar from RAM/GPU (`audio_to_tab/hardware.py`, `prefer_roformer` gated on accelerator); Pro exposes every stem/engine/diagnostic control. **YouTube to MP3 ignores Lite/Pro.** Wiring: `ui/app.py`, `ui/isolate_state.py`, `ui/pages/isolate.py` / `tab_pdf.py`. Testers: `DESKTOP.md`.
 2. **Website (hosted)** — FastAPI `backend/` + React `web/` + Caddy. Jobs via Postgres/Redis/MinIO + arq worker (`docker-compose.yml`). Streamlit is **not** in that stack.
    - Hosted processing modes Auto / `lite` / fast_cpu / etc. live in `backend/capabilities.py`. **That “lite” is not desktop Interface Lite.** Operators: `DEPLOY.md`.
@@ -35,7 +35,7 @@ The **Tab PDF path (`pipeline.py`) and the Isolate path (`isolate.py`)** are bot
 
 | Job | Start here |
 |-----|------------|
-| Isolation UI (desktop) | `ui/pages/isolate.py` (page: Home\|mix\|+ strip, Queue below), `ui/isolate_state.py` (Lite outcomes / Pro stems / progress / mode helpers), `ui/app.py` (Lite↔Pro sidebar + overlay), `ui/stem_icons.py` (outcome/stem icons). **Separate/mix** — not download-only. |
+| Isolation UI (desktop) | `ui/pages/isolate.py` (page: Home\|mix\|+ strip, Queue below), `ui/isolate_state.py` (Lite outcomes / Pro stems / progress / mode helpers), `ui/opened_audio.py` (OS open-with queue), `ui/app.py` (Lite↔Pro sidebar + overlay), `ui/stem_icons.py` (outcome/stem icons). **Separate/mix** — not download-only. |
 | Desktop Lite↔Pro mode | `ui/app.py` (sidebar `UI_MODE_*`, `load_ui_mode` / `write_ui_mode`), `ui/isolate_state.py` (`is_pro_mode`, `DEFAULT_UI_MODE`). Branching: Isolation `ui/pages/isolate.py`; Tab PDF Pro gates in `ui/pages/tab_pdf.py`. YouTube to MP3 does not read Lite/Pro. |
 | Lite outcome cards | `ui/isolate_state.py` (`OUTCOME_CARDS`, `resolve_outcome_card`, `outcome_card_for_options`), icons `ui/stem_icons.py`, render in `ui/pages/isolate.py` |
 | Desktop Lite hardware auto | `src/audio_to_tab/hardware.py` (`lite_auto_choice`, `lite_auto_speed_id`, `lite_accelerator_available`, Detected/Using captions; GPU-first when CUDA/MPS available; MPS ≥12 GB). Wired in `ui/pages/isolate.py`; guitar preference via `prefer_roformer` in `ui/isolate_state.py`. Hosted Auto is separate: `backend/capabilities.py` |
@@ -46,12 +46,12 @@ The **Tab PDF path (`pipeline.py`) and the Isolate path (`isolate.py`)** are bot
 | Isolation UI (website) | `web/src/pages/IsolatePage.tsx`, `web/src/api.ts`, `web/src/trackOptions.ts`, isolate routes in `backend/main.py`. SPA is **file upload only** (no YouTube URL/search). API `POST /v1/jobs` can take `youtube_url` only when `allow_youtube` is on (`backend/config.py`); default is off. |
 | Guitar stem engine | `src/audio_to_tab/isolate.py` (`IsolateConfig`, `separate_stems`, fold, bass-bleed, low-end recovery, pre/refined), `src/audio_to_tab/separate.py` (Demucs / guitar-ft), `src/audio_to_tab/roformer.py`, `src/audio_to_tab/scnet.py` |
 | SCNet backend | `src/audio_to_tab/scnet.py`; dispatch in `isolate.py` / CLI `cli/isolate.py`; tests `tests/test_scnet.py` |
-| Live mixer (desktop iframe) | Edit `ui/stem_mixer_component/frontend/src/main.ts` + `metronomeClicks.ts` + `style.css`, then `make mixer-build`. Live click-track Accent/rate/sound on the metronome row (hot-swap; no full stem reload). **Background play:** `installWakeHooks` recovers on visible/pageshow only — does **not** soft-pause on document hide. Loader: `ui/stem_mixer_component/__init__.py` (`youtube_video_id`, `local_video_url`, `video_offset_sec`, `hide_youtube_video`). Preview encode: `ui/media.py`. Downloads: build mix **on Save**, not on every mute/solo. |
+| Live mixer (desktop iframe) | Edit `ui/stem_mixer_component/frontend/src/main.ts` + `pan.ts` + `metronomeClicks.ts` + `style.css`, then `make mixer-build`. Pan law is `pan.ts` (equal-power, −100..100), copied in `web/src/mixer/pan.ts`. Live click-track Accent/rate/sound on the metronome row (hot-swap; no full stem reload). **Background play:** `installWakeHooks` recovers on visible/pageshow only — does **not** soft-pause on document hide. Loader: `ui/stem_mixer_component/__init__.py` (`youtube_video_id`, `local_video_url`, `video_offset_sec`, `hide_youtube_video`). Preview encode: `ui/media.py`. Downloads: build mix **on Save**, not on every mute/solo or pan move. |
 | Region picker (desktop iframe) | Edit `ui/region_picker_component/frontend/src/main.ts` + `style.css`, then `make region-picker-build`. Loader: `ui/region_picker_component/__init__.py`. Wired in `ui/pages/isolate.py` (`_render_region_controls`) |
 | Mix tabs (desktop iframe) | Edit `ui/mix_tabs_component/frontend/src/main.ts` + `style.css`, then `make mix-tabs-build`. Loader: `ui/mix_tabs_component/__init__.py`. Moises-style Home\|mix\|+ strip on Isolate |
 | Mixer picture (desktop) | YouTube iframe or local `source_video` beside the stems, synced to mixer time. Wiring: `ui/pages/isolate.py`, `ui/isolate_state.py` (`mixer_youtube_video_id`, `mixer_local_video_path`, `prefer_local_mixer_picture`), offset `ui/isolate_jobs.py` (`video_offset_sec_for_run`), preview file `download_youtube_preview_video` in `src/audio_to_tab/ingest.py`. In the iframe: move/resize, snaps left/right/above/below, free-float (`videoLayout` in `sessionStorage`). Local file is tried first and can fall back to the YouTube id. |
 | Stem wave height (desktop, picture visible) | Drag `#btn-resize-stems` on `#stems` while a picture is showing (not hidden). `stemWaveHeight` default 52, clamp 32–120, `sessionStorage` key `audiotools_stem_mixer_stem_wave`. CSS `--stem-wave-height` on `.waveform-svg` (metro waves scale with it). Handle hides with the picture. Does not change seek, mute/solo, or video layout. Tests: `tests/test_stem_mixer_component.py`. |
-| Live mixer (website) | `web/src/mixer/engine.ts`, `web/src/components/StemMixer.tsx` — same wake/background-play policy as desktop; Media Session + `keepPlaying` across blur (blur is not Pause). No picture. Tests: `web/src/mixer/engine.test.ts` |
+| Live mixer (website) | `web/src/mixer/engine.ts`, `web/src/mixer/pan.ts`, `web/src/components/StemMixer.tsx` — same wake/background-play policy as desktop; Media Session + `keepPlaying` across blur (blur is not Pause). Pan uses the same law as desktop `pan.ts`. No picture. Tests: `web/src/mixer/engine.test.ts`, `web/src/mixer/pan.test.ts` |
 | Metronome click stem | `src/audio_to_tab/metronome.py` (adaptive tempo curve + local `beat_track`; `click_times_1x` / optional `bpm_curve` diagnostics; rebake). Desktop attach/wiring: `ui/pages/isolate.py`. Live options: mixer `metronomeClicks.ts`. Tests: `tests/test_metronome.py` |
 | YouTube ingest | `src/audio_to_tab/ingest.py` (shared: `download_youtube_audio`, `download_youtube_preview_video`, `search_youtube_videos`, `is_youtube_url`, `format_youtube_duration`). Surfaces: `ui/pages/isolate.py`, `ui/pages/youtube_audio.py`, `ui/pages/tab_pdf.py`. Hosted SPA has **no** YouTube UI. `POST /v1/jobs` accepts `youtube_url` only if `allow_youtube` (`backend/config.py`, `backend/main.py`); default off. `POST /v1/isolate/jobs` is upload-based. Tests: `tests/test_ingest.py` |
 | YouTube to MP3 (desktop) | **Save file only** (not separate/mix). `ui/pages/youtube_audio.py` (paste/search → format → native folder save). Export: `ui/desktop_export.py` (`EXPORT_FORMATS`, `choose_export_dir`, `export_mix_to_folder`, `open_path_in_os`). Caveats: picker may sit behind pywebview; Linux needs zenity; overwrite same name; auto-reveal folder. Nav: `ui/app.py`. Freeze: `packaging/audio_tools.spec` (`ui.pages.youtube_audio`). Tester copy: `DESKTOP.md`. Tests: `tests/test_ui_pages.py`, nav order in `tests/test_desktop_paths.py` |
@@ -61,6 +61,7 @@ The **Tab PDF path (`pipeline.py`) and the Isolate path (`isolate.py`)** are bot
 | Desktop packaging / launcher | `packaging/launcher.py`, `packaging/audio_tools.spec`, freeze helpers in `src/audio_to_tab/edition.py`. Runbook: `DESKTOP.md`. CI: `.github/workflows/desktop-release.yml` |
 | CI (pytest / ruff) | `.github/workflows/ci.yml` (push/PR). Distinct from desktop release packaging. |
 | Agent / planning docs | `AGENTS.md` (agent rules), `PLANNING.md` (planning notes), `docs/issues.md` (I-xxx history), `docs/ui-issues.md` (I-600+ UI register; many rows are `implemented-in-code` history — verify code before treating as open gaps) |
+| Moises mixer research | `docs/research/moises/REFERENCE.md` (agent handoff) + `docs/research/moises/FULL-TEARDOWN.md` (byte-level deep pass: shell vs hosted studio, tab system, IPC, capture/plugin stacks) + `docs/research/moises/COMPETITIVE-INSPIRATION-PLAN.md` (build authority: priority, interaction, design constraints). Same notes split in that folder: `README.md`, `mixer-ux.md`, `architecture.md`, `gaps-vs-audio-tools.md`, `evidence-index.md`. Static REA on Moises.app 2.0.3. No Moises source. |
 | Tests for isolation / guitar / desktop UX | `tests/test_isolate.py`, `test_isolate_jobs.py`, `test_isolate_state.py`, `test_global_loading.py`, `test_hardware.py`, `test_scnet.py`, `test_guitar_ft_weights.py`, `test_guitar_backups.py`, `test_guitar_fixup.py`, `test_guitar_improvements.py`, `test_pipeline_guitar.py`, `test_ingest.py`, `test_mixer.py`, `test_metronome.py`, `test_stem_mixer_component.py`, `test_region_picker_component.py`, `test_mix_tabs_component.py`, `test_ui_pages.py`, `test_cli_smoke.py` |
 
 Lead/rhythm split (`src/audio_to_tab/lead_rhythm.py`) exists; it is **not** the default isolate path.
@@ -92,7 +93,7 @@ Lead/rhythm split (`src/audio_to_tab/lead_rhythm.py`) exists; it is **not** the 
 - `PROJECT_TREE.md` — this file (tracked). Canonical in-repo tree. (`CONTEXT_TREE.md` is a gitignored internal name, not present in a clean clone.)
 - `.opencode/plans/fix-plan-2026-09-02.md` — tracked historical desktop fix plan (not a runbook; product docs are `DESKTOP.md` / `DEPLOY.md`).
 - `.superpowers/` — local agent scratch; gitignored. Not product code.
-- `docs/` — `issues.md` (I-xxx history; I-500 isolation audit); `ui-issues.md` (I-600+ UI/UX register; does not replace `issues.md`).
+- `docs/` — `issues.md` (I-xxx history; I-500 isolation audit); `ui-issues.md` (I-600+ UI/UX register; does not replace `issues.md`); `legal/` (Privacy/Terms/Refund/Cookies drafts + SDK/notices); `compliance-checklist.md` (C01–C20).
 
 ### `src/`
 
@@ -130,7 +131,8 @@ Shared engine. Import as `audio_to_tab`.
 Desktop Streamlit only.
 
 - `__init__.py` — empty package marker.
-- `app.py` — multipage router (Audio Isolation, YouTube to MP3, Tab PDF); Lite↔Pro sidebar (`UI_MODE_*`, persist to disk; mainly Isolation/Tab PDF); nav-only global loading overlay (`should_show_global_loading`); injects Satoshi via `satoshi_font.py`.
+- `app.py` — multipage router (Home default, then Audio Isolation, YouTube to MP3, Tab PDF, Settings); Lite↔Pro sidebar (`UI_MODE_*`, persist to disk; mainly Isolation/Tab PDF); nav-only global loading overlay (`should_show_global_loading`); injects Satoshi via `satoshi_font.py`.
+- `pages/home.py` — boot screen. Launch cards for Separate tracks, YouTube save, and Tab PDF. Recents and Library list local isolate runs (`list_recent_runs`) and open them in the Isolate mixer.
 - `pages/isolate.py` — Audio Isolation (**separate/mix**). Sticky Home\|mix\|+ strip; Home form (upload/YouTube search, outcomes/stems, section); mix tab = live mixer (optional synced picture) + Downloads (export on Save); Queue below. Lite: outcome cards + hardware Detected/Using + auto speed/device/guitar; Pro: Speed / Engine / This computer / stem checkboxes. Status strip owns running/failed jobs (retry, dismiss).
 - `pages/youtube_audio.py` — YouTube to MP3 (**save file only**, not separate/mix). Paste or search a public URL, pick format (default MP3), native folder save via `choose_export_dir`. Pure helper `save_youtube_audio_to_folder`. Ignores Lite/Pro. Caveats: see `desktop_export.py` / `DESKTOP.md`.
 - `pages/tab_pdf.py` — Tab PDF demo page. Lite: simpler convert path (hides engine/advanced). Pro: guitar refine, guitar-ft, low-end restore, sub-bass de-bleed, Advanced transcription. Upload cap caption from `ui/common.py` (`max_upload_caption`).
@@ -148,6 +150,7 @@ Desktop Streamlit only.
 - `icon.png` — window / tab icon.
 - `stem_mixer_component/__init__.py` — iframe component; serves `frontend/build/` when `mixer_build_is_complete`. Args include `youtube_video_id`, `local_video_url`, `video_offset_sec`, `hide_youtube_video`.
 - `stem_mixer_component/frontend/src/main.ts` — live mixer (Web Audio) source; metronome row live controls; wake hooks keep playback across app/window hide (soft-pause only on dead/interrupted context). Picture: YouTube or local video, move/resize, snaps, free-float. Stem wave drag (`stemWaveHeight`, `#btn-resize-stems`) only while the picture is visible.
+- `stem_mixer_component/frontend/src/pan.ts` — equal-power pan law (−100..100). Same text as `web/src/mixer/pan.ts`. Desktop saved mixes do not bake pan.
 - `stem_mixer_component/frontend/src/metronomeClicks.ts` — click synthesis / rate / peaks (parity with Python metronome render).
 - `stem_mixer_component/frontend/src/style.css` — mixer styles (metro toolbar, video frame, `--stem-wave-height`).
 - `stem_mixer_component/frontend/src/vite-env.d.ts` — Vite typings for the mixer iframe.
@@ -303,6 +306,7 @@ Offline scoring. Gitignored under `eval/lead_rhythm/`: `clips/`, `out/`, `manife
 
 - `issues.md` — canonical I-xxx design-decision / issue history (CI and `PLANNING.md` cite it). Includes reserved historical IDs and the 2026-09-08 isolation performance/functional audit (`I-500`–`I-509`).
 - `ui-issues.md` — UI/UX-only issue register (`I-600`+). Does not replace `issues.md`.
+- `research/moises/REFERENCE.md` — single agent handoff for the Moises.app 2.0.3 REA pass (stack, IPC, mixer literals, P0/P1/P2 gaps, Evidence IDs). Same folder also has `FULL-TEARDOWN.md` (deep static pass; corrects the "local mixer UI" inference — shell renders chrome only, studio is hosted) and the topic split (`README.md`, `mixer-ux.md`, `architecture.md`, `gaps-vs-audio-tools.md`, `evidence-index.md`). No extracted Moises source.
 - `oracle-free-memory-spike.md` — gitignored name (not in public git; may be absent locally).
 
 ### Do not edit (generated / vendor)

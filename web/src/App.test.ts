@@ -32,4 +32,21 @@ describe("App routing (I-601)", () => {
     const login = readSource("src/pages/LoginPage.tsx");
     expect(login).toContain('<Navigate to="/isolate"');
   });
+
+  it("routes /legal/:docId and mounts cookie banner + footer", () => {
+    const app = readSource("src/App.tsx");
+    expect(app).toContain('path="/legal/:docId"');
+    expect(app).toContain("<LegalPage");
+    expect(app).toContain("<CookieBanner");
+    expect(app).toContain("<SiteFooter");
+    expect(app).toContain("skip-link");
+  });
+
+  it("LoginPage requires unchecked Terms/Privacy consent", () => {
+    const login = readSource("src/pages/LoginPage.tsx");
+    expect(login).toContain("acceptTerms");
+    expect(login).not.toContain("ageOk");
+    expect(login).toContain("useState(false)");
+    expect(login).toContain("/legal/privacy");
+  });
 });

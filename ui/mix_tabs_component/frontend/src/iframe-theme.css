@@ -76,7 +76,11 @@ button, .btn {
   font-weight: 600;
   cursor: pointer;
   text-decoration: none;
-  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease, transform 0.05s ease;
+  transition:
+    background 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    color 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 120ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 button:disabled, .btn:disabled {
