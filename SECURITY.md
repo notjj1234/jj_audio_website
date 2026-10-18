@@ -1,6 +1,6 @@
 # Security policy
 
-Email a suspected vulnerability to [MAINTAINER_EMAIL]. Do not open a public issue for a security report.
+Email a suspected vulnerability to orallojohnjames@gmail.com. Do not open a public issue for a security report.
 
 ## Scope
 
