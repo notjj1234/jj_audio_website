@@ -294,9 +294,9 @@ Offline scoring. Gitignored under `eval/lead_rhythm/`: `clips/`, `out/`, `manife
 
 ### `.github/`
 
-- `dependabot.yml` — weekly pip updates.
 - `workflows/ci.yml` — push/PR pytest + ruff on `src/`.
 - `workflows/desktop-release.yml` — Windows CPU/CUDA Setup + macOS arm64/x64 `.pkg`.
+- Dependabot is off; dependency bumps are manual.
 
 ### `.streamlit/`
 
