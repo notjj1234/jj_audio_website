@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import secrets
 import time
@@ -257,18 +256,6 @@ def build_home_props(
     }
 
 
-def _lockup_html() -> str:
-    icon = Path(__file__).resolve().parents[1] / "icon.png"
-    image = ""
-    if icon.is_file():
-        encoded = base64.b64encode(icon.read_bytes()).decode("ascii")
-        image = f'<img alt="" src="data:image/png;base64,{encoded}"/>'
-    return (
-        '<div class="att-home-lockup" role="img" aria-label="Audio Tools">'
-        f'<span class="mark">{image}</span><span class="word">Audio Tools</span></div>'
-    )
-
-
 def _handle_home_event(event: dict, tokens: dict[str, str]) -> None:
     kind = str(event.get("type") or "")
     ident = str(event.get("id") or "")
@@ -294,8 +281,6 @@ def _handle_home_event(event: dict, tokens: dict[str, str]) -> None:
 
 def _main_v2() -> None:
     st.html('<div class="att-home-v2" hidden></div>')
-    with st.sidebar:
-        st.html(_lockup_html())
     stored_nonce = st.session_state.get("home_v2_nonce")
     stored_tokens = dict(st.session_state.get("home_v2_tokens") or {})
     owner = load_persist_isolate_user_id(st.session_state, DATA_DIR / ISOLATE_USER_ID_FILENAME)

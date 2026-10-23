@@ -939,10 +939,13 @@ else:
 load_theme_state(st.session_state)
 theme_css = build_theme_css_vars(st.session_state)
 st.html(f"<style>{theme_css}</style>")
-from ui.design_tokens import home_flag_css, ui_v2_enabled
+from ui.design_tokens import home_flag_css, lockup_html, ui_v2_enabled
 
 if ui_v2_enabled():
+    st.html('<div class="att-shell-v2" hidden></div>')
     st.html("<style>" + home_flag_css() + "</style>")
+    with st.sidebar:
+        st.html(lockup_html())
 
 _ui_state_path = DATA_DIR / ISOLATE_UI_STATE_FILENAME
 

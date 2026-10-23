@@ -78,7 +78,7 @@ redacted findings belong in this repo.
 The product works. Phase 1.5 makes the **desktop Home** match the measured Moises Home (`10` §13, `11` §12):
 
 - **Home:** three 100px action cards, a 150×210 recents rail, a 56px Files table, no page H1.
-- **Shell:** 240px rail at 1440, 1280, 1024, and 900. Nav rows 216×36 with 16px filled icons. Home-scoped neutrals. Satoshi. The Audio Tools name and logo stay.
+- **Shell:** 240px rail at 1440, 1280, 1024, and 900, shared by every desktop page. Nav rows 216×36 with 16px filled icons. Original navy `#192542`, blue `#2A4467`, amber `#F6AD49`. Satoshi. The Audio Tools name and logo stay.
 - **Flag:** `AUDIO_TOOLS_UI_V2` defaults on. Set it to `0` to keep the old Home. Global Tyrian tokens are not changed.
 - **Architecture:** Streamlit plus a vanilla TypeScript Home component (Vite / `streamlit-component-lib`). No React. The mixer is not restyled in this phase.
 - **Not in 1.5:** player/mixer visual redesign. That waits for Phase 1.6.

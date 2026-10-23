@@ -15,19 +15,19 @@
 }
 
 :root {
-  --home-bg: #101213;
-  --home-card: #17191c;
-  --home-wash: rgba(202, 224, 250, 0.08);
-  --home-wash-hover: rgba(202, 224, 250, 0.14);
-  --home-text: rgba(239, 246, 255, 0.97);
-  --home-text-secondary: rgba(225, 236, 249, 0.75);
-  --home-text-meta: rgba(216, 233, 254, 0.49);
-  --home-chip: #acb5bf;
-  --home-selected: #e9eef5;
-  --home-accent: #75ebf5;
-  --home-icon: #e9eef5;
-  --home-line: #e9eef5;
-  --home-art: #1f2225;
+  --home-bg: #192542;
+  --home-card: #2a4467;
+  --home-wash: #2a4467;
+  --home-wash-hover: #35557c;
+  --home-text: #f4f7fb;
+  --home-text-secondary: #d5deea;
+  --home-text-meta: #c5d0e0;
+  --home-chip: #c5d0e0;
+  --home-selected: #f6ad49;
+  --home-accent: #f6ad49;
+  --home-icon: #f6ad49;
+  --home-line: #a8b8cc;
+  --home-art: #142033;
   color-scheme: dark;
 }
 
@@ -95,7 +95,7 @@ h2 {
   border: 0;
   border-radius: 9999px;
   background: var(--home-card);
-  color: rgba(255, 255, 255, 0.85);
+  color: var(--home-text);
   display: none;
   align-items: center;
   justify-content: center;
@@ -174,7 +174,7 @@ h2 {
   font-size: 14px;
   line-height: 20px;
   font-weight: 400;
-  color: #e9eef5;
+  color: var(--home-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -246,13 +246,14 @@ h2 {
   border: 0;
   outline: none;
   background: transparent;
-  color: #e9eef5;
+  color: var(--home-text);
   font-size: 14px;
   line-height: 20px;
   font-weight: 400;
 }
 
 .search input::placeholder { color: var(--home-chip); }
+.search:focus-within { border-color: var(--home-accent); }
 
 .icon-btn {
   width: 32px;
@@ -334,7 +335,7 @@ th { font-weight: 400; }
   cursor: pointer;
 }
 
-tr:hover td { background: var(--home-wash-hover); }
+tr:hover td { background: var(--home-card); }
 
 .empty, .alert {
   margin: 12px 0;
@@ -396,7 +397,7 @@ button:disabled, button:disabled:hover {
 :focus { outline: none; }
 
 :focus-visible {
-  outline: 2px solid var(--home-line);
+  outline: 2px solid var(--home-accent);
   outline-offset: 2px;
 }
 

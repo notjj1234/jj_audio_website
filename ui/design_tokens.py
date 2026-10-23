@@ -1,32 +1,38 @@
-"""Home-only tokens for AUDIO_TOOLS_UI_V2.
+"""Desktop shell tokens for AUDIO_TOOLS_UI_V2.
 
-Do not import this from the mixer. Do not copy these values into theme presets.
+Original palette from .streamlit/config.toml: navy page, blue surfaces, amber
+accent. Do not import this from the mixer. Do not copy these values into theme
+presets.
 """
 
 from __future__ import annotations
 
+import base64
 import os
+from pathlib import Path
 
-# Page background. Measured #101213.
-HOME_BG = "#101213"
-HOME_CARD = "#17191C"
-HOME_WASH = "rgba(202, 224, 250, 0.08)"
-HOME_WASH_HOVER = "rgba(202, 224, 250, 0.14)"
-HOME_TEXT = "rgba(239, 246, 255, 0.97)"
-HOME_TEXT_SECONDARY = "rgba(225, 236, 249, 0.75)"
-# 12px meta. Measured composite is 4.38:1 on #101213. Waiver: kept for the
-# measured alpha on meta text only. Group labels do not use this color.
-HOME_TEXT_META = "rgba(216, 233, 254, 0.49)"
-# Measured muted alpha composites to about #57606A at 2.94:1. Each channel was
-# lifted by the same amount until contrast on #101213 cleared 4.5:1.
-# #757E88 is that first passing step (about 4.56:1). The measured alpha is not shipped.
-HOME_TEXT_MUTED = "#757E88"
-HOME_CHIP = "#ACB5BF"
-HOME_SELECTED = "#E9EEF5"
-HOME_ICON_ACCENT = "#75EBF5"
-HOME_ICON = "#E9EEF5"
-HOME_LINE = "#E9EEF5"
-HOME_WORDMARK = "#EDEEF0"
+# .streamlit/config.toml backgroundColor and secondaryBackgroundColor.
+HOME_BG = "#192542"
+HOME_CARD = "#2A4467"
+# One step lighter than the card so a hover on a blue surface still reads.
+HOME_CARD_HOVER = "#35557C"
+HOME_WASH = HOME_CARD
+HOME_WASH_HOVER = HOME_CARD_HOVER
+HOME_TEXT = "#F4F7FB"
+HOME_TEXT_SECONDARY = "#D5DEEA"
+# 12px ages. 9.73:1 on #192542.
+HOME_TEXT_META = "#C5D0E0"
+# Interface label. 8.50:1 on #192542.
+HOME_TEXT_MUTED = "#B7C3D4"
+HOME_CHIP = "#C5D0E0"
+HOME_ACCENT = "#F6AD49"
+HOME_SELECTED = HOME_ACCENT
+HOME_ICON_ACCENT = HOME_ACCENT
+HOME_ICON = HOME_ACCENT
+# Quiet edge. Focus uses HOME_ACCENT.
+HOME_LINE = "#A8B8CC"
+HOME_WORDMARK = HOME_TEXT
+HOME_ART = "#142033"
 
 HOME_TOKENS: dict[str, str] = {
     "bg": HOME_BG,
@@ -42,6 +48,7 @@ HOME_TOKENS: dict[str, str] = {
     "icon_accent": HOME_ICON_ACCENT,
     "icon": HOME_ICON,
     "line": HOME_LINE,
+    "accent": HOME_ACCENT,
     "wordmark": HOME_WORDMARK,
 }
 
@@ -110,8 +117,21 @@ _ICON_GEAR = (
 )
 
 
+def lockup_html() -> str:
+    """Audio Tools mark. Fixed into the rail by the shell CSS."""
+    icon = Path(__file__).resolve().parent / "icon.png"
+    image = ""
+    if icon.is_file():
+        encoded = base64.b64encode(icon.read_bytes()).decode("ascii")
+        image = f'<img alt="" src="data:image/png;base64,{encoded}"/>'
+    return (
+        '<div class="att-home-lockup" role="img" aria-label="Audio Tools">'
+        f'<span class="mark">{image}</span><span class="word">Audio Tools</span></div>'
+    )
+
+
 def home_flag_css() -> str:
-    """Shell overrides. They apply only while the Home marker is mounted."""
+    """Shell chrome for every page, plus Home-only canvas rules."""
     icons = (
         (1, _ICON_HOME),
         (2, _ICON_WAVE),
@@ -120,7 +140,7 @@ def home_flag_css() -> str:
         (5, _ICON_GEAR),
     )
     icon_rules = "\n".join(
-        "  .stApp:has(.att-home-v2) [data-testid='stSidebarNav'] li:nth-child("
+        "  .stApp:has(.att-shell-v2) [data-testid='stSidebarNav'] li:nth-child("
         f"{index}) a {{ --att-nav-icon: {_mask(svg)}; }}"
         for index, svg in icons
     )
@@ -140,8 +160,8 @@ def home_flag_css() -> str:
     height: 100vh !important;
     overflow: hidden !important;
   }}
-  .stApp:has(.att-home-v2) [data-testid="stMainBlockContainer"],
-  .stApp:has(.att-home-v2) [data-testid="stVerticalBlock"] {{
+  .stApp:has(.att-home-v2) [data-testid="stMain"] [data-testid="stMainBlockContainer"],
+  .stApp:has(.att-home-v2) [data-testid="stMain"] [data-testid="stVerticalBlock"] {{
     height: 100% !important;
     max-width: none !important;
     padding: 0 !important;
@@ -177,15 +197,23 @@ def home_flag_css() -> str:
     min-height: 0 !important;
     border: 0 !important;
   }}
-  .stApp:has(.att-home-v2) [data-testid="stSidebar"] {{
+  [data-testid="stElementContainer"]:has(.att-shell-v2) {{
+    height: 0 !important;
+    min-height: 0 !important;
+    flex: 0 0 0px !important;
+    overflow: hidden !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }}
+  .stApp:has(.att-shell-v2) [data-testid="stSidebar"] {{
     position: relative !important;
     width: 240px !important;
     min-width: 240px !important;
     max-width: 240px !important;
     background: {HOME_BG} !important;
-    color: {HOME_TEXT_SECONDARY} !important;
+    color: {HOME_TEXT} !important;
   }}
-  .stApp:has(.att-home-v2) [data-testid="stSidebar"][aria-expanded="false"] {{
+  .stApp:has(.att-shell-v2) [data-testid="stSidebar"][aria-expanded="false"] {{
     width: 0 !important;
     min-width: 0 !important;
     max-width: 0 !important;
@@ -225,8 +253,8 @@ def home_flag_css() -> str:
     color: {HOME_WORDMARK};
     white-space: nowrap;
   }}
-  .stApp:has(.att-home-v2) [data-testid="stSidebarCollapseButton"],
-  .stApp:has(.att-home-v2) [data-testid="stSidebarCollapsedControl"] {{
+  .stApp:has(.att-shell-v2) [data-testid="stSidebarCollapseButton"],
+  .stApp:has(.att-shell-v2) [data-testid="stSidebarCollapsedControl"] {{
     position: absolute !important;
     top: 30px !important;
     left: 196px !important;
@@ -235,8 +263,8 @@ def home_flag_css() -> str:
     z-index: 7 !important;
     visibility: visible !important;
   }}
-  .stApp:has(.att-home-v2) [data-testid="stSidebarCollapseButton"] button,
-  .stApp:has(.att-home-v2) [data-testid="stExpandSidebarButton"] button {{
+  .stApp:has(.att-shell-v2) [data-testid="stSidebarCollapseButton"] button,
+  .stApp:has(.att-shell-v2) [data-testid="stExpandSidebarButton"] button {{
     width: 24px !important;
     height: 24px !important;
     min-height: 24px !important;
@@ -244,28 +272,49 @@ def home_flag_css() -> str:
     background: transparent !important;
     color: {HOME_TEXT} !important;
   }}
-  .stApp:has(.att-home-v2) [data-testid="stSidebarCollapseButton"] [data-testid="stIconMaterial"],
-  .stApp:has(.att-home-v2) [data-testid="stExpandSidebarButton"] [data-testid="stIconMaterial"] {{
+  .stApp:has(.att-shell-v2) [data-testid="stSidebarCollapseButton"] [data-testid="stIconMaterial"],
+  .stApp:has(.att-shell-v2) [data-testid="stExpandSidebarButton"] [data-testid="stIconMaterial"] {{
     font-size: 16px !important;
   }}
-  .stApp:has(.att-home-v2) [data-testid="stSidebarContent"] {{
+  .stApp:has(.att-shell-v2) [data-testid="stSidebarContent"] {{
     padding-left: 0 !important;
     padding-right: 0 !important;
   }}
-  .stApp:has(.att-home-v2) [data-testid="stSidebarHeader"] {{
+  .stApp:has(.att-shell-v2) [data-testid="stSidebar"] [data-testid="stElementContainer"]:has(.att-home-lockup) {{
+    height: 0 !important;
+    min-height: 0 !important;
+    flex: 0 0 0px !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+  }}
+  .stApp:has(.att-shell-v2) [data-testid="stSidebarUserContent"] {{
+    width: 100% !important;
+    box-sizing: border-box !important;
+    padding: 8px 12px 16px !important;
+    margin: 0 !important;
+    overflow: visible !important;
+  }}
+  .stApp:has(.att-shell-v2) [data-testid="stSidebarUserContent"] [data-testid="stElementContainer"] {{
+    width: 100% !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    overflow: visible !important;
+  }}
+  .stApp:has(.att-shell-v2) [data-testid="stSidebarHeader"] {{
     height: 0 !important;
     min-height: 0 !important;
     margin: 0 !important;
     overflow: visible !important;
   }}
-  .stApp:has(.att-home-v2) [data-testid="stSidebarNav"] {{
+  .stApp:has(.att-shell-v2) [data-testid="stSidebarNav"] {{
     padding-top: 72px !important;
     margin-top: 0 !important;
   }}
   .stApp:has([data-testid="stSidebar"][aria-expanded="false"]) .att-home-lockup {{
     display: none !important;
   }}
-  .stApp:has(.att-home-v2) [data-testid="stSidebarNav"] a {{
+  .stApp:has(.att-shell-v2) [data-testid="stSidebarNav"] a {{
     width: 216px !important;
     height: 36px !important;
     min-height: 36px !important;
@@ -279,61 +328,105 @@ def home_flag_css() -> str:
     font-size: 14px !important;
     line-height: 20px !important;
     font-weight: 400 !important;
-    color: {HOME_TEXT_SECONDARY} !important;
+    color: {HOME_TEXT} !important;
     background: transparent !important;
     transition: background-color 0.2s ease, color 0.28s cubic-bezier(0.4, 0, 0.2, 1) !important;
   }}
-  .stApp:has(.att-home-v2) [data-testid="stSidebarNav"] a span {{
+  .stApp:has(.att-shell-v2) [data-testid="stSidebarNav"] a span {{
     font-weight: 400 !important;
   }}
-  .stApp:has(.att-home-v2) [data-testid="stSidebarNav"] a::before {{
+  .stApp:has(.att-shell-v2) [data-testid="stSidebarNav"] a::before {{
     content: "";
     width: 16px;
     height: 16px;
     flex: 0 0 16px;
-    background-color: {HOME_TEXT_SECONDARY};
+    background-color: {HOME_TEXT};
     -webkit-mask: var(--att-nav-icon) center / 16px 16px no-repeat;
     mask: var(--att-nav-icon) center / 16px 16px no-repeat;
   }}
-  .stApp:has(.att-home-v2) [data-testid="stSidebarNav"] a[aria-current="page"] {{
-    background: {HOME_WASH} !important;
+  .stApp:has(.att-shell-v2) [data-testid="stSidebarNav"] a[aria-current="page"] {{
+    background: {HOME_CARD} !important;
     color: {HOME_TEXT} !important;
     font-weight: 400 !important;
   }}
-  .stApp:has(.att-home-v2) [data-testid="stSidebarNav"] a[aria-current="page"]::before {{
-    background-color: #ffffff;
+  .stApp:has(.att-shell-v2) [data-testid="stSidebarNav"] a[aria-current="page"]::before {{
+    background-color: {HOME_ACCENT};
   }}
-  .stApp:has(.att-home-v2) [data-testid="stSidebarNav"] a:hover {{
-    background: {HOME_WASH_HOVER} !important;
+  .stApp:has(.att-shell-v2) [data-testid="stSidebarNav"] a:hover {{
+    background: {HOME_CARD_HOVER} !important;
   }}
-  .stApp:has(.att-home-v2) [data-testid="stSidebarNav"] a:focus-visible,
-  .stApp:has(.att-home-v2) [data-testid="stSidebarCollapseButton"] button:focus-visible,
-  .stApp:has(.att-home-v2) [data-testid="stExpandSidebarButton"] button:focus-visible {{
-    outline: 2px solid {HOME_LINE} !important;
+  .stApp:has(.att-shell-v2) [data-testid="stSidebarNav"] a:focus-visible,
+  .stApp:has(.att-shell-v2) [data-testid="stSidebarCollapseButton"] button:focus-visible,
+  .stApp:has(.att-shell-v2) [data-testid="stExpandSidebarButton"] button:focus-visible {{
+    outline: 2px solid {HOME_ACCENT} !important;
     outline-offset: 2px !important;
   }}
-  .stApp:has(.att-home-v2) [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {{
+  .stApp:has(.att-shell-v2) [data-testid="stSidebar"] [data-testid="stRadio"] {{
+    width: 100% !important;
+    max-width: 216px !important;
+    margin: 0 !important;
+    overflow: visible !important;
+  }}
+  .stApp:has(.att-shell-v2) [data-testid="stSidebar"] [data-testid="stWidgetLabel"] {{
+    display: flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    width: auto !important;
+    max-width: 100% !important;
+    margin: 0 0 6px !important;
+    overflow: visible !important;
+  }}
+  .stApp:has(.att-shell-v2) [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {{
     color: {HOME_TEXT_MUTED} !important;
     font-size: 12px !important;
     line-height: 16px !important;
     font-weight: 500 !important;
-    letter-spacing: 1.5px !important;
+    letter-spacing: 0.04em !important;
     text-transform: uppercase !important;
+    overflow: visible !important;
+    white-space: nowrap !important;
   }}
-  .stApp:has(.att-home-v2) [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {{
+  .stApp:has(.att-shell-v2) [data-testid="stSidebar"] [data-testid="stRadio"] [role="radiogroup"] {{
+    display: flex !important;
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+    gap: 16px !important;
+    width: 100% !important;
+    min-height: 28px !important;
+  }}
+  .stApp:has(.att-shell-v2) [data-testid="stSidebar"] [data-testid="stRadio"] [role="radiogroup"] label,
+  .stApp:has(.att-shell-v2) [data-testid="stSidebar"] [data-testid="stRadio"] [role="radiogroup"] p {{
+    color: {HOME_TEXT} !important;
+    font-size: 14px !important;
+    line-height: 20px !important;
+    font-weight: 400 !important;
+    letter-spacing: 0 !important;
+    text-transform: none !important;
+    white-space: nowrap !important;
+  }}
+  .stApp:has(.att-shell-v2) [data-testid="stSidebar"] [data-testid="stCaptionContainer"] {{
+    width: 100% !important;
+    max-width: 216px !important;
+    margin: 8px 0 0 !important;
+    overflow: visible !important;
+  }}
+  .stApp:has(.att-shell-v2) [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {{
     color: {HOME_TEXT_META} !important;
     font-size: 12px !important;
     line-height: 16px !important;
     font-weight: 400 !important;
     letter-spacing: 0.03px !important;
     text-transform: none !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere !important;
   }}
-  .stApp:has(.att-home-v2) [data-testid="stSidebar"] button:active {{
+  .stApp:has(.att-shell-v2) [data-testid="stSidebar"] button:active {{
     transform: none !important;
   }}
 {icon_rules}
   @media (prefers-reduced-motion: reduce) {{
-    .stApp:has(.att-home-v2) [data-testid="stSidebarNav"] a {{
+    .stApp:has(.att-shell-v2) [data-testid="stSidebarNav"] a {{
       transition-duration: 0ms !important;
     }}
   }}

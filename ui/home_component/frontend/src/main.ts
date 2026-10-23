@@ -150,7 +150,7 @@ function paint(props: Props): void {
       button.dataset.focusid = `card-${card.id}`;
       button.title = card.subtitle || card.title;
       const glyph = el("span", "glyph");
-      glyph.style.color = card.primary ? "#75EBF5" : "#E9EEF5";
+      glyph.style.color = "#F6AD49";
       const icon = card.id === "youtube" ? "save" : card.id === "tab" ? "doc" : "wave";
       glyph.innerHTML = svg(icon, 20);
       const label = el("span", "label");

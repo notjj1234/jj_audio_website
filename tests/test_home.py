@@ -169,7 +169,11 @@ def test_home_muted_token_clears_contrast():
     assert "width: 240px" in css
     assert "font-weight: 400" in css
     assert "font-weight: 600" not in css
+    assert "att-shell-v2" in css
+    assert 'stSidebar"]' in css
+    assert "overflow: hidden" in css
     assert contrast_ratio(HOME_TEXT_MUTED, HOME_BG) >= 4.5
+    assert contrast_ratio("#F4F7FB", HOME_BG) >= 4.5
 
 
 def test_home_v2_keeps_the_legacy_path():
@@ -190,6 +194,7 @@ def test_home_v2_keeps_the_legacy_path():
     assert "run_dir" not in frontend
     assert "No songs yet." in frontend
     assert "No songs match that search." in frontend
-    assert "#75EBF5" in frontend
-    assert "#E9EEF5" in frontend
+    assert "#F6AD49" in frontend
+    assert "#75EBF5" not in frontend
+    assert "#E9EEF5" not in frontend
 
