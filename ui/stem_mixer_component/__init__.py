@@ -64,6 +64,12 @@ def stem_mixer(
     local_video_url: str | None = None,
     video_offset_sec: float = 0.0,
     theme_vars: dict[str, str] | None = None,
+    analysis: dict[str, Any] | None = None,
+    tab: dict[str, Any] | None = None,
+    initial_loop: dict[str, float] | None = None,
+    count_in_bars: int = 0,
+    initial_rate: float = 1.0,
+    initial_semitones: int = 0,
     key: str | None = None,
 ) -> dict[str, Any] | None:
     """
@@ -82,7 +88,16 @@ def stem_mixer(
     Pass the result of ``get_iframe_theme_vars()`` from isolate_state.
 
     ``initial_pan`` (optional): per-stem pan in whole steps, -100 (left) to
-    100 (right), 0 = center. Pan is for live listening; saved files stay centered.
+    100 (right), 0 = center. Pan is live and is also applied by the desktop
+    "Save current mix" export (Task 12); "Save all tracks" stays original.
+
+    ``analysis`` (optional): the run's ``analysis.json`` dict (chords, sections,
+    lyrics, bpm/key). ``tab`` (optional): ``{document, measures, pdfUrl}`` from
+    the practice tab JSON. Both are plain JSON values; empty tabs are hidden.
+
+    ``initial_loop`` (optional): ``{start, end}`` seconds for the A/B loop.
+    ``count_in_bars``: 0, 1, or 2 bars of clicks before playback starts.
+    ``initial_rate`` / ``initial_semitones`` restore practice speed and key.
 
     Returns the latest control state from the browser, e.g.
     ``{volumesDb, pan, muted, soloed, masterVolumeDb, metronomeOptions?}``,
@@ -107,6 +122,12 @@ def stem_mixer(
         localVideoUrl=(local_video_url or "").strip(),
         videoOffsetSec=max(0.0, float(video_offset_sec or 0.0)),
         themeVars=theme_vars or {},
+        analysis=analysis or {},
+        tab=tab or {},
+        initialLoop=initial_loop or {},
+        countInBars=max(0, min(2, int(count_in_bars or 0))),
+        initialRate=float(initial_rate or 1.0),
+        initialSemitones=int(initial_semitones or 0),
         key=key,
         default=None,
     )

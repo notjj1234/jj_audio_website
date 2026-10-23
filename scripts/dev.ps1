@@ -9,7 +9,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet(
         "install", "install-demucs", "fixtures", "test", "eval", "eval-lead-rhythm",
-        "ui", "backend", "mixer-build", "region-picker-build", "mix-tabs-build", "preflight", "tester", "help"
+        "ui", "backend", "mixer-build", "region-picker-build", "mix-tabs-build", "home-build", "preflight", "tester", "help"
     )]
     [string]$Command = "help"
 )
@@ -102,7 +102,7 @@ function Install-TesterDeps {
     & $py -m venv $Venv
     & $VenvPython -m pip install -U pip
     Install-TorchCpu -PythonExe $VenvPython
-    & $VenvPython -m pip install -e ".[demucs,roformer,separator]"
+    & $VenvPython -m pip install -e ".[demucs,roformer,separator,analysis]"
     Write-Host "Done. Run: .\scripts\dev.ps1 ui   (or .\scripts\dev.ps1 tester)"
 }
 
@@ -136,6 +136,7 @@ Targets:
   .\scripts\dev.ps1 mixer-build      Build live stem mixer frontend (Node 18+)
   .\scripts\dev.ps1 region-picker-build  Build waveform region picker frontend (Node 18+)
   .\scripts\dev.ps1 mix-tabs-build       Build Moises-style mix tab strip (Node 18+)
+  .\scripts\dev.ps1 home-build           Build desktop Home frontend (Node 18+)
 "@
     }
     "preflight" {
@@ -184,13 +185,23 @@ Targets:
         }
         Write-Host "Mix tabs frontend built."
     }
+    "home-build" {
+        Push-Location (Join-Path $Root "ui\home_component\frontend")
+        try {
+            npm install
+            npm run build
+        } finally {
+            Pop-Location
+        }
+        Write-Host "Home frontend built."
+    }
     "install" {
         $py = Get-HostPython
         Write-Host "Creating $Venv with $py..."
         & $py -m venv $Venv
         & $VenvPython -m pip install -U pip
         Install-TorchCpu -PythonExe $VenvPython
-        & $VenvPython -m pip install -e ".[dev,eval,demucs,roformer,separator]"
+        & $VenvPython -m pip install -e ".[dev,eval,demucs,roformer,separator,analysis]"
         Write-Host "Done. Run: .\scripts\dev.ps1 ui   (or .\scripts\dev.ps1 tester)"
     }
     "install-demucs" {

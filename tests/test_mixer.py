@@ -212,6 +212,92 @@ def test_mix_stems_true_peak_ceiling(tmp_path: Path):
     assert float(np.max(np.abs(data))) > 0.5
 
 
+def test_clamp_pan_matches_the_browser_clamp():
+    from audio_to_tab.mixer import clamp_pan
+
+    assert clamp_pan(0) == 0 and clamp_pan(37) == 37 and clamp_pan(-37) == -37
+    assert clamp_pan(250) == 100 and clamp_pan(-250) == -100
+    assert clamp_pan(12.6) == 13 and clamp_pan("42") == 42
+    for junk in (None, "", "left", float("nan"), float("inf")):
+        assert clamp_pan(junk) == 0
+
+
+def test_pan_matrix_matches_the_live_mixer_law():
+    from audio_to_tab.mixer import pan_matrix
+
+    assert pan_matrix(0) == (1.0, 0.0, 0.0, 1.0)
+    # Hard left folds both inputs into the left output and silences the right.
+    assert pan_matrix(-100) == pytest.approx((1.0, 1.0, 0.0, 0.0))
+    # Hard right folds both inputs into the right output and silences the left.
+    assert pan_matrix(100) == pytest.approx((0.0, 0.0, 1.0, 1.0))
+    # Out-of-range values clamp instead of inventing a wider image.
+    assert pan_matrix(-400) == pan_matrix(-100)
+
+
+def test_mix_center_pan_is_bit_identical(tmp_path: Path):
+    sr = 44100
+    t = np.linspace(0, 0.25, sr // 4, endpoint=False)
+    left = 0.3 * np.sin(2 * np.pi * 220 * t)
+    right = 0.2 * np.sin(2 * np.pi * 330 * t)
+    p1 = tmp_path / "a.wav"
+    _write_stereo_wav(p1, left, right, sr)
+
+    plain = tmp_path / "plain.wav"
+    centered = tmp_path / "centered.wav"
+    mix_stems_to_wav({"a": p1}, output_path=plain, gains={"a": 1.0})
+    mix_stems_to_wav({"a": p1}, output_path=centered, gains={"a": 1.0}, pans={"a": 0})
+
+    assert plain.read_bytes() == centered.read_bytes()
+
+
+def test_mix_hard_left_folds_stereo_into_left(tmp_path: Path):
+    sr = 44100
+    left = np.full(sr // 4, 0.2, dtype=np.float32)
+    right = np.full(sr // 4, 0.1, dtype=np.float32)
+    path = tmp_path / "a.wav"
+    _write_stereo_wav(path, left, right, sr)
+    out = tmp_path / "left.wav"
+
+    mix_stems_to_wav({"a": path}, output_path=out, gains={"a": 1.0}, pans={"a": -100})
+
+    data, _ = sf.read(str(out), always_2d=True)
+    assert float(np.max(np.abs(data[:, 0]))) == pytest.approx(0.3, abs=0.01)
+    assert float(np.max(np.abs(data[:, 1]))) == pytest.approx(0.0, abs=0.01)
+
+
+def test_mix_hard_right_folds_stereo_into_right(tmp_path: Path):
+    sr = 44100
+    left = np.full(sr // 4, 0.2, dtype=np.float32)
+    right = np.full(sr // 4, 0.1, dtype=np.float32)
+    path = tmp_path / "a.wav"
+    _write_stereo_wav(path, left, right, sr)
+    out = tmp_path / "right.wav"
+
+    mix_stems_to_wav({"a": path}, output_path=out, gains={"a": 1.0}, pans={"a": 100})
+
+    data, _ = sf.read(str(out), always_2d=True)
+    assert float(np.max(np.abs(data[:, 0]))) == pytest.approx(0.0, abs=0.01)
+    assert float(np.max(np.abs(data[:, 1]))) == pytest.approx(0.3, abs=0.01)
+
+
+def test_pan_does_not_change_a_muted_stem(tmp_path: Path):
+    sr = 44100
+    left = np.full(sr // 4, 0.2, dtype=np.float32)
+    path = tmp_path / "a.wav"
+    _write_stereo_wav(path, left, left, sr)
+    out = tmp_path / "muted.wav"
+
+    mix_stems_to_wav(
+        {"a": path},
+        output_path=out,
+        gains={"a": 0.0},
+        pans={"a": -100},
+    )
+
+    data, _ = sf.read(str(out), always_2d=True)
+    assert float(np.max(np.abs(data))) == pytest.approx(0.0, abs=1e-3)
+
+
 def test_mix_stems_sample_rate_mismatch(tmp_path: Path):
     t = np.linspace(0, 0.1, 4410, endpoint=False)
     tone = 0.2 * np.sin(2 * np.pi * 200 * t)

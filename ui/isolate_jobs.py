@@ -876,8 +876,16 @@ def _run_one_job_inner(job_id: str) -> None:
         two_stems=spec.two_stems,
         custom_stems=spec.custom_stems,
     )
+    # A re-separate child shares its parent's run directory; analysing there
+    # would overwrite the parent's analysis with a subset mix. Skip both
+    # optional post-processing stages for those jobs.
+    run_analysis = spec.reseparate_from is None and Path(spec.audio_path).is_file()
+    run_tab = run_analysis and guitar_job
     stages = isolation_stages_for_job(
-        expects_guitar=guitar_job, guitar_refine=spec.guitar_refine
+        expects_guitar=guitar_job,
+        guitar_refine=spec.guitar_refine,
+        analyse=run_analysis,
+        tab=run_tab,
     )
     clip_sec = spec.audio_duration_sec
     if clip_sec is None:
@@ -975,6 +983,9 @@ def _run_one_job_inner(job_id: str) -> None:
     # legit slow CPU runs safe while still catching true hangs. The abort path
     # (pause/stop) also terminates the child mid-run via the Popen handle.
     subprocess_timeout_sec = (job_estimate * 2.5 + 300.0) if job_estimate and job_estimate > 0 else None
+    analysis_result: Any | None = None
+    analysis_warning: str | None = None
+    tab_warning: str | None = None
 
     try:
         artifacts = separate_stems(
@@ -989,6 +1000,50 @@ def _run_one_job_inner(job_id: str) -> None:
             subprocess_timeout_sec=subprocess_timeout_sec,
         )
         cleanup_mix_artifacts(Path(spec.output_dir))
+
+        if run_analysis:
+            latest = read_status(job_id)
+            if should_abort() or (latest and latest.get("status") in ("cancelled", "pausing")):
+                return
+            on_progress("analysis", "Analysing song…")
+            analysis_result, analysis_path, analysis_diagnostics, analysis_warning = (
+                _run_analysis_stage(
+                    Path(spec.output_dir),
+                    artifacts,
+                    source_path=spec.audio_path,
+                    source_fingerprint=spec.source_fingerprint,
+                    duration_sec=clip_sec,
+                    progress=on_progress,
+                )
+            )
+            if analysis_path is not None:
+                artifacts["analysis"] = analysis_path
+            if analysis_diagnostics is not None:
+                artifacts["analysis_diagnostics"] = analysis_diagnostics
+            on_stage_complete("analysis")
+            write_status(
+                job_id,
+                analysis_warning=analysis_warning,
+                analysis_error=analysis_warning if analysis_result is None else None,
+            )
+
+        if run_tab:
+            latest = read_status(job_id)
+            if should_abort() or (latest and latest.get("status") in ("cancelled", "pausing")):
+                return
+            on_progress("tab", "Transcribing tab…")
+            tab_artifacts, tab_warning = _run_tab_stage(
+                Path(spec.output_dir),
+                artifacts,
+                title=spec.title,
+                analysis=analysis_result,
+                progress=on_progress,
+            )
+            if tab_artifacts:
+                artifacts.update(tab_artifacts)
+            on_stage_complete("tab")
+            write_status(job_id, tab_warning=tab_warning)
+
         artifact_map = {k: str(v) for k, v in artifacts.items()}
         # Re-separate children belong to the parent run on disk — never a new
         # Recent run — so only the normal path writes run metadata.
@@ -1041,6 +1096,7 @@ def _run_one_job_inner(job_id: str) -> None:
                     "guitar_ensemble": spec.guitar_ensemble,
                 },
                 metronome=metro_meta,
+                analysis=_analysis_metadata(analysis_result),
             )
         latest = read_status(job_id)
         if latest and latest.get("status") in ("cancelled", "pausing"):
@@ -1065,6 +1121,9 @@ def _run_one_job_inner(job_id: str) -> None:
             parent_run_dir=spec.parent_run_dir,
             error=None,
             traceback=None,
+            analysis_warning=analysis_warning,
+            analysis_error=analysis_warning if (run_analysis and analysis_result is None) else None,
+            tab_warning=tab_warning,
             **eta_fields,
         )
     except JobAborted:
@@ -1242,6 +1301,293 @@ def _existing_wav_artifacts(artifacts: dict[str, Any]) -> dict[str, Path]:
 def _results_fingerprint(stem_paths: dict[str, Path]) -> str:
     payload = "|".join(f"{k}:{v}" for k, v in sorted((n, str(p)) for n, p in stem_paths.items()))
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+_ANALYSIS_FILENAME = "analysis.json"
+_ANALYSIS_DIAGNOSTICS_FILENAME = "analysis_diagnostics.json"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
+def _first_existing_artifact(
+    artifacts: dict[str, Any],
+    keys: tuple[str, ...],
+) -> Path | None:
+    for key in keys:
+        value = artifacts.get(key)
+        if value and Path(str(value)).is_file():
+            return Path(str(value))
+    return None
+
+
+def _analysis_sources(
+    artifacts: dict[str, Any],
+    source_path: str | Path,
+) -> tuple[Path | None, Path | None, Path | None]:
+    """Pick harmony/vocals/metronome inputs without assuming a stem set."""
+    harmony = _first_existing_artifact(artifacts, ("no_vocals", "other"))
+    source = Path(source_path)
+    if harmony is None and source.is_file():
+        harmony = source
+    vocals = _first_existing_artifact(artifacts, ("vocals",))
+    metronome = artifacts.get("metronome_diagnostics")
+    metro_path = Path(str(metronome)) if metronome and Path(str(metronome)).is_file() else None
+    return harmony, vocals, metro_path
+
+
+def _run_analysis_stage(
+    run_dir: Path,
+    artifacts: dict[str, Any],
+    *,
+    source_path: str,
+    source_fingerprint: str | None,
+    duration_sec: float | None,
+    progress: Callable[[str, str], None] | None = None,
+) -> tuple[Any | None, Path | None, Path | None, str | None]:
+    """Run analysis; failures become warnings so a usable separation still ships."""
+    from audio_to_tab.analysis import analyze_audio, save_analysis
+
+    run_dir = Path(run_dir)
+    harmony, vocals, metronome = _analysis_sources(artifacts, source_path)
+    source = Path(source_path)
+    fingerprint = (source_fingerprint or "").strip()
+    if not fingerprint:
+        hash_target = harmony if harmony is not None else source
+        fingerprint = _sha256_file(hash_target) if hash_target.is_file() else "unknown"
+    duration = float(duration_sec or 0.0)
+    diagnostics_path = run_dir / _ANALYSIS_DIAGNOSTICS_FILENAME
+    diagnostics: dict[str, Any] = {
+        "schema_version": 1,
+        "source_fingerprint": fingerprint,
+        "source_path": str(source),
+        "harmony_path": str(harmony) if harmony is not None else None,
+        "vocals_path": str(vocals) if vocals is not None else None,
+        "metronome_diagnostics": str(metronome) if metronome is not None else None,
+        "duration_sec": duration,
+        "created_at": time.time(),
+    }
+
+    if harmony is None:
+        warning = "no audio source for analysis"
+        diagnostics["error"] = warning
+        _write_json_atomic(diagnostics_path, diagnostics)
+        return None, None, diagnostics_path, warning
+
+    try:
+        result = analyze_audio(
+            harmony,
+            harmony_path=harmony,
+            vocals_path=vocals,
+            metronome_diagnostics=metronome,
+            source_fingerprint=fingerprint,
+            duration_sec=duration,
+            progress=progress,
+        )
+        analysis_path = save_analysis(run_dir / _ANALYSIS_FILENAME, result)
+        diagnostics.update(
+            {
+                "bpm": result.bpm,
+                "bpm_confidence": result.bpm_confidence,
+                "key": result.key,
+                "key_confidence": result.key_confidence,
+                "beats_per_measure": result.beats_per_measure,
+                "chord_count": len(result.chords),
+                "section_count": len(result.sections),
+                "lyrics_line_count": len(result.lyrics),
+                "lyrics_language": result.lyrics_language,
+                "models": dict(result.models),
+                "warnings": list(result.warnings),
+            }
+        )
+        _write_json_atomic(diagnostics_path, diagnostics)
+        warning = None
+        if result.warnings:
+            warning = "; ".join(result.warnings[:4])
+            if len(result.warnings) > 4:
+                warning += f" (+{len(result.warnings) - 4} more)"
+        return result, analysis_path, diagnostics_path, warning
+    except Exception as exc:
+        warning = f"analysis failed: {exc}"
+        diagnostics["error"] = str(exc)
+        _write_json_atomic(diagnostics_path, diagnostics)
+        return None, None, diagnostics_path, warning
+
+
+def analyse_existing_run(run_dir: Path | str) -> tuple[bool, str]:
+    """Analyse a finished separation in place (Home ``Analyse`` action).
+
+    Returns ``(ok, message)``. This is synchronous on purpose: it is a one-shot
+    repair for old runs that predate analysis, not a second job queue.
+    """
+    if worker_busy():
+        return False, "Wait for the current separation to finish, then analyse."
+    run_dir = Path(run_dir)
+    meta_path = run_dir / "meta.json"
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False, "This run has no readable meta.json."
+    if not isinstance(meta, dict):
+        return False, "This run has no readable meta.json."
+    raw_artifacts = meta.get("artifacts")
+    artifacts: dict[str, Any] = (
+        dict(raw_artifacts) if isinstance(raw_artifacts, dict) else {}
+    )
+    harmony, _vocals, _metronome = _analysis_sources(artifacts, "")
+    if harmony is None:
+        return False, "No guitar/instrumental stem to analyse."
+    try:
+        import soundfile as sf
+
+        duration = float(sf.info(str(harmony)).duration)
+    except Exception:
+        duration = 0.0
+    result, analysis_path, diagnostics_path, warning = _run_analysis_stage(
+        run_dir,
+        artifacts,
+        source_path="",
+        source_fingerprint=str(meta.get("source_fingerprint") or ""),
+        duration_sec=duration,
+    )
+    if analysis_path is None:
+        return False, warning or "Analysis failed."
+    artifacts["analysis"] = str(analysis_path)
+    if diagnostics_path is not None:
+        artifacts["analysis_diagnostics"] = str(diagnostics_path)
+    meta["artifacts"] = artifacts
+    meta["analysis"] = _analysis_metadata(result)
+    try:
+        _write_json_atomic(meta_path, meta)
+    except (OSError, TypeError, ValueError) as exc:
+        return False, f"Analysis finished but meta.json could not be updated: {exc}"
+    if warning:
+        return True, f"Analysis ready with warnings: {warning}"
+    return True, "Analysis ready. Open Practice."
+
+
+def _run_tab_stage(
+    run_dir: Path,
+    artifacts: dict[str, Any],
+    *,
+    title: str,
+    analysis: Any | None,
+    progress: Callable[[str, str], None] | None = None,
+) -> tuple[dict[str, Path], str | None]:
+    """Transcribe the guitar stem once and persist both the text and player JSON.
+
+    Song analysis already ran; tab is additive. A no-note guitar part is a
+    warning, not a job failure — the separated stems remain useful.
+    """
+    from audio_to_tab.pipeline import (
+        EmptyTranscriptionError,
+        PipelineConfig,
+        run_pipeline,
+    )
+    from audio_to_tab.rhythm import quantize_tab_document
+    from audio_to_tab.tab_generate import (
+        midi_to_tab,
+        tab_document_to_dict,
+        tab_measure_spans,
+    )
+    from audio_to_tab.tempo import resolve_tempo
+
+    guitar = _first_existing_artifact(artifacts, ("guitar",))
+    if guitar is None:
+        return {}, None
+
+    output_dir = Path(run_dir) / "tab"
+    bpm_override = analysis.bpm if analysis is not None and analysis.bpm else None
+    beats_per_measure = int(analysis.beats_per_measure) if analysis is not None else 4
+    config = PipelineConfig(
+        separate_stems=False,
+        title=title,
+        tempo_bpm_override=bpm_override,
+        beats_per_measure=beats_per_measure,
+    )
+
+    def tab_progress(_stage: str, message: str) -> None:
+        if progress is not None:
+            progress("tab", message)
+
+    try:
+        pipeline_artifacts = run_pipeline(
+            audio_path=guitar,
+            output_dir=output_dir,
+            config=config,
+            on_progress=tab_progress,
+        )
+    except EmptyTranscriptionError:
+        return {}, "tab skipped: no usable guitar notes detected"
+    except Exception as exc:
+        return {}, f"tab transcription failed: {exc}"
+
+    tab_artifacts: dict[str, Path] = {}
+    if pipeline_artifacts.get("midi"):
+        tab_artifacts["tab_midi"] = Path(pipeline_artifacts["midi"])
+    if pipeline_artifacts.get("tab"):
+        tab_artifacts["tab"] = Path(pipeline_artifacts["tab"])
+    if pipeline_artifacts.get("pdf"):
+        tab_artifacts["tab_pdf"] = Path(pipeline_artifacts["pdf"])
+
+    warning = None
+    try:
+        midi_path = tab_artifacts.get("tab_midi")
+        if midi_path is None:
+            raise ValueError("tab pipeline did not write a MIDI file")
+        tempo = resolve_tempo(
+            audio_path=guitar,
+            midi_path=midi_path,
+            override_bpm=bpm_override,
+        )
+        document = midi_to_tab(
+            str(midi_path),
+            tempo_bpm=tempo.bpm,
+            tempo_confidence=tempo.confidence,
+            beats_per_measure=beats_per_measure,
+        )
+        document = quantize_tab_document(document, beats_per_measure=beats_per_measure)
+        payload = {
+            "schema_version": 1,
+            "document": tab_document_to_dict(document),
+            "measures": tab_measure_spans(document),
+        }
+        tab_artifacts["tab_json"] = _write_json_atomic(output_dir / "tab.json", payload)
+    except Exception as exc:
+        warning = f"tab player data unavailable: {exc}"
+
+    return tab_artifacts, warning
+
+
+def _analysis_metadata(result: Any | None) -> dict[str, Any] | None:
+    if result is None:
+        return None
+    return {
+        "bpm": result.bpm,
+        "bpm_confidence": result.bpm_confidence,
+        "key": result.key,
+        "key_confidence": result.key_confidence,
+        "beats_per_measure": result.beats_per_measure,
+        "chord_count": len(result.chords),
+        "section_count": len(result.sections),
+        "lyrics_line_count": len(result.lyrics),
+        "lyrics_language": result.lyrics_language,
+        "warnings": list(result.warnings)[:8],
+    }
 
 
 def _presence_from_artifacts(artifacts: dict[str, Any]) -> dict[str, Any]:

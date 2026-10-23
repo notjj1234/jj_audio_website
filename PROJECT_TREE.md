@@ -36,6 +36,7 @@ The **Tab PDF path (`pipeline.py`) and the Isolate path (`isolate.py`)** are bot
 | Job | Start here |
 |-----|------------|
 | Isolation UI (desktop) | `ui/pages/isolate.py` (page: Home\|mix\|+ strip, Queue below), `ui/isolate_state.py` (Lite outcomes / Pro stems / progress / mode helpers), `ui/opened_audio.py` (OS open-with queue), `ui/app.py` (Lite↔Pro sidebar + overlay), `ui/stem_icons.py` (outcome/stem icons). **Separate/mix** — not download-only. |
+| Desktop Home / UI craft (Phase 1.5) | Current Home: `ui/pages/home.py` (clean Home by default; `AUDIO_TOOLS_UI_V2=0` keeps the old page). Shell flag CSS: `ui/app.py` + `ui/design_tokens.py` (Home tokens only; do not retint `ui/theme_presets.py`). Component: `ui/home_component/` (`make home-build`). Measurements: `docs/plans/moises-parity/10-MOISES-UI-CRAFT.md` §13. Tasks: `11-DESKTOP-UI-REDESIGN.md` §12. |
 | Desktop Lite↔Pro mode | `ui/app.py` (sidebar `UI_MODE_*`, `load_ui_mode` / `write_ui_mode`), `ui/isolate_state.py` (`is_pro_mode`, `DEFAULT_UI_MODE`). Branching: Isolation `ui/pages/isolate.py`; Tab PDF Pro gates in `ui/pages/tab_pdf.py`. YouTube to MP3 does not read Lite/Pro. |
 | Lite outcome cards | `ui/isolate_state.py` (`OUTCOME_CARDS`, `resolve_outcome_card`, `outcome_card_for_options`), icons `ui/stem_icons.py`, render in `ui/pages/isolate.py` |
 | Desktop Lite hardware auto | `src/audio_to_tab/hardware.py` (`lite_auto_choice`, `lite_auto_speed_id`, `lite_accelerator_available`, Detected/Using captions; GPU-first when CUDA/MPS available; MPS ≥12 GB). Wired in `ui/pages/isolate.py`; guitar preference via `prefer_roformer` in `ui/isolate_state.py`. Hosted Auto is separate: `backend/capabilities.py` |
@@ -47,6 +48,7 @@ The **Tab PDF path (`pipeline.py`) and the Isolate path (`isolate.py`)** are bot
 | Guitar stem engine | `src/audio_to_tab/isolate.py` (`IsolateConfig`, `separate_stems`, fold, bass-bleed, low-end recovery, pre/refined), `src/audio_to_tab/separate.py` (Demucs / guitar-ft), `src/audio_to_tab/roformer.py`, `src/audio_to_tab/scnet.py` |
 | SCNet backend | `src/audio_to_tab/scnet.py`; dispatch in `isolate.py` / CLI `cli/isolate.py`; tests `tests/test_scnet.py` |
 | Live mixer (desktop iframe) | Edit `ui/stem_mixer_component/frontend/src/main.ts` + `pan.ts` + `metronomeClicks.ts` + `style.css`, then `make mixer-build`. Pan law is `pan.ts` (equal-power, −100..100), copied in `web/src/mixer/pan.ts`. Live click-track Accent/rate/sound on the metronome row (hot-swap; no full stem reload). **Background play:** `installWakeHooks` recovers on visible/pageshow only — does **not** soft-pause on document hide. Loader: `ui/stem_mixer_component/__init__.py` (`youtube_video_id`, `local_video_url`, `video_offset_sec`, `hide_youtube_video`). Preview encode: `ui/media.py`. Downloads: build mix **on Save**, not on every mute/solo or pan move. |
+| Practice player / analysis (desktop) | Engine: `src/audio_to_tab/analysis.py` + `chords.py` / `key.py` / `sections.py` / `lyrics.py`; worker stages in `ui/isolate_jobs.py`; tab artifact via `tab_generate.py`; player state `ui/project.py` (`project.json`); panel + loop/count-in in `ui/stem_mixer_component/frontend/src/main.ts` / `analysis.ts`. Outputs per run: `analysis.json`, `analysis_diagnostics.json`, `tab/transcription.{tab,pdf,mid}`, `tab/tab.json`, `project.json`. Chords are an editable draft (`confidence=0.0`). |
 | Region picker (desktop iframe) | Edit `ui/region_picker_component/frontend/src/main.ts` + `style.css`, then `make region-picker-build`. Loader: `ui/region_picker_component/__init__.py`. Wired in `ui/pages/isolate.py` (`_render_region_controls`) |
 | Mix tabs (desktop iframe) | Edit `ui/mix_tabs_component/frontend/src/main.ts` + `style.css`, then `make mix-tabs-build`. Loader: `ui/mix_tabs_component/__init__.py`. Moises-style Home\|mix\|+ strip on Isolate |
 | Mixer picture (desktop) | YouTube iframe or local `source_video` beside the stems, synced to mixer time. Wiring: `ui/pages/isolate.py`, `ui/isolate_state.py` (`mixer_youtube_video_id`, `mixer_local_video_path`, `prefer_local_mixer_picture`), offset `ui/isolate_jobs.py` (`video_offset_sec_for_run`), preview file `download_youtube_preview_video` in `src/audio_to_tab/ingest.py`. In the iframe: move/resize, snaps left/right/above/below, free-float (`videoLayout` in `sessionStorage`). Local file is tried first and can fall back to the YouTube id. |
@@ -105,16 +107,21 @@ Shared engine. Import as `audio_to_tab`.
 - `audio_to_tab/roformer.py` — BS-RoFormer-SW (6-stem) + MelBand-RoFormer Guitar specialist; urllib + SHA256 downloads; bs-roformer-infer / audio-separator backends; `run_guitar_refine` (residual-aware).
 - `audio_to_tab/scnet.py` — optional SCNet (`guitar_scnet`) 4-stem MUSDB18 backend; urllib + SHA256 checkpoint; `.[scnet]` extra. Not the default first-stage separator.
 - `audio_to_tab/ingest.py` — file normalize + YouTube download/search (`yt-dlp`: `download_youtube_audio`, `download_youtube_preview_video` for the mixer picture, `search_youtube_videos`, `is_youtube_url`, `format_youtube_duration`).
-- `audio_to_tab/mixer.py` — stem mix / waveform helpers used by desktop downloads; metronome sorts last and starts muted.
+- `audio_to_tab/mixer.py` — stem mix / waveform helpers used by desktop downloads; metronome sorts last and starts muted. Equal-power `pan_matrix` / `apply_pan` / `clamp_pan` match `pan.ts`; `mix_stems_to_wav(..., pans=...)` bakes pan into the desktop mix (center is bit-identical).
 - `audio_to_tab/hardware.py` — RAM/GPU/chip probe (`HostProbe.cpu_brand`, Apple Silicon label e.g. `Apple M2 Pro`); desktop speed recommendations (**GPU-first** for CUDA / eligible MPS); MPS gated at ≥12 GB; Lite helpers (`lite_accelerator_available`, `lite_auto_choice`, Detected/Using captions).
 - `audio_to_tab/edition.py` — Windows CPU vs NVIDIA freeze flavor.
 - `audio_to_tab/lead_rhythm.py` — opt-in lead/rhythm split on the guitar stem (not product default).
 - `audio_to_tab/pipeline.py` — audio → tab PDF end-to-end (`PipelineConfig` incl. model, guitar_checkpoint, guitar_refine, demucs_segment/jobs, fold_other_mode, low_end_restore_db, sub_bass_debleed).
 - `audio_to_tab/transcribe.py` — Basic Pitch audio → MIDI.
-- `audio_to_tab/tab_generate.py` — MIDI → ASCII tab.
+- `audio_to_tab/tab_generate.py` — MIDI → ASCII tab; `tab_measure_spans` + `tab_document_to_dict` feed the mixer Tab panel (`tab/tab.json`).
 - `audio_to_tab/pdf_render.py` — ASCII/MIDI → PDF (ReportLab).
 - `audio_to_tab/tempo.py` — tempo from audio/MIDI.
 - `audio_to_tab/metronome.py` — adaptive (“floating”) metronome: one onset envelope → global + curve-driven `beat_track` (librosa 0.11); gate keeps quiet regular intros; accents use `body_start_sec`; `click_times_1x` is the mixer/rebake contract; optional `bpm_curve` in diagnostics; `MetronomeRenderOptions` / `rebake_metronome_artifact` (accent, rate, sound).
+- `audio_to_tab/analysis.py` — song analysis schema/cache/orchestrator (`AnalysisResult`, chord/section/lyric spans, `analysis_cache_key`). Order: beats → chords → key → sections → lyrics.
+- `audio_to_tab/key.py` — key estimate from the chord histogram, chroma fallback.
+- `audio_to_tab/chords.py` — CQT chroma + triad templates + Viterbi draft chord track (no new runtime deps; events carry `confidence=0.0`).
+- `audio_to_tab/sections.py` — librosa self-similarity/novelty sections, minimum 8 s.
+- `audio_to_tab/lyrics.py` — `faster-whisper` small int8 from the pinned local model dir.
 - `audio_to_tab/rhythm.py` — beat-grid quantize for tab events.
 - `audio_to_tab/midi_cleanup.py` — post-pitch MIDI cleanup.
 - `audio_to_tab/tuning.py` — fretboard / tuning helpers.
@@ -132,13 +139,14 @@ Desktop Streamlit only.
 
 - `__init__.py` — empty package marker.
 - `app.py` — multipage router (Home default, then Audio Isolation, YouTube to MP3, Tab PDF, Settings); Lite↔Pro sidebar (`UI_MODE_*`, persist to disk; mainly Isolation/Tab PDF); nav-only global loading overlay (`should_show_global_loading`); injects Satoshi via `satoshi_font.py`.
-- `pages/home.py` — boot screen. Launch cards for Separate tracks, YouTube save, and Tab PDF. Recents and Library list local isolate runs (`list_recent_runs`) and open them in the Isolate mixer.
+- `pages/home.py` — boot screen. Launch cards for Learn a song, YouTube save, and Tab PDF. Recents and Library list local isolate runs (`list_recent_runs`); library rows show `BPM · Key · Sections`, a Practice action for analysed runs, and Analyse for older runs (`analyse_existing_run`).
 - `pages/isolate.py` — Audio Isolation (**separate/mix**). Sticky Home\|mix\|+ strip; Home form (upload/YouTube search, outcomes/stems, section); mix tab = live mixer (optional synced picture) + Downloads (export on Save); Queue below. Lite: outcome cards + hardware Detected/Using + auto speed/device/guitar; Pro: Speed / Engine / This computer / stem checkboxes. Status strip owns running/failed jobs (retry, dismiss).
 - `pages/youtube_audio.py` — YouTube to MP3 (**save file only**, not separate/mix). Paste or search a public URL, pick format (default MP3), native folder save via `choose_export_dir`. Pure helper `save_youtube_audio_to_folder`. Ignores Lite/Pro. Caveats: see `desktop_export.py` / `DESKTOP.md`.
 - `pages/tab_pdf.py` — Tab PDF demo page. Lite: simpler convert path (hides engine/advanced). Pro: guitar refine, guitar-ft, low-end restore, sub-bass de-bleed, Advanced transcription. Upload cap caption from `ui/common.py` (`max_upload_caption`).
 - `pages/__init__.py` — empty package marker.
 - `guitar_fixup.py` — post-separation guitar stem fix-up for the mix-tab Mixer (low-end recovery, pre/refined switch, diagnostics).
-- `isolate_jobs.py` — serial Demucs/RoFormer worker; job status JSON under app data dir; `requeue_job`, `separation_in_progress`, `format_job_error`; `video_offset_sec_for_run` (region start for mixer picture sync).
+- `isolate_jobs.py` — serial Demucs/RoFormer worker; job status JSON under app data dir; `requeue_job`, `separation_in_progress`, `format_job_error`; `video_offset_sec_for_run` (region start for mixer picture sync). Pipeline stages include `analysis` (`analysis.json` + `analysis_diagnostics.json` + meta summary) and `tab` (`tab/`); both are warnings, not job failures. `analyse_existing_run` is the Home repair action for older runs.
+- `project.py` — mutable per-run player state in `project.json` (mixer volumes/pan/mute/solo/master, rate/semitones/loop/count-in, relative analysis/tab paths). `load_project` / `save_project` (atomic, write-on-change), `seed_mixer`, `update_from_mixer`, `load_analysis_for_run`, `load_tab_for_run`.
 - `isolate_state.py` — Lite outcome cards, Pro track options, progress stages, UI mode helpers (`is_pro_mode`, persist settings), failed-strip TTL/dismiss, guitar selection (`prefer_roformer` for Lite CPU-only hosts), Home/mix shell tab helpers, mixer picture helpers (`mixer_youtube_video_id`, `mixer_local_video_path`, `prefer_local_mixer_picture`).
 - `stem_icons.py` — Lucide-style line-art icons for Lite/Pro stem and outcome tiles.
 - `satoshi_font.py` — `@font-face` CSS for bundled Satoshi (used by `app.py`).
@@ -148,9 +156,10 @@ Desktop Streamlit only.
 - `common.py` — run listing, uploads, data dir, edition labels, `max_upload_mb` / `max_upload_caption`, `should_show_global_loading` (nav-only).
 - `media.py` — Streamlit media URLs, preview encode, mix cleanup.
 - `icon.png` — window / tab icon.
-- `stem_mixer_component/__init__.py` — iframe component; serves `frontend/build/` when `mixer_build_is_complete`. Args include `youtube_video_id`, `local_video_url`, `video_offset_sec`, `hide_youtube_video`.
-- `stem_mixer_component/frontend/src/main.ts` — live mixer (Web Audio) source; metronome row live controls; wake hooks keep playback across app/window hide (soft-pause only on dead/interrupted context). Picture: YouTube or local video, move/resize, snaps, free-float. Stem wave drag (`stemWaveHeight`, `#btn-resize-stems`) only while the picture is visible.
-- `stem_mixer_component/frontend/src/pan.ts` — equal-power pan law (−100..100). Same text as `web/src/mixer/pan.ts`. Desktop saved mixes do not bake pan.
+- `stem_mixer_component/__init__.py` — iframe component; serves `frontend/build/` when `mixer_build_is_complete`. Args include `youtube_video_id`, `local_video_url`, `video_offset_sec`, `hide_youtube_video`, plus practice state: `analysis`, `tab`, `initial_loop`, `count_in_bars`, `initial_rate`, `initial_semitones`, `initial_pan`.
+- `stem_mixer_component/frontend/src/main.ts` — live mixer (Web Audio) source; metronome row live controls; wake hooks keep playback across app/window hide (soft-pause only on dead/interrupted context). Picture: YouTube or local video, move/resize, snaps, free-float. Stem wave drag (`stemWaveHeight`, `#btn-resize-stems`) only while the picture is visible. Practice panel: Chords/Sections/Lyrics/Tab, A/B loop, count-in, keyboard `L`/`C`.
+- `stem_mixer_component/frontend/src/analysis.ts` — pure practice helpers (chord/section/lyric/measure selection, loop helpers, chord-shape/diagram geometry).
+- `stem_mixer_component/frontend/src/pan.ts` — equal-power pan law (−100..100). Same text as `web/src/mixer/pan.ts`. The Python export uses the same matrix (`audio_to_tab.mixer.pan_matrix`).
 - `stem_mixer_component/frontend/src/metronomeClicks.ts` — click synthesis / rate / peaks (parity with Python metronome render).
 - `stem_mixer_component/frontend/src/style.css` — mixer styles (metro toolbar, video frame, `--stem-wave-height`).
 - `stem_mixer_component/frontend/src/vite-env.d.ts` — Vite typings for the mixer iframe.
@@ -251,8 +260,13 @@ Desktop freeze + installers. How-to: `DESKTOP.md`.
 - `test_cli_smoke.py` — five CLI entrypoints + `pyproject` scripts.
 - `test_ui_pages.py` — Streamlit page pure helpers (incl. YouTube to MP3 save helper).
 - `test_ingest.py` — YouTube ingest (network opt-in).
-- `test_mixer.py` — mix helpers.
+- `test_mixer.py` — mix helpers, pan matrix/export (center bit-identical, hard left/right, mute).
 - `test_metronome.py` — adaptive metronome (curve helpers, vocal-intro pulse, steady-tempo regression, 48 kHz, talking-intro gate) + render/rebake / `bpm_curve` diagnostics.
+- `test_analysis.py`, `test_analysis_orchestrator.py` — analysis schema/cache and stage fallbacks.
+- `test_chords.py`, `test_key.py`, `test_sections.py`, `test_lyrics.py` — per-stage analysis engines.
+- `test_tab_generate.py` — tab document / measure spans.
+- `test_project.py` — `project.json` round-trip, clamping, write-on-change, seeding, artifact loading.
+- `test_home.py` — Home analysis line, Practice/Analyse actions, `analyse_existing_run`.
 - `test_stem_mixer_component.py` — desktop mixer build packaging, live metronome wiring, picture layout, and stem-wave height smoke.
 - `test_region_picker_component.py` — desktop region picker build packaging.
 - `test_mix_tabs_component.py` — desktop mix-tabs build packaging.
@@ -307,6 +321,7 @@ Offline scoring. Gitignored under `eval/lead_rhythm/`: `clips/`, `out/`, `manife
 - `issues.md` — canonical I-xxx design-decision / issue history (CI and `PLANNING.md` cite it). Includes reserved historical IDs and the 2026-09-08 isolation performance/functional audit (`I-500`–`I-509`).
 - `ui-issues.md` — UI/UX-only issue register (`I-600`+). Does not replace `issues.md`.
 - `research/moises/REFERENCE.md` — single agent handoff for the Moises.app 2.0.3 REA pass (stack, IPC, mixer literals, P0/P1/P2 gaps, Evidence IDs). Same folder also has `FULL-TEARDOWN.md` (deep static pass; corrects the "local mixer UI" inference — shell renders chrome only, studio is hosted) and the topic split (`README.md`, `mixer-ux.md`, `architecture.md`, `gaps-vs-audio-tools.md`, `evidence-index.md`). No extracted Moises source.
+- `plans/moises-parity/` — portable Moises-parity program (2026-10-19, UI pass 2026-10-20): `README.md` (index), `01-MOISES-SURFACE.md` (2.0.3 + 2.0.18 runtime surface + UI craft pass), `02-CURRENT-STATE.md` (code inventory + 2026-10-20 delta), `03-FEATURE-MATRIX.md` (gap/decision + experience rows), `04-SCOPE-CUT.md` (build order), `05-ROADMAP.md` (phases/gates incl. P1.5 UI / P1.6 hardening), `06-PHASE-1-PLAN.md` (task plan + verification log), `07-BUILD-PROMPT.md` (Phase 1 historical prompt + Phase 1.5 UI prompt), `08-EVIDENCE-LOG.md` (audit trail + UI captures + Phase 1 verification), `09-SKILL-WORKFLOW.md` (skill order), `10-MOISES-UI-CRAFT.md` (measured Moises UI, current audit, Tyrian Nocturne direction, tokens/screens), `11-DESKTOP-UI-REDESIGN.md` (Phase 1.5 file-level plan, UI-0–UI-9, gates). `_work/` holds the raw research. Not a GSD `.planning/` workspace.
 - `oracle-free-memory-spike.md` — gitignored name (not in public git; may be absent locally).
 
 ### Do not edit (generated / vendor)

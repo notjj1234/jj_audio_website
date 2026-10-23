@@ -29,17 +29,20 @@ def _clamp_bpm(bpm: float) -> float:
 
 def estimate_tempo_from_audio(audio_path: str | Path) -> TempoEstimate | None:
     """Estimate tempo from audio onset envelope via librosa."""
+    path = Path(audio_path)
+    if not path.is_file():
+        return None
     try:
         import librosa
     except ImportError:
         return None
 
     try:
-        y, sr = librosa.load(str(audio_path), sr=22050, mono=True, duration=120.0)
+        y, sr = librosa.load(str(path), sr=22050, mono=True, duration=120.0)
         if len(y) < sr:
             return None
         onset_env = librosa.onset.onset_strength(y=y, sr=sr)
-        tempo = librosa.feature.rhythm.tempo(onset_envelope=onset_env, sr=sr)
+        tempo = librosa.feature.tempo(onset_envelope=onset_env, sr=sr)
         bpm = float(np.atleast_1d(tempo)[0])
         if not bpm or np.isnan(bpm):
             return None

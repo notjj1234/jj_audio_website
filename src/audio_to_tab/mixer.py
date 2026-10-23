@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -57,6 +58,10 @@ PLAYBACK_SEMITONES_MAX = 6
 PLAYBACK_SEMITONES_DEFAULT = 0
 # Master-bus ceiling shared with the live Web Audio mixer (~−1 dBTP).
 TRUE_PEAK_CEILING = 10.0 ** (-1.0 / 20.0)  # ≈ 0.89125 linear
+# Stem pan range shared with the live mixer (pan.ts): -100 L, 0 C, +100 R.
+PAN_MIN = -100
+PAN_MAX = 100
+PAN_DEFAULT = 0
 
 
 def clamp_playback_rate(rate: float) -> float:
@@ -75,6 +80,45 @@ def clamp_playback_semitones(semitones: float | int) -> int:
             min(PLAYBACK_SEMITONES_MAX, round(float(semitones))),
         )
     )
+
+
+def clamp_pan(value: object) -> int:
+    """Stem pan as a whole step in [-100, 100]; anything unreadable is center.
+
+    Mirrors ``clampPan`` in ``ui/stem_mixer_component/frontend/src/pan.ts``.
+    """
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return PAN_DEFAULT
+    if not math.isfinite(number):
+        return PAN_DEFAULT
+    return int(max(PAN_MIN, min(PAN_MAX, round(number))))
+
+
+def pan_matrix(pan: float | int) -> tuple[float, float, float, float]:
+    """Return ``(ll, lr, rl, rr)`` for the live mixer's equal-power pan law.
+
+    Matches ``panMatrix`` in ``pan.ts``: center is identity, hard left sums both
+    input channels into the left output, hard right sums both into the right.
+    """
+    unit = clamp_pan(pan) / 100.0
+    if unit == 0.0:
+        return (1.0, 0.0, 0.0, 1.0)
+    if unit < 0.0:
+        x = unit + 1.0
+        return (1.0, math.cos(x * math.pi / 2.0), 0.0, math.sin(x * math.pi / 2.0))
+    return (math.cos(unit * math.pi / 2.0), 0.0, math.sin(unit * math.pi / 2.0), 1.0)
+
+
+def apply_pan(data: np.ndarray, pan: float | int) -> np.ndarray:
+    """Apply ``pan_matrix`` to an ``(n, 2)`` stereo array; center returns ``data``."""
+    ll, lr, rl, rr = pan_matrix(pan)
+    if (ll, lr, rl, rr) == (1.0, 0.0, 0.0, 1.0):
+        return data
+    left = data[:, 0] * ll + data[:, 1] * lr
+    right = data[:, 0] * rl + data[:, 1] * rr
+    return np.column_stack([left, right]).astype(np.float32, copy=False)
 
 
 def apply_playback_transform(
@@ -265,12 +309,15 @@ def mix_stems_to_wav(
     output_path: str | Path | None = None,
     *,
     gains: dict[str, float] | None = None,
+    pans: dict[str, int] | None = None,
 ) -> Path:
     """
     Sum stems into one stereo WAV (float32 mix, int16 output).
 
     If ``gains`` is provided, each stem is scaled by its linear gain (0 = silence).
     If ``gains`` is omitted, stems in ``audible`` are mixed at gain 1.0 (legacy).
+    ``pans`` uses the same equal-power law as the live mixer; missing/center is
+    a bit-identical pass-through.
 
     All-zero / empty contribution writes a silent WAV matching the longest stem
     (or 1 second at 44100 Hz if no stems can be loaded).
@@ -316,6 +363,8 @@ def mix_stems_to_wav(
         if gain == 0.0:
             continue
         data, sr = _load_stereo(path)
+        if pans:
+            data = apply_pan(data, pans.get(name, PAN_DEFAULT))
         if mixed is None:
             sample_rate = sr
             mixed = data * gain

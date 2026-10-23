@@ -40,6 +40,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+analysis = ["faster-whisper>=1.2,<2"]
 demucs = ["demucs>=4.0", "torch>=2.2,<2.14", "torchaudio>=2.2,<2.12", "torchcodec>=0.14,<0.15"]
 roformer = ["bs-roformer-infer>=0.1.5"]
 separator = ["audio-separator>=0.39.1"]
@@ -63,6 +64,7 @@ exclude = ["tests*", "ui*", "web*", "eval*", "scripts*"]
 [tool.pytest.ini_options]
 markers = [
     "youtube: hits the public internet (skipped unless RUN_YOUTUBE_INTEGRATION=1)",
+    "slow: heavy optional integration (model or long audio)",
 ]
 
 [tool.ruff]

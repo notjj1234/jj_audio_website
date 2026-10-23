@@ -239,6 +239,15 @@ from ui.media import (
     register_mixer_media,
     stem_media_urls,
 )
+from ui.project import (
+    PROJECT_FILENAME,
+    load_analysis_for_run,
+    load_project,
+    load_tab_for_run,
+    save_project,
+    seed_mixer,
+    update_from_mixer,
+)
 from ui.stem_mixer_component import component_build_available, stem_mixer
 from ui.youtube_search import (
     PAGE_SIZE as YT_SEARCH_PAGE_SIZE,
@@ -768,17 +777,26 @@ def _mixer_export_fingerprint(
     *,
     playback_rate: float = 1.0,
     playback_semitones: int = 0,
+    pans: dict | None = None,
 ) -> str:
     parts = [
         f"master:{float(master_volume_db):.2f}",
         f"rate:{float(playback_rate):.2f}",
         f"key:{int(playback_semitones)}",
     ]
+    any_solo = any(bool(soloed.get(n, False)) for n in stem_names)
     for name in stem_names:
-        parts.append(
+        part = (
             f"{name}:{float(volumes_db.get(name, DB_DEFAULT)):.2f}"
             f":{int(bool(muted.get(name, False)))}:{int(bool(soloed.get(name, False)))}"
         )
+        # Only audible pan changes the file; silence has no stereo image.
+        audible = bool(soloed.get(name, False)) if any_solo else not bool(
+            muted.get(name, False)
+        )
+        if pans is not None and audible:
+            part += f":pan{clamp_pan(pans.get(name))}"
+        parts.append(part)
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
 
@@ -1031,6 +1049,7 @@ def _build_current_mix(
     *,
     playback_rate: float = PLAYBACK_RATE_DEFAULT,
     playback_semitones: int = PLAYBACK_SEMITONES_DEFAULT,
+    pans: dict | None = None,
 ) -> Path:
     mix_path = run_dir / "current_mix.wav"
     rate = clamp_playback_rate(playback_rate)
@@ -1042,7 +1061,12 @@ def _build_current_mix(
         volume_db={n: float(volumes_db.get(n, DB_DEFAULT)) for n in stem_names},
         master_volume_db=master_volume_db,
     )
-    mix_stems_to_wav(selected_stem_paths, output_path=mix_path, gains=gains)
+    mix_stems_to_wav(
+        selected_stem_paths,
+        output_path=mix_path,
+        gains=gains,
+        pans={n: clamp_pan((pans or {}).get(n)) for n in stem_names},
+    )
     apply_playback_transform(mix_path, rate=rate, semitones=semis)
     fp = _mixer_export_fingerprint(
         stem_names,
@@ -1052,6 +1076,7 @@ def _build_current_mix(
         master_volume_db,
         playback_rate=rate,
         playback_semitones=semis,
+        pans=pans,
     )
     st.session_state["isolate_mix_ready"] = str(mix_path)
     st.session_state["isolate_mix_fp"] = fp
@@ -1135,6 +1160,26 @@ def _sync_metronome_options_from_mixer(
     _persist_isolate_ui_state()
 
 
+def _persist_project_from_mixer(
+    run_dir: Path,
+    mixer_state: dict | None,
+    *,
+    force: bool = False,
+) -> bool:
+    """Save player state at most once per second (or immediately with ``force``)."""
+    if not isinstance(mixer_state, dict):
+        return False
+    stamp_key = f"isolate_project_save_at::{run_dir}"
+    now = time.time()
+    if not force and now - float(st.session_state.get(stamp_key) or 0.0) < 1.0:
+        return False
+    project, _warning = load_project(run_dir)
+    update_from_mixer(project, mixer_state)
+    wrote = save_project(run_dir, project)
+    st.session_state[stamp_key] = now
+    return wrote
+
+
 def _render_live_mixer(
     stem_paths: dict[str, Path],
     *,
@@ -1143,6 +1188,7 @@ def _render_live_mixer(
     run_dir: Path | None = None,
     media_urls: dict[str, str] | None = None,
     download_urls: dict[str, str] | None = None,
+    tab_pdf_url: str | None = None,
 ) -> dict | None:
     if not component_build_available():
         st.error(
@@ -1165,14 +1211,52 @@ def _render_live_mixer(
         return None
 
     stem_names = sort_stem_names(stem_paths.keys())
-    volumes = st.session_state.setdefault("isolate_volumes_db", {})
+    project = None
+    project_warning = None
+    seed: dict = {}
+    if run_dir is not None:
+        project, project_warning = load_project(run_dir)
+        if project_warning:
+            st.caption(project_warning)
+        seed = seed_mixer(project)
+        if not (run_dir / PROJECT_FILENAME).is_file():
+            # First open of an older run: create the mutable player manifest now
+            # so the first mixer report has a file to update.
+            save_project(run_dir, project, force=True)
+    seed_mixer_state = project.get("mixer") if project else {}
+    seed_mixer_state = seed_mixer_state if isinstance(seed_mixer_state, dict) else {}
+    volumes = dict(seed_mixer_state.get("volumesDb") or {})
+    st.session_state["isolate_volumes_db"] = volumes
     for name in stem_names:
         volumes.setdefault(name, DB_DEFAULT)
-    master_db = float(st.session_state.setdefault("isolate_master_volume_db", DB_DEFAULT))
-    saved = st.session_state.get("isolate_mixer_state") or {}
-    saved_muted = saved.get("muted") or {}
-    saved_soloed = saved.get("soloed") or {}
-    saved_pan = saved.get("pan") if isinstance(saved.get("pan"), dict) else {}
+    master_db = float(
+        seed_mixer_state.get(
+            "masterVolumeDb",
+            st.session_state.setdefault("isolate_master_volume_db", DB_DEFAULT),
+        )
+    )
+    saved_muted = seed_mixer_state.get("muted") or {}
+    saved_soloed = seed_mixer_state.get("soloed") or {}
+    saved_pan = (
+        seed_mixer_state.get("pan")
+        if isinstance(seed_mixer_state.get("pan"), dict)
+        else {}
+    )
+    practice_seed = {
+        key: seed.get(key)
+        for key in (
+            "playback_rate",
+            "playback_semitones",
+            "initial_loop",
+            "count_in_bars",
+        )
+    }
+
+    analysis_payload = None
+    tab_payload = None
+    if run_dir is not None and project is not None:
+        analysis_payload = load_analysis_for_run(run_dir, project)
+        tab_payload = load_tab_for_run(run_dir, project, pdf_url=tab_pdf_url)
 
     safe_base = (base_name or "stems").strip() or "stems"
     stems_arg = [
@@ -1216,6 +1300,12 @@ def _render_live_mixer(
         local_video_url=local_url,
         video_offset_sec=video_offset_sec_for_run(run_dir),
         theme_vars=theme_vars,
+        analysis=analysis_payload,
+        tab=tab_payload,
+        initial_loop=practice_seed.get("initial_loop"),
+        count_in_bars=int(practice_seed.get("count_in_bars") or 0),
+        initial_rate=float(practice_seed.get("playback_rate") or 1.0),
+        initial_semitones=int(practice_seed.get("playback_semitones") or 0),
         key=mixer_key,
     )
 
@@ -3554,6 +3644,7 @@ def _mixer_and_downloads_fragment(
     run_dir: Path,
     media_urls: dict[str, str],
     download_urls: dict[str, str],
+    tab_pdf_url: str | None = None,
 ) -> None:
     """Mixer and downloads — fragment-scoped so the mixer does not remount the page.
 
@@ -3574,6 +3665,7 @@ def _mixer_and_downloads_fragment(
         run_dir=run_dir,
         media_urls=media_urls,
         download_urls=download_urls,
+        tab_pdf_url=tab_pdf_url,
     )
     if mixer_state:
         st.session_state["isolate_mixer_state"] = mixer_state
@@ -3593,6 +3685,7 @@ def _mixer_and_downloads_fragment(
             st.session_state["isolate_playback_semitones"] = clamp_playback_semitones(
                 mixer_state["playbackSemitones"]
             )
+        _persist_project_from_mixer(run_dir, mixer_state)
         if "hideYoutubeVideo" in mixer_state:
             st.session_state["isolate_hide_youtube_video"] = bool(
                 mixer_state["hideYoutubeVideo"]
@@ -3631,6 +3724,9 @@ def _mixer_and_downloads_fragment(
             st.session_state.get("isolate_playback_semitones", PLAYBACK_SEMITONES_DEFAULT),
         )
     )
+    pan = state.get("pan")
+    if not isinstance(pan, dict) or not pan:
+        pan = load_project(run_dir)[0]["mixer"].get("pan") or {}
 
     _render_downloads_panel(
         selected_stem_paths,
@@ -3643,6 +3739,7 @@ def _mixer_and_downloads_fragment(
         master_volume_db=master_volume_db,
         playback_rate=playback_rate,
         playback_semitones=playback_semitones,
+        pans=pan,
     )
 
 
@@ -3706,6 +3803,7 @@ def _render_downloads_panel(
     master_volume_db: float,
     playback_rate: float = PLAYBACK_RATE_DEFAULT,
     playback_semitones: int = PLAYBACK_SEMITONES_DEFAULT,
+    pans: dict | None = None,
 ) -> None:
     """Save location and export to folder — equal-width button rows."""
     export_root = _resolved_export_dir()
@@ -3744,7 +3842,7 @@ def _render_downloads_panel(
         st.divider()
         fmt = _download_format_widget()
         st.caption(
-            "Save current mix includes mute, solo, levels, and Speed & Key. "
+            "Save current mix includes mute, solo, levels, pan, master, and Speed & Key. "
             "Save all tracks stays original speed/key."
         )
         save_col, mix_col = st.columns(2)
@@ -3781,11 +3879,24 @@ def _render_downloads_panel(
                             master_volume_db,
                             playback_rate=rate,
                             playback_semitones=semis,
+                            pans=pans,
                         )
                         ready = st.session_state.get("isolate_mix_ready")
                         if not ready or not Path(str(ready)).exists():
                             raise RuntimeError("mix export was not written")
                         _save_current_mix(str(ready), export_root, str(base_name), fmt)
+                        project_state = dict(
+                            st.session_state.get("isolate_mixer_state") or {}
+                        )
+                        project_state.update(
+                            {
+                                "playbackRate": rate,
+                                "playbackSemitones": semis,
+                            }
+                        )
+                        _persist_project_from_mixer(
+                            run_dir, project_state, force=True
+                        )
                 except Exception as exc:
                     st.session_state.pop("isolate_mix_ready", None)
                     st.session_state.pop("isolate_mix_fp", None)
@@ -4255,11 +4366,14 @@ def _render_listening_switcher(browser_id: str | None, rows: list[dict] | None =
             open_mix_shell(st.session_state)
             _rerun_scroll_top()
 
+    if "isolate_listen_name" not in st.session_state:
+        st.session_state["isolate_listen_name"] = (
+            st.session_state.get("isolate_base_name") or "tracks"
+        )
     cols = st.columns([4, 1], vertical_alignment="bottom")
     with cols[0]:
         st.text_input(
             label="Listening to",
-            value=st.session_state.get("isolate_base_name") or "tracks",
             key="isolate_listen_name",
             on_change=_rename_listen_run,
         )
@@ -4747,12 +4861,24 @@ def _render_mixer_workspace(browser_id: str | None) -> None:
     # may re-render at different times. If URL generation becomes expensive or stale,
     # wrap with @st.cache_resource and a TTL.
     mixer_media_urls, mixer_download_urls = register_mixer_media(stem_paths)
+    # Register the tab PDF during the full-page run. Fragment-scoped media can be
+    # garbage-collected on a later fragment rerun, breaking the link.
+    tab_pdf_url = None
+    tab_pdf_path = run_dir / "tab" / "transcription.pdf"
+    if tab_pdf_path.is_file():
+        try:
+            tab_pdf_url = media_url_for_file(
+                tab_pdf_path, coordinates=f"isolate.tab_pdf.{run_dir.name}"
+            )
+        except Exception:
+            tab_pdf_url = None
     _mixer_and_downloads_fragment(
         stem_paths,
         base_name=base_name,
         run_dir=run_dir,
         media_urls=mixer_media_urls,
         download_urls=mixer_download_urls,
+        tab_pdf_url=tab_pdf_url,
     )
 
     if pro and bass_bleed.get("flagged"):

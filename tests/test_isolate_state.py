@@ -2450,12 +2450,24 @@ def test_pending_audio_needs_resave():
 
 def test_stage_progress_percent_weighted():
     # Current stage counts only via ``intra`` (0 = just started, 1 = finished).
+    # Active weights total 1.09 on the full stage list.
     assert stage_progress_percent("ingest", intra=0.0) == pytest.approx(0.0)
-    assert stage_progress_percent("ingest", intra=1.0) == pytest.approx(0.05)
-    assert stage_progress_percent("separate", intra=0.0) == pytest.approx(0.05)
-    assert stage_progress_percent("separate", intra=1.0) == pytest.approx(0.85)
+    assert stage_progress_percent("ingest", intra=1.0) == pytest.approx(0.05 / 1.09)
+    assert stage_progress_percent("separate", intra=0.0) == pytest.approx(0.05 / 1.09)
+    assert stage_progress_percent("separate", intra=1.0) == pytest.approx(0.85 / 1.09)
     assert stage_progress_percent("done", intra=1.0) == pytest.approx(1.0)
     assert stage_progress_percent("unknown") == 0.0
+
+
+def test_stage_progress_percent_monotonic_across_stages():
+    stages = isolation_stages_for_job(expects_guitar=True)
+    points = [
+        stage_progress_percent(stage, stages=stages, intra=0.0) for stage in stages
+    ]
+    points.append(1.0)
+    assert points == sorted(points)
+    assert points[-2] < 1.0
+    assert points[-1] == pytest.approx(1.0)
 
 
 def test_stage_progress_first_mid_last_and_guitar_skipped():
@@ -2463,7 +2475,7 @@ def test_stage_progress_first_mid_last_and_guitar_skipped():
     assert stage_progress_percent("ingest", stages=full, intra=0.0) == pytest.approx(0.0)
 
     mid = stage_progress_percent("separate", stages=full, intra=0.0)
-    assert mid == pytest.approx(0.05)
+    assert mid == pytest.approx(0.05 / 1.09)
     assert 0.0 < mid < 1.0
 
     assert stage_progress_percent("done", stages=full, intra=1.0) == pytest.approx(1.0)
@@ -2471,14 +2483,31 @@ def test_stage_progress_first_mid_last_and_guitar_skipped():
     full = isolation_stages_for_job(expects_guitar=True)
     assert "guitar_split" not in full
     assert "bass_bleed" in full
+    assert "analysis" in full
+    assert "tab" in full
+    assert full.index("analysis") < full.index("tab") < full.index("done")
 
-    skipped = isolation_stages_for_job(expects_guitar=False)
+    skipped = isolation_stages_for_job(expects_guitar=False, analyse=False, tab=False)
     assert "guitar_split" not in skipped
     assert "bass_bleed" not in skipped
-    # Weights without bass_bleed: 0.05+0.80+0.05+0.03+0.02 = 0.95
+    assert "analysis" not in skipped
+    assert "tab" not in skipped
+    # Weights without bass_bleed/analysis/tab: 0.05+0.80+0.05+0.03+0.02 = 0.95
     assert stage_progress_percent("separate", stages=skipped, intra=0.0) == pytest.approx(
         0.05 / 0.95
     )
+
+
+def test_isolation_stages_can_omit_analysis_and_tab():
+    with_analysis = isolation_stages_for_job(expects_guitar=True)
+    without_analysis = isolation_stages_for_job(expects_guitar=True, analyse=False)
+    without_tab = isolation_stages_for_job(expects_guitar=True, tab=False)
+
+    assert "analysis" in with_analysis
+    assert "analysis" not in without_analysis
+    assert "tab" in without_analysis
+    assert "tab" not in without_tab
+    assert "analysis" in without_tab
 
 
 def test_checklist_first_mid_last_and_guitar_skipped():
@@ -2575,8 +2604,8 @@ def test_estimate_job_and_remaining_eta():
     assert none_conf == "low"
 
     stage_share = estimated_stage_seconds("separate", stages, 100.0)
-    # separate is 0.80 of active weights (no guitar_split stage).
-    assert stage_share == pytest.approx(80.0)
+    # separate is 0.80 of active weights (no guitar_split stage; 1.09 total with analysis/tab).
+    assert stage_share == pytest.approx(100.0 * 0.80 / 1.09)
 
     assert format_eta_line(9, None).endswith("estimating…")
     assert "~2:40 left" in format_eta_line(9, 160)
@@ -2618,6 +2647,8 @@ def test_running_progress_view_has_label_elapsed_eta_and_checklist():
     assert "Elapsed" in view["eta_line"]
     assert "[now]" in view["checklist_md"]
     assert "Prepare audio" in view["checklist_md"]
+    assert "Analyse song" in view["checklist_md"]
+    assert "Transcribe tab" in view["checklist_md"]
     assert view["hint"] == "Separating tracks. CPU may be slow"
     assert "Check guitar" not in view["checklist_md"]
     assert "Check which tracks have sound" not in view["checklist_md"]
@@ -3040,7 +3071,7 @@ def test_mixer_builds_current_mix_on_save_click():
     assert 'key="isolate_save_mix"' in panel
     assert "Alt+Tab" in panel
     assert "overwrites a same-named" in panel
-    assert "Save current mix includes mute, solo, levels, and Speed & Key" in panel
+    assert "Save current mix includes mute, solo, levels, pan, master, and Speed & Key" in panel
     assert "playback_rate" in panel
     assert "playback_semitones" in panel
     assert "apply_playback_transform" in source

@@ -246,7 +246,7 @@ def tempo_curve_from_onset(
         return np.zeros(0, dtype=np.float64)
     import librosa
 
-    raw = librosa.feature.rhythm.tempo(
+    raw = librosa.feature.tempo(
         onset_envelope=onset,
         sr=float(sr),
         hop_length=int(hop_length),

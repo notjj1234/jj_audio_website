@@ -222,6 +222,220 @@ def test_worker_runs_separate_stems_serially(jobs_dir: Path, monkeypatch):
     assert "vocals" in (status.get("artifacts") or {})
 
 
+def test_worker_runs_analysis_and_tab_for_guitar_job(jobs_dir: Path, monkeypatch):
+    """Analysis and tab land in the run with player-ready JSON, not just stems."""
+    import ui.isolate_jobs as jobs
+    from audio_to_tab.analysis import AnalysisResult, ChordEvent, Section
+    from audio_to_tab.tab_generate import TabDocument, TabEvent, TabNote
+
+    audio = jobs_dir / "song.wav"
+    audio.write_bytes(b"wav")
+    out = jobs_dir / "out"
+    out.mkdir()
+    guitar = out / "guitar.wav"
+    vocals = out / "vocals.wav"
+    harmony = out / "no_vocals.wav"
+    calls: dict[str, object] = {}
+
+    def fake_separate(*, audio_path, output_dir, config, on_progress, **kwargs):
+        on_progress("separate", "mock")
+        guitar.write_bytes(b"g")
+        vocals.write_bytes(b"v")
+        harmony.write_bytes(b"h")
+        return {"guitar": guitar, "vocals": vocals, "no_vocals": harmony}
+
+    def fake_analyze(audio_path, **kwargs):
+        calls["analysis_audio"] = Path(audio_path)
+        return AnalysisResult(
+            source_fingerprint=kwargs["source_fingerprint"],
+            duration_sec=kwargs["duration_sec"],
+            bpm=120.0,
+            bpm_confidence="high",
+            key="C major",
+            key_confidence="high",
+            beats=(0.0, 0.5, 1.0),
+            downbeats=(0.0,),
+            chords=(ChordEvent(0.0, 2.0, "C", 0.9),),
+            sections=(Section(0.0, 8.0, "Full song", 0.4),),
+            models={"chords": "mock"},
+        )
+
+    def fake_run_pipeline(*, audio_path, output_dir, config, on_progress=None, **kwargs):
+        calls["tab_audio"] = Path(audio_path)
+        calls["tab_config"] = config
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        midi = output_dir / "transcription.mid"
+        tab = output_dir / "transcription.tab"
+        pdf = output_dir / "transcription.pdf"
+        midi.write_bytes(b"midi")
+        tab.write_text("e|--3--|", encoding="utf-8")
+        pdf.write_bytes(b"pdf")
+        if on_progress:
+            on_progress("transcribe", "mock")
+        return {"midi": midi, "tab": tab, "pdf": pdf}
+
+    def fake_midi_to_tab(*args, **kwargs):
+        return TabDocument(
+            events=[
+                TabEvent(
+                    start=0.0,
+                    notes=[TabNote(start=0.0, end=0.5, string=0, fret=3, pitch=55)],
+                )
+            ],
+            tempo_bpm=120.0,
+        )
+
+    monkeypatch.setattr("audio_to_tab.isolate.separate_stems", fake_separate)
+    monkeypatch.setattr("audio_to_tab.analysis.analyze_audio", fake_analyze)
+    monkeypatch.setattr("audio_to_tab.pipeline.run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr("audio_to_tab.tab_generate.midi_to_tab", fake_midi_to_tab)
+    monkeypatch.setattr("ui.media.cleanup_mix_artifacts", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "audio_to_tab.hardware.ensure_cuda_available", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "audio_to_tab.hardware.get_desktop_probe", lambda: MagicMock()
+    )
+
+    spec = IsolateJobSpec(
+        id="analysis-run",
+        audio_path=str(audio),
+        output_dir=str(out),
+        title="Song",
+        created_at=time.time(),
+        audio_duration_sec=8.0,
+    )
+    jobs.enqueue_job(spec)
+    jobs._run_one_job(spec.id)
+
+    status = jobs.read_status(spec.id)
+    assert status["status"] == "succeeded", status
+    artifacts = status["artifacts"]
+    assert Path(artifacts["analysis"]).is_file()
+    assert Path(artifacts["analysis_diagnostics"]).is_file()
+    assert Path(artifacts["tab_json"]).is_file()
+    assert Path(artifacts["tab_pdf"]).is_file()
+    assert calls["analysis_audio"] == harmony
+    assert calls["tab_audio"] == guitar
+    assert calls["tab_config"].separate_stems is False
+    assert status["analysis_warning"] is None
+    assert status["analysis_error"] is None
+
+    from audio_to_tab.analysis import load_analysis
+
+    loaded = load_analysis(Path(artifacts["analysis"]))
+    assert loaded is not None and loaded.bpm == 120.0
+    payload = json.loads(Path(artifacts["tab_json"]).read_text(encoding="utf-8"))
+    assert payload["document"]["events"]
+    assert payload["measures"]
+    meta = json.loads((out / "meta.json").read_text(encoding="utf-8"))
+    assert meta["analysis"]["bpm"] == 120.0
+    assert "analysis" in meta["artifacts"]
+
+
+def test_worker_keeps_separation_when_analysis_fails(jobs_dir: Path, monkeypatch):
+    """A broken analysis stage is a warning; the stems still succeed."""
+    import ui.isolate_jobs as jobs
+
+    audio = jobs_dir / "song.wav"
+    audio.write_bytes(b"wav")
+    out = jobs_dir / "out"
+    out.mkdir()
+    vocals = out / "vocals.wav"
+    calls: list[str] = []
+
+    def fake_separate(*, audio_path, output_dir, config, on_progress, **kwargs):
+        on_progress("separate", "mock")
+        vocals.write_bytes(b"v")
+        return {"vocals": vocals}
+
+    def fake_analyze(*args, **kwargs):
+        calls.append("analysis")
+        raise RuntimeError("model exploded")
+
+    monkeypatch.setattr("audio_to_tab.isolate.separate_stems", fake_separate)
+    monkeypatch.setattr("audio_to_tab.analysis.analyze_audio", fake_analyze)
+    monkeypatch.setattr("ui.media.cleanup_mix_artifacts", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "audio_to_tab.hardware.ensure_cuda_available", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "audio_to_tab.hardware.get_desktop_probe", lambda: MagicMock()
+    )
+
+    spec = IsolateJobSpec(
+        id="analysis-fail",
+        audio_path=str(audio),
+        output_dir=str(out),
+        title="Song",
+        two_stems="vocals",
+        created_at=time.time(),
+        audio_duration_sec=8.0,
+    )
+    jobs.enqueue_job(spec)
+    jobs._run_one_job(spec.id)
+
+    status = jobs.read_status(spec.id)
+    assert status["status"] == "succeeded", status
+    assert calls == ["analysis"]
+    assert "analysis" not in (status.get("artifacts") or {})
+    assert Path(status["artifacts"]["analysis_diagnostics"]).is_file()
+    assert status["analysis_warning"].startswith("analysis failed:")
+    assert status["analysis_error"].startswith("analysis failed:")
+
+
+def test_re_separate_skips_analysis_and_tab(jobs_dir: Path, monkeypatch):
+    """A child re-separate must not clobber the parent's analysis artifacts."""
+    import ui.isolate_jobs as jobs
+
+    audio = jobs_dir / "other.wav"
+    audio.write_bytes(b"wav")
+    out = jobs_dir / "out"
+    out.mkdir()
+    guitar = out / "guitar.wav"
+    calls: list[str] = []
+
+    def fake_separate(*, audio_path, output_dir, config, on_progress, **kwargs):
+        on_progress("separate", "mock")
+        guitar.write_bytes(b"g")
+        return {"other::guitar": guitar}
+
+    def fail_analyze(*args, **kwargs):
+        calls.append("analysis")
+        raise AssertionError("analysis must not run for a re-separate child")
+
+    monkeypatch.setattr("audio_to_tab.isolate.separate_stems", fake_separate)
+    monkeypatch.setattr("audio_to_tab.analysis.analyze_audio", fail_analyze)
+    monkeypatch.setattr("ui.media.cleanup_mix_artifacts", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "audio_to_tab.hardware.ensure_cuda_available", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "audio_to_tab.hardware.get_desktop_probe", lambda: MagicMock()
+    )
+
+    spec = IsolateJobSpec(
+        id="resp-no-analysis",
+        audio_path=str(audio),
+        output_dir=str(out),
+        title="Other",
+        created_at=time.time(),
+        reseparate_from="other",
+        parent_run_dir=str(jobs_dir / "parent"),
+    )
+    jobs.enqueue_job(spec)
+    jobs._run_one_job(spec.id)
+
+    status = jobs.read_status(spec.id)
+    assert status["status"] == "succeeded", status
+    assert calls == []
+    assert "analysis" not in (status.get("artifacts") or {})
+    assert "analysis" not in status["stages"]
+    assert "tab" not in status["stages"]
+    assert not (out / "analysis.json").exists()
+
+
 def test_remove_job_deletes_queued_folder(jobs_dir: Path):
     spec = IsolateJobSpec(
         id="dropme",

@@ -29,6 +29,7 @@ eval/lead_rhythm/RESULTS.md
 ui/stem_mixer_component/frontend/node_modules/
 ui/mix_tabs_component/frontend/node_modules/
 ui/region_picker_component/frontend/node_modules/
+ui/home_component/frontend/node_modules/
 
 # Production SPA
 web/node_modules/

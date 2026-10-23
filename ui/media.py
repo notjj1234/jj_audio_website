@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import mimetypes
 import shutil
 import subprocess
 from pathlib import Path
@@ -33,6 +34,16 @@ def ensure_mixer_audio_paths(stem_paths: dict[str, Path]) -> dict[str, Path]:
     return dict(stem_paths)
 
 
+def media_mimetype_for_path(path: Path) -> str:
+    """Pick the MIME type Streamlit uses to build the media URL suffix."""
+    suffix = Path(path).suffix.lower()
+    if suffix == ".pdf":
+        return "application/pdf"
+    if suffix in {".wav", ".wave"}:
+        return "audio/wav"
+    return mimetypes.guess_type(Path(path).name)[0] or "application/octet-stream"
+
+
 def media_url_for_file(path: Path, *, coordinates: str) -> str:
     """
     Register a file with Streamlit's media manager and return a browser-fetchable URL.
@@ -46,7 +57,7 @@ def media_url_for_file(path: Path, *, coordinates: str) -> str:
         raise RuntimeError("Streamlit runtime is not available")
     return runtime.media_file_mgr.add(
         str(path.resolve()),
-        "audio/wav",
+        media_mimetype_for_path(path),
         coordinates,
         file_name=path.name,
     )

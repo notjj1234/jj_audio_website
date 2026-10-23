@@ -226,8 +226,12 @@ export function buildMetronomeAudioBuffer(
   }
 
   const buf = ctx.createBuffer(2, n, sr);
-  buf.copyToChannel(clicks, 0);
-  buf.copyToChannel(clicks.slice(), 1);
+  const left = new Float32Array(clicks.length);
+  left.set(clicks);
+  buf.copyToChannel(left, 0);
+  const right = new Float32Array(clicks.length);
+  right.set(clicks);
+  buf.copyToChannel(right, 1);
   return buf;
 }
 

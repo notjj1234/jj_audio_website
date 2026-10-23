@@ -49,6 +49,8 @@ ISOLATION_STAGE_ORDER = (
     "collect",
     "bass_bleed",
     "presence",
+    "analysis",
+    "tab",
     "done",
 )
 
@@ -59,6 +61,8 @@ STAGE_WEIGHTS: dict[str, float] = {
     "guitar_refine": 0.15,
     "bass_bleed": 0.05,
     "presence": 0.03,
+    "analysis": 0.03,
+    "tab": 0.06,
     "done": 0.02,
 }
 
@@ -70,6 +74,8 @@ STAGE_CHECKLIST_LABELS: dict[str, str] = {
     "guitar_refine": "Refine guitar",
     "bass_bleed": "Separate tracks",
     "presence": "Separate tracks",
+    "analysis": "Analyse song",
+    "tab": "Transcribe tab",
     "done": "Finish",
 }
 
@@ -3215,11 +3221,21 @@ def isolation_stages_for_job(
     *,
     expects_guitar: bool,
     guitar_refine: bool = False,
+    analyse: bool = True,
+    tab: bool = True,
 ) -> tuple[str, ...]:
-    """Stages that will actually run for this job."""
+    """Stages that will actually run for this job.
+
+    ``analyse``/``tab`` let the worker omit optional post-processing (for example, a
+    re-separate child that must not clobber its parent's analysis artifacts).
+    """
     stages = ISOLATION_STAGE_ORDER
     if not expects_guitar:
         stages = tuple(s for s in stages if s not in _GUITAR_ONLY_STAGES)
+    if not analyse:
+        stages = tuple(s for s in stages if s != "analysis")
+    if not tab:
+        stages = tuple(s for s in stages if s != "tab")
     if guitar_refine and expects_guitar:
         out: list[str] = []
         for stage in stages:

@@ -1,4 +1,4 @@
-.PHONY: install install-demucs install-roformer fixtures test eval eval-lead-rhythm eval-lead-rhythm-synth backend ui pipeline mixer-build help _check_python preflight tester desktop-bundle-ffmpeg desktop-build desktop-app desktop-pkg desktop-dmg
+.PHONY: install install-demucs install-roformer fixtures test eval eval-lead-rhythm eval-lead-rhythm-synth backend ui pipeline mixer-build home-build help _check_python preflight tester desktop-bundle-ffmpeg desktop-build desktop-app desktop-pkg desktop-dmg
 
 VENV := .venv311
 VENV_PYTHON := $(VENV)/bin/python
@@ -40,6 +40,7 @@ help:
 	@echo "  make web-build        - Production build of web/"
 	@echo "  make pipeline         - Example CLI (needs audio file)"
 	@echo "  make mixer-build      - Build Streamlit stem mixer frontend (Node 18+)"
+	@echo "  make home-build       - Build desktop Home frontend (Node 18+)"
 	@echo "  make desktop-bundle-ffmpeg - Download platform ffmpeg into packaging/ffmpeg/current"
 	@echo "  make desktop-build    - PyInstaller onedir (needs .venv-desktop + bundled ffmpeg)"
 	@echo "  make desktop-app      - Wrap dist/AudioTools into dist/AudioTools.app (macOS)"
@@ -68,7 +69,7 @@ install: _check_python
 	@if [ "$$(uname -s)" = "Linux" ]; then \
 		$(VENV_PYTHON) -m pip install --upgrade torch torchaudio --index-url https://download.pytorch.org/whl/cpu; \
 	fi
-	$(VENV_PYTHON) -m pip install -e ".[dev,eval,demucs,roformer,separator]"
+	$(VENV_PYTHON) -m pip install -e ".[dev,eval,demucs,roformer,separator,analysis]"
 	@echo "Done. Run: make ui   (or make tester / ./scripts/dev.sh tester)"
 
 install-demucs:
@@ -112,6 +113,9 @@ web-build:
 
 mixer-build:
 	cd ui/stem_mixer_component/frontend && npm install && npm run build
+
+home-build:
+	./scripts/dev.sh home-build
 
 region-picker-build:
 	cd ui/region_picker_component/frontend && npm install && npm run build

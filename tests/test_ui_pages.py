@@ -274,6 +274,33 @@ def test_mixer_export_fingerprint_is_deterministic_and_sensitive(isolate_page) -
         ["guitar", "bass"], {"guitar": 0.0, "bass": -6.0}, {}, {}, 0.0
     )
     assert f1 != louder
+    panned = isolate_page._mixer_export_fingerprint(
+        ["guitar", "bass"],
+        {"guitar": -3.0, "bass": -6.0},
+        {},
+        {},
+        0.0,
+        pans={"guitar": -40, "bass": 0},
+    )
+    assert panned != f1
+    # Pan on a muted stem cannot change the file, so it must not invalidate it.
+    muted_out = isolate_page._mixer_export_fingerprint(
+        ["guitar", "bass"],
+        {"guitar": -3.0, "bass": -6.0},
+        {"bass": True},
+        {},
+        0.0,
+        pans={"guitar": 0, "bass": -100},
+    )
+    muted_other = isolate_page._mixer_export_fingerprint(
+        ["guitar", "bass"],
+        {"guitar": -3.0, "bass": -6.0},
+        {"bass": True},
+        {},
+        0.0,
+        pans={"guitar": 0, "bass": 100},
+    )
+    assert muted_out == muted_other
 
 
 def test_speed_preset_labels_resolve(isolate_page) -> None:

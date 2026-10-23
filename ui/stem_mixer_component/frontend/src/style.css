@@ -1130,3 +1130,395 @@ body {
     grid-template-columns: auto minmax(0, 1fr) 2.75rem;
   }
 }
+/* --- Practice panel (chords / sections / lyrics / tab) --- */
+.mixer-practice-panel {
+  border: 1px solid var(--border, rgba(49, 51, 63, 0.18));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--secondary, #f0f2f6) 72%, transparent);
+  overflow: hidden;
+}
+
+.mixer-practice-panel > summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 0.8rem;
+  cursor: pointer;
+  font-weight: 650;
+  font-size: 0.92rem;
+  list-style: none;
+  user-select: none;
+}
+
+.mixer-practice-panel > summary::-webkit-details-marker {
+  display: none;
+}
+
+.mixer-practice-panel > summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 0.35rem;
+  transition: transform 120ms ease;
+}
+
+.mixer-practice-panel[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.practice-summary {
+  margin-left: auto;
+  font-weight: 500;
+  font-size: 0.78rem;
+  opacity: 0.72;
+  text-align: right;
+}
+
+.practice-panel-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.7rem;
+  padding: 0 0.8rem 0.55rem;
+  font-size: 0.82rem;
+}
+
+.practice-loop-toggle,
+.practice-countin {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.practice-countin select {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg, #fff);
+  border: 1px solid var(--border, rgba(49, 51, 63, 0.2));
+  border-radius: 6px;
+  padding: 0.18rem 0.3rem;
+}
+
+.practice-small {
+  font-size: 0.78rem !important;
+  padding: 0.22rem 0.5rem !important;
+}
+
+.practice-loop-status {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+
+.practice-panel-tabs {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0 0.8rem;
+  border-bottom: 1px solid var(--border, rgba(49, 51, 63, 0.14));
+}
+
+.practice-tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.35rem 0.55rem;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  opacity: 0.68;
+}
+
+.practice-tab.active {
+  opacity: 1;
+  border-bottom-color: var(--primary, #ff4b4b);
+}
+
+.practice-panel-body {
+  padding: 0.6rem 0.8rem 0.75rem;
+  max-height: 320px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.practice-empty,
+.practice-note {
+  margin: 0.2rem 0;
+  font-size: 0.84rem;
+  opacity: 0.72;
+}
+
+.practice-note {
+  font-size: 0.76rem;
+  padding-top: 0.35rem;
+}
+
+.chord-now {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 92px;
+  grid-template-areas:
+    "symbol diagram"
+    "meta diagram";
+  gap: 0.15rem 0.75rem;
+  align-items: center;
+  margin-bottom: 0.55rem;
+}
+
+.chord-now-symbol {
+  grid-area: symbol;
+  font-size: clamp(1.7rem, 5vw, 2.35rem);
+  font-weight: 750;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.chord-now-diagram {
+  grid-area: diagram;
+  width: 92px;
+  min-height: 100px;
+}
+
+.chord-diagram {
+  width: 92px;
+  height: 112px;
+  display: block;
+}
+
+.chord-string,
+.chord-fret {
+  stroke: var(--text);
+  stroke-width: 1;
+  opacity: 0.55;
+}
+
+.chord-fret {
+  opacity: 0.28;
+}
+
+.chord-nut {
+  fill: var(--text);
+  opacity: 0.75;
+}
+
+.chord-dot {
+  fill: var(--primary, #ff4b4b);
+}
+
+.chord-open {
+  fill: none;
+  stroke: var(--text);
+  stroke-width: 1.2;
+}
+
+.chord-mute,
+.chord-fret-label {
+  fill: var(--text);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.chord-no-shape {
+  display: grid;
+  place-items: center;
+  min-height: 100px;
+  font-weight: 700;
+  opacity: 0.55;
+}
+
+.chord-now-meta {
+  grid-area: meta;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.76rem;
+  opacity: 0.72;
+}
+
+.capo-label {
+  border: 1px solid var(--border, rgba(49, 51, 63, 0.2));
+  border-radius: 999px;
+  padding: 0.05rem 0.4rem;
+}
+
+.chord-strip {
+  display: flex;
+  gap: 0.3rem;
+  overflow-x: auto;
+  padding-bottom: 0.2rem;
+  scrollbar-width: thin;
+}
+
+.chord-chip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  border: 1px solid var(--border, rgba(49, 51, 63, 0.2));
+  border-radius: 7px;
+  background: var(--bg, #fff);
+  color: var(--text);
+  padding: 0.28rem 0.48rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+.chord-chip.active {
+  border-color: var(--primary, #ff4b4b);
+  box-shadow: inset 0 0 0 1px var(--primary, #ff4b4b);
+}
+
+.chord-chip-symbol {
+  font-weight: 700;
+  font-size: 0.86rem;
+}
+
+.chord-chip-time {
+  font-size: 0.7rem;
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
+}
+
+.section-list,
+.lyrics-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.section-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.4rem;
+  border-radius: 7px;
+  padding: 0.1rem 0.2rem;
+}
+
+.section-row.active,
+.section-row:hover {
+  background: color-mix(in srgb, var(--primary, #ff4b4b) 10%, transparent);
+}
+
+.section-seek {
+  display: grid;
+  grid-template-columns: 3.2rem minmax(0, 1fr);
+  gap: 0.5rem;
+  align-items: baseline;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  padding: 0.28rem 0.25rem;
+  cursor: pointer;
+}
+
+.section-time {
+  font-size: 0.72rem;
+  opacity: 0.62;
+  font-variant-numeric: tabular-nums;
+}
+
+.section-label {
+  font-weight: 600;
+  font-size: 0.84rem;
+}
+
+.lyric-line {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  text-align: left;
+  padding: 0.25rem 0.35rem;
+  border-radius: 6px;
+  opacity: 0.66;
+  cursor: pointer;
+}
+
+.lyric-line.active {
+  opacity: 1;
+  background: color-mix(in srgb, var(--primary, #ff4b4b) 12%, transparent);
+  font-weight: 600;
+}
+
+.lyric-word.active {
+  color: var(--primary, #ff4b4b);
+}
+
+.tab-measure-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.tab-measure-label {
+  font-size: 0.7rem;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.55;
+}
+
+.tab-measure {
+  margin: 0;
+  padding: 0.5rem 0.55rem;
+  border: 1px solid var(--border, rgba(49, 51, 63, 0.2));
+  border-radius: 7px;
+  background: var(--bg, #fff);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.tab-measure-next {
+  opacity: 0.62;
+}
+
+.tab-pdf-link {
+  display: inline-block;
+  margin-top: 0.5rem;
+  color: var(--primary, #ff4b4b);
+  font-size: 0.8rem;
+  font-weight: 650;
+  text-underline-offset: 3px;
+}
+
+.count-in-status {
+  align-self: flex-start;
+  margin-top: -0.35rem;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--primary, #ff4b4b) 14%, transparent);
+  color: var(--text);
+  font-size: 0.76rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 700px) {
+  .practice-summary {
+    display: none;
+  }
+
+  .practice-panel-body {
+    max-height: 280px;
+  }
+
+  .chord-now {
+    grid-template-columns: minmax(0, 1fr) 80px;
+  }
+
+  .chord-now-diagram,
+  .chord-diagram {
+    width: 80px;
+  }
+}

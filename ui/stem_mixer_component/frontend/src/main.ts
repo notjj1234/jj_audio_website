@@ -44,6 +44,18 @@ import {
   panToUnit,
   snapPanToCenter,
 } from "./pan";
+import {
+  chordAt,
+  chordShape,
+  clampLoop,
+  formatChordSymbol,
+  lyricLineAt,
+  measureAt,
+  sectionAt,
+  type AnalysisData,
+  type Section,
+  type TabData,
+} from "./analysis";
 
 const DB_MIN = -25;
 const DB_MAX = 25;
@@ -117,7 +129,6 @@ function startKeepAliveAudio(onPlay?: () => void): void {
     el.src = KEEP_ALIVE_SRC;
     el.loop = true;
     el.muted = true;
-    el.playsInline = true;
     el.setAttribute("playsinline", "true");
     el.preload = "auto";
     el.setAttribute("aria-hidden", "true");
@@ -173,6 +184,19 @@ class StemMixerEngine {
   private startedAt = 0;
   private offset = 0;
   private duration = 0;
+  private loopStart: number | null = null;
+  private loopEnd: number | null = null;
+  private countInBars = 0;
+  private countInBpm = 120;
+  private countInBeatsPerMeasure = 4;
+  private countInOptions: MetronomeOptions = coerceMetronomeOptions({
+    accent: true,
+    rate: 1,
+    sound: "classic",
+    follow: "smart",
+  });
+  private countInSource: AudioBufferSourceNode | null = null;
+  private countInUntil = 0;
   private lastGains: Record<string, number> = {};
   private lastPans: Record<string, number> = {};
   private onTimeUpdate: ((t: number, dur: number, playing: boolean) => void) | null =
@@ -234,11 +258,172 @@ class StemMixerEngine {
   currentTime(): number {
     if (!this.ctx) return this.offset;
     if (!this.playing) return this.offset;
+    // Count-in schedules sources in the future. Before that start line the
+    // transport must hold at the seek/loop point, not run backwards from it.
+    if (this.ctx.currentTime < this.startedAt) return this.offset;
     const rate = this.effectivePlaybackRate();
-    return Math.min(
-      this.duration,
-      this.offset + (this.ctx.currentTime - this.startedAt) * rate
+    const raw = this.offset + (this.ctx.currentTime - this.startedAt) * rate;
+    if (raw <= 0) return 0;
+    if (this.hasLoop()) {
+      const start = this.loopStart!;
+      const end = this.loopEnd!;
+      const span = end - start;
+      if (this.offset >= start && this.offset < end && raw >= end && span > 0) {
+        return start + ((raw - start) % span);
+      }
+    }
+    return Math.min(this.duration, raw);
+  }
+
+  hasLoop(): boolean {
+    return (
+      this.loopStart !== null &&
+      this.loopEnd !== null &&
+      this.loopEnd - this.loopStart >= 0.5
     );
+  }
+
+  getLoopRegion(): { start: number; end: number } | null {
+    return this.hasLoop()
+      ? { start: this.loopStart!, end: this.loopEnd! }
+      : null;
+  }
+
+  /**
+   * Set or clear the A/B loop. Invalid/short regions clear it instead of
+   * starting an accidental one-beat stutter. Active sources are updated live;
+   * the transport jumps to the loop start if it is currently outside.
+   */
+  setLoopRegion(start: number | null, end: number | null): void {
+    if (
+      start === null ||
+      end === null ||
+      !Number.isFinite(start) ||
+      !Number.isFinite(end) ||
+      this.duration <= 0
+    ) {
+      this.clearLoop();
+      return;
+    }
+    const s = Math.max(0, Math.min(this.duration, start));
+    const e = Math.max(0, Math.min(this.duration, end));
+    if (!(e - s >= 0.5)) {
+      this.clearLoop();
+      return;
+    }
+    this.loopStart = s;
+    this.loopEnd = e;
+    for (const src of this.sources.values()) {
+      try {
+        src.loop = true;
+        src.loopStart = s;
+        src.loopEnd = e;
+      } catch {
+        /* source already stopped */
+      }
+    }
+    if (this.playing && this.ctx) {
+      const now = this.currentTime();
+      if (now < s || now >= e) {
+        this.offset = s;
+        this.startedAt = this.ctx.currentTime;
+        void this.seek(s);
+      }
+    }
+  }
+
+  clearLoop(): void {
+    this.loopStart = null;
+    this.loopEnd = null;
+    for (const src of this.sources.values()) {
+      try {
+        src.loop = false;
+      } catch {
+        /* source already stopped */
+      }
+    }
+  }
+
+  setCountInBars(bars: number): void {
+    const n = Number(bars);
+    this.countInBars = Number.isFinite(n) ? Math.max(0, Math.min(2, Math.round(n))) : 0;
+  }
+
+  getCountInBars(): number {
+    return this.countInBars;
+  }
+
+  setCountInGrid(
+    bpm: number | null | undefined,
+    beatsPerMeasure: number | null | undefined,
+    options?: Partial<MetronomeOptions>
+  ): void {
+    const tempo = Number(bpm);
+    this.countInBpm = Number.isFinite(tempo) && tempo > 0 ? tempo : 120;
+    const beats = Number(beatsPerMeasure);
+    this.countInBeatsPerMeasure =
+      Number.isFinite(beats) && beats > 0 ? Math.max(1, Math.round(beats)) : 4;
+    if (options) this.countInOptions = coerceMetronomeOptions(options);
+  }
+
+  countInRemaining(): number {
+    if (!this.playing || !this.ctx || this.countInUntil <= 0) return 0;
+    return Math.max(0, this.countInUntil - this.ctx.currentTime);
+  }
+
+  private stopCountIn(): void {
+    this.countInUntil = 0;
+    const src = this.countInSource;
+    this.countInSource = null;
+    if (!src) return;
+    try {
+      src.onended = null;
+      src.stop();
+    } catch {
+      /* already stopped */
+    }
+    try {
+      src.disconnect();
+    } catch {
+      /* already disconnected */
+    }
+  }
+
+  /** Schedule one bar of clicks before the stems start; returns its duration. */
+  private startCountIn(): number {
+    this.stopCountIn();
+    if (!this.ctx || !this.masterGain || this.countInBars <= 0) return 0;
+    const beatSec = 60 / Math.max(30, this.countInBpm);
+    const totalBeats = this.countInBars * this.countInBeatsPerMeasure;
+    const durationSec = beatSec * totalBeats;
+    const times = Array.from({ length: totalBeats }, (_, i) => i * beatSec);
+    // A count-in is one click per beat. The metronome's subdivision choice
+    // applies after the song starts, not to the lead-in bar.
+    const options = coerceMetronomeOptions({
+      ...this.countInOptions,
+      rate: 1,
+      follow: "steady",
+    });
+    const config: MetronomeConfig = {
+      times1x: times,
+      steadyTimes1x: times,
+      refSec: 0,
+      beatsPerMeasure: this.countInBeatsPerMeasure,
+      durationSec: Math.max(0.05, durationSec),
+      options,
+    };
+    const buffer = buildMetronomeAudioBuffer(this.ctx, config, options);
+    const src = this.ctx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(this.masterGain);
+    const startAt = this.ctx.currentTime + 0.03;
+    src.start(startAt);
+    src.onended = () => {
+      if (this.countInSource === src) this.countInSource = null;
+    };
+    this.countInSource = src;
+    this.countInUntil = startAt + durationSec;
+    return durationSec;
   }
 
   getPracticeSettings(): PracticeSettings {
@@ -451,7 +636,6 @@ class StemMixerEngine {
     if (!this.streamDest || typeof document === "undefined") return;
     if (!this.outputEl) {
       const el = document.createElement("audio");
-      el.playsInline = true;
       el.setAttribute("playsinline", "true");
       el.preload = "auto";
       el.setAttribute("aria-hidden", "true");
@@ -619,6 +803,8 @@ class StemMixerEngine {
     this.playing = false;
     this.keepPlaying = false;
     this.duration = 0;
+    this.clearLoop();
+    this.stopCountIn();
     stopKeepAliveAudio();
 
     // Decode without starting playback. Create context but don't resume until Play —
@@ -761,6 +947,7 @@ class StemMixerEngine {
     if (preserveOffset && this.playing && this.ctx) {
       this.offset = this.currentTime();
     }
+    this.stopCountIn();
     for (const src of this.sources.values()) {
       try {
         src.onended = null;
@@ -779,13 +966,14 @@ class StemMixerEngine {
     cancelAnimationFrame(this.raf);
   }
 
-  private startSources(offset: number): void {
+  private startSources(offset: number, delaySec = 0): void {
     if (!this.ctx) return;
-    const startAt = this.ctx.currentTime + 0.03;
+    const startAt = this.ctx.currentTime + 0.03 + Math.max(0, delaySec);
     this.startedAt = startAt;
     this.offset = offset;
     this.playing = true;
     const rate = this.effectivePlaybackRate();
+    const looped = this.hasLoop();
 
     for (const id of this.stemIds) {
       const buf = this.buffers.get(id);
@@ -795,6 +983,11 @@ class StemMixerEngine {
       const src = this.ctx.createBufferSource();
       src.buffer = buf;
       src.playbackRate.value = rate;
+      if (looped) {
+        src.loop = true;
+        src.loopStart = this.loopStart!;
+        src.loopEnd = this.loopEnd!;
+      }
       src.connect(gain);
       src.start(startAt, offset);
       src.onended = () => {
@@ -821,7 +1014,11 @@ class StemMixerEngine {
       await this.stopSources(true);
     }
     if (this.offset >= this.duration) this.offset = 0;
-    this.startSources(this.offset);
+    if (this.hasLoop() && (this.offset < this.loopStart! || this.offset >= this.loopEnd!)) {
+      this.offset = this.loopStart!;
+    }
+    const countInSec = this.startCountIn();
+    this.startSources(this.offset, countInSec);
     await this.startStreamOutput();
   }
 
@@ -833,8 +1030,13 @@ class StemMixerEngine {
   }
 
   async seek(seconds: number): Promise<void> {
-    const t = Math.max(0, Math.min(this.duration, seconds));
     const wasPlaying = this.playing;
+    let t = Math.max(0, Math.min(this.duration, seconds));
+    if (wasPlaying && this.hasLoop() && (t < this.loopStart! || t >= this.loopEnd!)) {
+      // Native BufferSource looping only wraps once a source starts inside the
+      // region. Keep the transport and the audio on the same timeline.
+      t = this.loopStart!;
+    }
     await this.stopSources(false);
     this.offset = t;
     if (wasPlaying) {
@@ -858,7 +1060,7 @@ class StemMixerEngine {
 
   private tick = (): void => {
     const t = this.currentTime();
-    if (this.playing && t >= this.duration - 0.02) {
+    if (this.playing && !this.hasLoop() && t >= this.duration - 0.02) {
       this.keepPlaying = false;
       this.stopStreamOutput();
       void this.stopSources(false);
@@ -899,6 +1101,15 @@ let transportPending: "play" | "pause" | "stop" | null = null;
 
 let reportTimer: number | null = null;
 let lastPublished = "";
+let analysisData: AnalysisData | null = null;
+let tabData: TabData | null = null;
+type PracticePanelTab = "chords" | "sections" | "lyrics" | "tab";
+let practicePanelTab: PracticePanelTab = "chords";
+let lastPanelUpdateMs = 0;
+let countInBars = 0;
+/** Last parent-supplied loop/count-in, so a debounced save cannot undo local edits. */
+let lastPracticeLoopArg: string | null = null;
+let lastPracticeCountInArg: string | null = null;
 
 type PlaybackPresetId = "all" | "karaoke" | "acapella" | "drumsBass" | "custom";
 let activePreset: PlaybackPresetId = "all";
@@ -1866,6 +2077,8 @@ function statePayload(): string {
     masterVolumeDb: state.masterVolumeDb,
     playbackRate: practice.rate,
     playbackSemitones: practice.semitones,
+    loop: engine.getLoopRegion(),
+    countInBars: engine.getCountInBars(),
     metronomeOptions: metroConfig ? metroOptions : null,
     hideYoutubeVideo: hideYoutubeVideo,
     videoLayout,
@@ -1894,6 +2107,8 @@ function reportState(immediate = false): void {
       masterVolumeDb: state.masterVolumeDb,
       playbackRate: practice.rate,
       playbackSemitones: practice.semitones,
+      loop: engine.getLoopRegion(),
+      countInBars: engine.getCountInBars(),
     };
     if (metroConfig) {
       value.metronomeOptions = { ...metroOptions };
@@ -2245,6 +2460,524 @@ function bindStemWaveGestures(): void {
   });
 }
 
+function readableTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+  const total = Math.floor(seconds);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+function parseAnalysisArg(raw: unknown): AnalysisData | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  return raw as AnalysisData;
+}
+
+function parseTabArg(raw: unknown): TabData | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const tab = raw as TabData;
+  return Array.isArray(tab.measures) ? tab : null;
+}
+
+function availablePracticeTabs(): PracticePanelTab[] {
+  const tabs: PracticePanelTab[] = [];
+  if (analysisData?.chords?.length) tabs.push("chords");
+  if (analysisData?.sections?.length) tabs.push("sections");
+  if (analysisData?.lyrics?.length) tabs.push("lyrics");
+  if (tabData?.measures?.length) tabs.push("tab");
+  return tabs;
+}
+
+function activeSectionAt(t: number): Section | null {
+  return sectionAt(analysisData?.sections, t);
+}
+
+function seekPractice(t: number): void {
+  const target = Math.max(0, Number(t) || 0);
+  void engine.seek(target).then(() => {
+    nudgeYoutubeToAudio();
+    updatePracticePanelAt(engine.currentTime(), true);
+  });
+}
+
+function updatePracticeHeader(): void {
+  const summary = document.getElementById("practice-summary");
+  if (!summary) return;
+  const bpm = analysisData?.bpm;
+  const key = analysisData?.key;
+  const sections = analysisData?.sections?.length ?? 0;
+  const parts: string[] = [];
+  if (bpm) parts.push(`${Math.round(Number(bpm))} BPM`);
+  if (key) parts.push(String(key));
+  if (sections) parts.push(`${sections} section${sections === 1 ? "" : "s"}`);
+  summary.textContent = parts.join(" · ");
+}
+
+function chordDiagramSvg(symbol: string): string {
+  const shape = chordShape(symbol);
+  if (!shape) return `<div class="chord-no-shape">${escapeHtml(formatChordSymbol(symbol))}</div>`;
+  const width = 92;
+  const height = 112;
+  const left = 10;
+  const right = width - 10;
+  const top = 20;
+  const bottom = height - 12;
+  const stringGap = (right - left) / 5;
+  const fretGap = (bottom - top) / 4;
+  const parts: string[] = [];
+  parts.push(
+    `<svg class="chord-diagram" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(
+      formatChordSymbol(symbol)
+    )} chord diagram">`
+  );
+  if (shape.baseFret <= 1) {
+    parts.push(
+      `<rect x="${left - 2}" y="${top - 3}" width="${right - left + 4}" height="3" rx="1" class="chord-nut" />`
+    );
+  } else {
+    parts.push(
+      `<text x="${left - 5}" y="${top + fretGap * 0.7}" text-anchor="end" class="chord-fret-label">${shape.baseFret}</text>`
+    );
+  }
+  for (let i = 0; i < 6; i++) {
+    const x = left + i * stringGap;
+    parts.push(
+      `<line x1="${x}" y1="${top}" x2="${x}" y2="${bottom}" class="chord-string" />`
+    );
+  }
+  for (let f = 0; f <= 4; f++) {
+    const y = top + f * fretGap;
+    parts.push(
+      `<line x1="${left}" y1="${y}" x2="${right}" y2="${y}" class="chord-fret" />`
+    );
+  }
+  shape.frets.forEach((fret, i) => {
+    const x = left + i * stringGap;
+    if (fret === null) {
+      parts.push(
+        `<text x="${x}" y="${top - 6}" text-anchor="middle" class="chord-mute">×</text>`
+      );
+    } else if (fret === 0) {
+      parts.push(
+        `<circle cx="${x}" cy="${top - 6}" r="3" class="chord-open" />`
+      );
+    } else {
+      const relative = fret - shape.baseFret;
+      if (relative >= 0 && relative < 4) {
+        const y = top + relative * fretGap + fretGap / 2;
+        parts.push(
+          `<circle cx="${x}" cy="${y}" r="4.2" class="chord-dot" />`
+        );
+      }
+    }
+  });
+  parts.push(`</svg>`);
+  return parts.join("");
+}
+
+function renderPracticePanel(): void {
+  const body = document.getElementById("practice-body");
+  if (!body) return;
+  const tabs = availablePracticeTabs();
+  const buttons = document.querySelectorAll<HTMLButtonElement>(
+    "[data-practice-tab]"
+  );
+  buttons.forEach((button) => {
+    const tab = button.dataset.practiceTab as PracticePanelTab;
+    button.hidden = !tabs.includes(tab);
+    const active = tab === practicePanelTab && tabs.includes(tab);
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  if (tabs.length === 0) {
+    practicePanelTab = "chords";
+    body.innerHTML =
+      '<p class="practice-empty">No chords, sections, lyrics, or tab in this run. Re-run separation with analysis enabled.</p>';
+    updatePracticeHeader();
+    scheduleFrameHeight();
+    return;
+  }
+  if (!tabs.includes(practicePanelTab)) practicePanelTab = tabs[0]!;
+  const sections = analysisData?.sections ?? [];
+  const chords = analysisData?.chords ?? [];
+  const lyrics = analysisData?.lyrics ?? [];
+  const measures = tabData?.measures ?? [];
+
+  if (practicePanelTab === "chords") {
+    if (chords.length === 0) {
+      body.innerHTML =
+        '<p class="practice-empty">No chords found — re-run analysis.</p>';
+    } else {
+      const chips = chords
+        .map(
+          (chord, index) =>
+            `<button type="button" class="chord-chip" data-chord-index="${index}" data-seek="${chord.start}">` +
+            `<span class="chord-chip-symbol">${escapeHtml(formatChordSymbol(chord.symbol))}</span>` +
+            `<span class="chord-chip-time">${readableTime(chord.start)}</span>` +
+            `</button>`
+        )
+        .join("");
+      const draftChords = chords.every((chord) => !(Number(chord.confidence) > 0));
+      body.innerHTML =
+        '<div class="chord-now">' +
+        '<div class="chord-now-symbol" id="chord-now-symbol">—</div>' +
+        '<div class="chord-now-diagram" id="chord-now-diagram"></div>' +
+        '<div class="chord-now-meta"><span id="chord-now-section">—</span><span class="capo-label">No capo</span></div>' +
+        "</div>" +
+        `<div class="chord-strip" id="chord-strip">${chips}</div>` +
+        (draftChords
+          ? '<p class="practice-note">Draft chords — a starting point; verify by ear.</p>'
+          : "");
+    }
+  } else if (practicePanelTab === "sections") {
+    body.innerHTML = sections.length
+      ? `<div class="section-list">${sections
+          .map(
+            (section, index) =>
+              `<div class="section-row" data-section-index="${index}">` +
+              `<button type="button" class="section-seek" data-seek="${section.start}">` +
+              `<span class="section-time">${readableTime(section.start)}</span>` +
+              `<span class="section-label">${escapeHtml(section.label)}</span>` +
+              `</button>` +
+              `<button type="button" class="ghost practice-small section-loop" data-loop-index="${index}">Loop</button>` +
+              `</div>`
+          )
+          .join("")}</div>`
+      : '<p class="practice-empty">No sections found — re-run analysis.</p>';
+  } else if (practicePanelTab === "lyrics") {
+    body.innerHTML = lyrics.length
+      ? `<div class="lyrics-list">${lyrics
+          .map((line, index) => {
+            const separator = /[\u0e00-\u0e7f\u1000-\u109f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/.test(
+              line.text
+            )
+              ? ""
+              : " ";
+            const words = line.words?.length
+              ? line.words
+                  .map(
+                    (word) =>
+                      `<span class="lyric-word" data-word-start="${word.start}" data-word-end="${word.end}">${escapeHtml(
+                        word.text
+                      )}</span>`
+                  )
+                  .join(separator)
+              : escapeHtml(line.text);
+            return `<button type="button" class="lyric-line" data-line-index="${index}" data-seek="${line.start}">${words}</button>`;
+          })
+          .join("")}</div>`
+      : '<p class="practice-empty">No lyrics found (instrumental, or the lyrics model is unavailable).</p>';
+  } else {
+    body.innerHTML = measures.length
+      ? `<div class="tab-measure-wrap"><div class="tab-measure-label" id="tab-measure-label">Measure</div>` +
+        `<pre class="tab-measure" id="tab-measure-now"></pre>` +
+        `<div class="tab-measure-label">Next</div><pre class="tab-measure tab-measure-next" id="tab-measure-next"></pre></div>` +
+        (tabData && (tabData as { pdfUrl?: string }).pdfUrl
+          ? `<a class="tab-pdf-link" href="${escapeHtml(
+              (tabData as { pdfUrl?: string }).pdfUrl!
+            )}" target="_blank" rel="noopener">Open tab PDF</a>`
+          : "")
+      : '<p class="practice-empty">No tab for this run. Re-run with guitar separation.</p>';
+  }
+
+  body.querySelectorAll<HTMLElement>("[data-seek]").forEach((el) => {
+    el.onclick = () => seekPractice(Number(el.dataset.seek));
+  });
+  body.querySelectorAll<HTMLElement>("[data-word-start]").forEach((el) => {
+    el.onclick = (event) => {
+      // The line button also seeks. A word click is more precise.
+      event.stopPropagation();
+      seekPractice(Number(el.dataset.wordStart));
+    };
+  });
+  body.querySelectorAll<HTMLElement>("[data-loop-index]").forEach((el) => {
+    el.onclick = () => {
+      const section = sections[Number(el.dataset.loopIndex)];
+      if (section) setLoopFromSection(section);
+    };
+  });
+  updatePracticeHeader();
+  updatePracticePanelAt(engine.currentTime(), true);
+  scheduleFrameHeight();
+}
+
+function setPracticeTab(tab: PracticePanelTab): void {
+  if (!availablePracticeTabs().includes(tab)) return;
+  practicePanelTab = tab;
+  renderPracticePanel();
+}
+
+function setLoopFromSection(section: Section): void {
+  const region = clampLoop(section.start, section.end, engine.getDuration());
+  if (!region) {
+    const toggle = document.getElementById("loop-toggle") as HTMLInputElement | null;
+    if (toggle) toggle.checked = engine.hasLoop();
+    showLoopStatus("That section is too short to loop.");
+    return;
+  }
+  engine.setLoopRegion(region.start, region.end);
+  const toggle = document.getElementById("loop-toggle") as HTMLInputElement | null;
+  if (toggle) toggle.checked = true;
+  showLoopStatus();
+  reportState(true);
+}
+
+function setLoopFromCurrentSection(): void {
+  const section = activeSectionAt(engine.currentTime());
+  if (section) {
+    setLoopFromSection(section);
+    return;
+  }
+  const t = engine.currentTime();
+  const end = Math.min(engine.getDuration(), t + 8);
+  const region = clampLoop(t, end, engine.getDuration());
+  if (region) {
+    engine.setLoopRegion(region.start, region.end);
+    const toggle = document.getElementById("loop-toggle") as HTMLInputElement | null;
+    if (toggle) toggle.checked = true;
+    showLoopStatus();
+    reportState(true);
+  } else {
+    const toggle = document.getElementById("loop-toggle") as HTMLInputElement | null;
+    if (toggle) toggle.checked = engine.hasLoop();
+    showLoopStatus("Play a little first, then set a loop.");
+  }
+}
+
+function clearLoop(): void {
+  engine.clearLoop();
+  const toggle = document.getElementById("loop-toggle") as HTMLInputElement | null;
+  if (toggle) toggle.checked = false;
+  showLoopStatus("Loop off");
+  reportState(true);
+}
+
+function showLoopStatus(message?: string): void {
+  const el = document.getElementById("loop-status");
+  if (!el) return;
+  const region = engine.getLoopRegion();
+  if (message) {
+    el.textContent = message;
+  } else if (region) {
+    el.textContent = `Loop ${readableTime(region.start)}–${readableTime(region.end)}`;
+  } else {
+    el.textContent = "Loop off";
+  }
+}
+
+function setCountInBars(bars: number): void {
+  countInBars = Math.max(0, Math.min(2, Math.round(Number(bars) || 0)));
+  engine.setCountInBars(countInBars);
+  const select = document.getElementById("count-in-bars") as HTMLSelectElement | null;
+  if (select) select.value = String(countInBars);
+  reportState(true);
+}
+
+function syncCountInControl(): void {
+  const select = document.getElementById("count-in-bars") as HTMLSelectElement | null;
+  if (select) select.value = String(countInBars);
+}
+
+function updatePracticePanelAt(t: number, force = false): void {
+  const now = performance.now();
+  if (!force && now - lastPanelUpdateMs < 96) return;
+  lastPanelUpdateMs = now;
+
+  const countEl = document.getElementById("count-in-status");
+  if (countEl) {
+    const remaining = engine.countInRemaining();
+    if (remaining > 0.02) {
+      countEl.hidden = false;
+      const bpm = Number(analysisData?.bpm) || 120;
+      // The click buffer starts ~30 ms after now; subtract that lead so the
+      // first tick reads the bar's beat count, not one extra.
+      const beats = Math.ceil(remaining / (60 / bpm) - 0.05);
+      countEl.textContent = `Count-in… ${Math.max(1, beats)}`;
+    } else {
+      countEl.hidden = true;
+      countEl.textContent = "";
+    }
+  }
+
+  if (practicePanelTab === "chords") {
+    const chord = chordAt(analysisData?.chords, t);
+    const symbol = chord ? formatChordSymbol(chord.symbol) : "—";
+    const symbolEl = document.getElementById("chord-now-symbol");
+    const diagramEl = document.getElementById("chord-now-diagram");
+    const sectionEl = document.getElementById("chord-now-section");
+    if (symbolEl) symbolEl.textContent = symbol;
+    if (diagramEl && chord) {
+      const nextSymbol = chord.symbol;
+      if (diagramEl.dataset.symbol !== nextSymbol) {
+        diagramEl.dataset.symbol = nextSymbol;
+        diagramEl.innerHTML = chordDiagramSvg(nextSymbol);
+      }
+    } else if (diagramEl) {
+      diagramEl.innerHTML = "";
+      diagramEl.dataset.symbol = "";
+    }
+    if (sectionEl) {
+      sectionEl.textContent = activeSectionAt(t)?.label ?? "—";
+    }
+    document.querySelectorAll<HTMLElement>(".chord-chip").forEach((chip) => {
+      const chordIndex = Number(chip.dataset.chordIndex);
+      const event = analysisData?.chords?.[chordIndex];
+      chip.classList.toggle(
+        "active",
+        !!event && t >= event.start && t < event.end
+      );
+    });
+  } else if (practicePanelTab === "sections") {
+    const current = activeSectionAt(t);
+    const currentIndex = current
+      ? (analysisData?.sections ?? []).indexOf(current)
+      : -1;
+    document.querySelectorAll<HTMLElement>(".section-row").forEach((row) => {
+      row.classList.toggle(
+        "active",
+        Number(row.dataset.sectionIndex) === currentIndex
+      );
+    });
+  } else if (practicePanelTab === "lyrics") {
+    const line = lyricLineAt(analysisData?.lyrics, t);
+    document.querySelectorAll<HTMLElement>(".lyric-line").forEach((el) => {
+      el.classList.toggle("active", el === lineElementFor(line));
+    });
+    document.querySelectorAll<HTMLElement>(".lyric-word").forEach((word) => {
+      const start = Number(word.dataset.wordStart);
+      const end = Number(word.dataset.wordEnd);
+      word.classList.toggle("active", t >= start && t < end);
+    });
+  } else if (practicePanelTab === "tab") {
+    const measure = measureAt(tabData?.measures, t);
+    const activeIndex = measure
+      ? tabData!.measures!.indexOf(measure)
+      : -1;
+    const nowEl = document.getElementById("tab-measure-now");
+    const nextEl = document.getElementById("tab-measure-next");
+    const labelEl = document.getElementById("tab-measure-label");
+    if (nowEl) nowEl.textContent = measure?.text ?? "";
+    if (nextEl) {
+      nextEl.textContent =
+        activeIndex >= 0 ? tabData!.measures![activeIndex + 1]?.text ?? "" : "";
+    }
+    if (labelEl) {
+      labelEl.textContent =
+        activeIndex >= 0 ? `Measure ${activeIndex + 1}` : "Measure";
+    }
+  }
+}
+
+function lineElementFor(line: unknown): HTMLElement | null {
+  if (!line) return null;
+  const index = analysisData?.lyrics?.indexOf(line as never) ?? -1;
+  if (index < 0) return null;
+  return document.querySelector<HTMLElement>(
+    `.lyric-line[data-line-index="${index}"]`
+  );
+}
+
+function bindPracticePanel(): void {
+  document.querySelectorAll<HTMLButtonElement>("[data-practice-tab]").forEach((button) => {
+    button.onclick = () =>
+      setPracticeTab(button.dataset.practiceTab as PracticePanelTab);
+  });
+  const loopToggle = document.getElementById("loop-toggle") as HTMLInputElement | null;
+  if (loopToggle) {
+    loopToggle.onchange = () => {
+      if (loopToggle.checked) {
+        setLoopFromCurrentSection();
+      } else {
+        clearLoop();
+      }
+    };
+  }
+  const loopSection = document.getElementById("btn-loop-section");
+  if (loopSection) loopSection.onclick = () => setLoopFromCurrentSection();
+  const loopClear = document.getElementById("btn-loop-clear");
+  if (loopClear) loopClear.onclick = () => clearLoop();
+  const countIn = document.getElementById("count-in-bars") as HTMLSelectElement | null;
+  if (countIn) {
+    countIn.onchange = () => setCountInBars(Number(countIn.value));
+    syncCountInControl();
+  }
+  showLoopStatus();
+}
+
+function applyPracticeArgs(args: {
+  analysis?: unknown;
+  tab?: unknown;
+  initialLoop?: { start?: number; end?: number } | null;
+  countInBars?: number;
+}): void {
+  const nextAnalysis = parseAnalysisArg(args.analysis);
+  const nextTab = parseTabArg(args.tab);
+  const dataChanged =
+    JSON.stringify(nextAnalysis) !== JSON.stringify(analysisData) ||
+    JSON.stringify(nextTab) !== JSON.stringify(tabData);
+  analysisData = nextAnalysis;
+  tabData = nextTab;
+  if (nextAnalysis) {
+    engine.setCountInGrid(
+      nextAnalysis.bpm,
+      nextAnalysis.beats_per_measure,
+      metroOptions
+    );
+  }
+  // Apply restored practice args only when the parent's value changed. A
+  // debounced project save can still carry the previous value on the rerun
+  // that follows a local edit; reapplying it would silently undo the edit.
+  const countInArg = Number(args.countInBars);
+  const countInKey = JSON.stringify(Number.isFinite(countInArg) ? countInArg : null);
+  if (countInKey !== lastPracticeCountInArg) {
+    lastPracticeCountInArg = countInKey;
+    const initialCountIn = Number(args.countInBars);
+    if (Number.isFinite(initialCountIn)) {
+      countInBars = Math.max(0, Math.min(2, Math.round(initialCountIn)));
+    }
+    engine.setCountInBars(countInBars);
+    syncCountInControl();
+  }
+  const loop = args.initialLoop;
+  const loopKey = JSON.stringify(loop ?? null);
+  if (loopKey !== lastPracticeLoopArg && engine.getDuration() > 0) {
+    lastPracticeLoopArg = loopKey;
+    if (loop && Number.isFinite(Number(loop.start)) && Number.isFinite(Number(loop.end))) {
+      const region = clampLoop(Number(loop.start), Number(loop.end), engine.getDuration());
+      if (region) engine.setLoopRegion(region.start, region.end);
+    } else {
+      engine.clearLoop();
+    }
+  }
+  const toggle = document.getElementById("loop-toggle") as HTMLInputElement | null;
+  if (toggle) toggle.checked = Boolean(engine.getLoopRegion());
+  showLoopStatus();
+  if (dataChanged) renderPracticePanel();
+  if (tabData && (tabData as { pdfUrl?: string }).pdfUrl) {
+    // The PDF link is rendered by renderPracticePanel; no extra wiring needed.
+  }
+}
+
+async function applyInitialPractice(args: {
+  initialRate?: number;
+  initialSemitones?: number;
+}): Promise<void> {
+  const current = engine.getPracticeSettings();
+  const rate = clampPracticeRate(Number(args.initialRate ?? current.rate));
+  const semitones = clampPracticeSemitones(
+    Number(args.initialSemitones ?? current.semitones)
+  );
+  if (rate !== current.rate) {
+    const result = await engine.setPracticeRate(rate);
+    if (!result.ok && result.message) showPracticeStatus(result.message);
+  }
+  if (semitones !== engine.getPracticeSettings().semitones) {
+    const result = await engine.setPracticeSemitones(semitones);
+    if (!result.ok && result.message) showPracticeStatus(result.message);
+  }
+  const settings = engine.getPracticeSettings();
+  syncPracticeChrome(settings);
+  savePracticeSettings(settings);
+}
+
 function renderUI(theme?: Theme): void {
   const root = document.getElementById("root");
   if (!root) return;
@@ -2303,8 +3036,8 @@ function renderUI(theme?: Theme): void {
           </div>
           <button type="button" class="ghost practice-reset" id="btn-practice-reset">Reset</button>
           <p class="practice-export-note">
-            Save current mix includes Speed &amp; Key. Save all tracks stays original speed/key.
-            Pan is for listening here; saved files keep every track centered.
+            Save current mix includes Speed, Key, pan, mute/solo, and master.
+            Save all tracks stays original speed/key.
           </p>
           <p class="practice-status" id="practice-status" hidden></p>
         </div>
@@ -2321,6 +3054,39 @@ function renderUI(theme?: Theme): void {
         <button type="button" class="ghost" id="btn-clearsolo" hidden>Clear solo</button>
         <button type="button" class="ghost" id="btn-show-video" hidden>Show video</button>
       </div>
+      <details class="mixer-practice-panel" id="practice-panel" open>
+        <summary>
+          <span>Practice</span>
+          <span class="practice-summary" id="practice-summary"></span>
+        </summary>
+        <div class="practice-panel-toolbar">
+          <label class="practice-loop-toggle">
+            <input type="checkbox" id="loop-toggle" />
+            <span>Loop</span>
+          </label>
+          <button type="button" class="ghost practice-small" id="btn-loop-section">Loop current section</button>
+          <button type="button" class="ghost practice-small" id="btn-loop-clear">Clear loop</button>
+          <label class="practice-countin">
+            <span>Count-in</span>
+            <select id="count-in-bars">
+              <option value="0">Off</option>
+              <option value="1">1 bar</option>
+              <option value="2">2 bars</option>
+            </select>
+          </label>
+          <span class="practice-loop-status" id="loop-status" aria-live="polite"></span>
+        </div>
+        <div class="practice-panel-tabs" role="tablist" aria-label="Practice view">
+          <button type="button" class="practice-tab active" data-practice-tab="chords" role="tab" aria-selected="true">Chords</button>
+          <button type="button" class="practice-tab" data-practice-tab="sections" role="tab" aria-selected="false">Sections</button>
+          <button type="button" class="practice-tab" data-practice-tab="lyrics" role="tab" aria-selected="false">Lyrics</button>
+          <button type="button" class="practice-tab" data-practice-tab="tab" role="tab" aria-selected="false">Tab</button>
+        </div>
+        <div class="practice-panel-body" id="practice-body">
+          <p class="practice-empty">No analysis yet. Re-run separation to analyse this song.</p>
+        </div>
+      </details>
+      <div class="count-in-status" id="count-in-status" aria-live="polite" hidden></div>
       <div class="mixer-stage">
         <div class="mixer-video-wrap" id="mixer-video-wrap" hidden>
           <div class="mixer-video-toolbar">
@@ -2678,6 +3444,7 @@ function renderUI(theme?: Theme): void {
       syncRangeFill(seekEl);
     }
     updatePlayheads(t, dur);
+    updatePracticePanelAt(t);
     if (!hideYoutubeVideo && (ytPlayer || localVideoEl)) {
       syncPictureToStems(playing);
     }
@@ -2698,6 +3465,8 @@ function renderUI(theme?: Theme): void {
 
   updateTrackTitleDisplay();
   applyVideoLayout();
+  bindPracticePanel();
+  renderPracticePanel();
   bindLayoutResizeObserver();
   mountPicture();
   scheduleFrameHeight();
@@ -3119,7 +3888,7 @@ function cssAttr(value: string): string {
 }
 
 function setLoadProgress(loaded: number, total: number, message: string): void {
-  const el = status();
+  const el = document.getElementById("status");
   if (el) el.textContent = message || `${loaded}/${total}`;
   const track = document.getElementById("mixer-load");
   const bar = document.getElementById("mixer-load-bar");
@@ -3130,7 +3899,7 @@ function setLoadProgress(loaded: number, total: number, message: string): void {
 }
 
 function finishLoadProgress(message: string): void {
-  const el = status();
+  const el = document.getElementById("status");
   if (el) el.textContent = message;
   const track = document.getElementById("mixer-load");
   const bar = document.getElementById("mixer-load-bar");
@@ -3239,6 +4008,11 @@ function bindMetronomeOptionControls(): void {
   if (!metroConfig) return;
   const apply = (next: Partial<MetronomeOptions>) => {
     metroOptions = coerceMetronomeOptions({ ...metroOptions, ...next });
+    engine.setCountInGrid(
+      analysisData?.bpm,
+      analysisData?.beats_per_measure,
+      metroOptions
+    );
     applyLiveMetronomeBuffer();
     applyStateGains();
     reportState(true);
@@ -3361,11 +4135,12 @@ function parseMetronomeArg(raw: unknown): MetronomeConfig | null {
     ? steadyRaw.map((t) => Number(t)).filter((t) => Number.isFinite(t))
     : [];
   const options = coerceMetronomeOptions(
-    (obj.options as Partial<MetronomeOptions> | undefined) ?? {
-      accent: obj.accent as boolean | undefined,
-      rate: obj.rate as number | undefined,
-      sound: obj.sound as string | undefined,
-    }
+    (obj.options ??
+      {
+        accent: obj.accent as boolean | undefined,
+        rate: obj.rate as number | undefined,
+        sound: obj.sound as MetronomeSoundId | undefined,
+      }) as Partial<MetronomeOptions>
   );
   return {
     times1x,
@@ -3412,6 +4187,12 @@ async function onRender(event: Event): Promise<void> {
     hideYoutubeVideo?: boolean;
     localVideoUrl?: string;
     videoOffsetSec?: number;
+    analysis?: unknown;
+    tab?: unknown;
+    initialLoop?: { start?: number; end?: number } | null;
+    countInBars?: number;
+    initialRate?: number;
+    initialSemitones?: number;
   };
 
   const stems = args.stems ?? [];
@@ -3432,6 +4213,7 @@ async function onRender(event: Event): Promise<void> {
       args.localVideoUrl ?? "",
       Number(args.videoOffsetSec) || 0
     );
+    applyPracticeArgs(args);
     scheduleFrameHeight();
     return;
   }
@@ -3448,6 +4230,8 @@ async function onRender(event: Event): Promise<void> {
     /* ignore */
   }
   lastStemKey = key;
+  lastPracticeLoopArg = null;
+  lastPracticeCountInArg = null;
   collapsedGroups.clear();
   wantPlaying = false;
   transportBusy = false;
@@ -3484,6 +4268,8 @@ async function onRender(event: Event): Promise<void> {
   localVideoUrl = "";
   localVideoFailedUrl = "";
   hideYoutubeVideo = true;
+  analysisData = parseAnalysisArg(args.analysis);
+  tabData = parseTabArg(args.tab);
   renderUI(data.theme);
   applyYoutubeArgs(
     String(args.youtubeVideoId ?? ""),
@@ -3527,6 +4313,8 @@ async function onRender(event: Event): Promise<void> {
   );
   applyStateGains();
   restoreTransport();
+  await applyInitialPractice(args);
+  applyPracticeArgs(args);
 
   scheduleFrameHeight();
 }
@@ -3534,6 +4322,23 @@ async function onRender(event: Event): Promise<void> {
 Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
 Streamlit.setComponentReady();
 scheduleFrameHeight();
+
+window.addEventListener("keydown", (e) => {
+  if (e.repeat || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  if (isTypingTarget(e.target)) return;
+  const key = e.key.toLowerCase();
+  if (key === "l") {
+    e.preventDefault();
+    const toggle = document.getElementById("loop-toggle") as HTMLInputElement | null;
+    if (toggle) {
+      toggle.checked = !toggle.checked;
+      toggle.dispatchEvent(new Event("change"));
+    }
+  } else if (key === "c") {
+    e.preventDefault();
+    setCountInBars((countInBars + 1) % 3);
+  }
+});
 
 window.addEventListener("keydown", (e) => {
   if (e.code !== "Space" && e.key !== " ") return;

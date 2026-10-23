@@ -109,6 +109,7 @@ def write_run_metadata(
     source_fingerprint: str | None = None,
     config: dict | None = None,
     metronome: dict | None = None,
+    analysis: dict | None = None,
 ) -> None:
     """
     Persist small metadata alongside a run's artifacts so it can be listed as "Recent".
@@ -119,6 +120,8 @@ def write_run_metadata(
     run can default its settings from the parent run even after an app restart.
     When ``config`` is None the key is omitted entirely.
     ``metronome`` (optional) stores bpm/confidence for the click-track stem.
+    ``analysis`` (optional) stores a compact summary (bpm/key/counts), never the
+    full chord/lyric arrays; the arrays live in the referenced ``analysis`` artifact.
     """
     meta = {
         "page": page,
@@ -136,6 +139,8 @@ def write_run_metadata(
         meta["config"] = config
     if metronome is not None:
         meta["metronome"] = metronome
+    if analysis is not None:
+        meta["analysis"] = analysis
     Path(run_dir).mkdir(parents=True, exist_ok=True)
     (Path(run_dir) / _META_FILENAME).write_text(json.dumps(meta), encoding="utf-8")
 

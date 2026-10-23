@@ -939,6 +939,10 @@ else:
 load_theme_state(st.session_state)
 theme_css = build_theme_css_vars(st.session_state)
 st.html(f"<style>{theme_css}</style>")
+from ui.design_tokens import home_flag_css, ui_v2_enabled
+
+if ui_v2_enabled():
+    st.html("<style>" + home_flag_css() + "</style>")
 
 _ui_state_path = DATA_DIR / ISOLATE_UI_STATE_FILENAME
 

@@ -116,7 +116,7 @@ install_tester_deps() {
   "$py" -m venv "$VENV"
   "${VENV}/bin/python" -m pip install -U pip
   install_torch_cpu_if_needed "${VENV}/bin/python"
-  "${VENV}/bin/python" -m pip install -e ".[demucs,roformer,separator]"
+  "${VENV}/bin/python" -m pip install -e ".[demucs,roformer,separator,analysis]"
   echo "Done. Run: ./scripts/dev.sh ui   (or ./scripts/dev.sh tester)"
 }
 
@@ -157,6 +157,7 @@ Targets:
   ./scripts/dev.sh mixer-build      Build live stem mixer frontend (Node 18+)
   ./scripts/dev.sh region-picker-build  Build waveform region picker frontend (Node 18+)
   ./scripts/dev.sh mix-tabs-build       Build Moises-style mix tab strip (Node 18+)
+  ./scripts/dev.sh home-build           Build desktop Home frontend (Node 18+)
 EOF
     ;;
   preflight)
@@ -183,13 +184,17 @@ EOF
     (cd ui/mix_tabs_component/frontend && npm install && npm run build)
     echo "Mix tabs frontend built."
     ;;
+  home-build)
+    (cd ui/home_component/frontend && npm install && npm run build)
+    echo "Home frontend built."
+    ;;
   install)
     PY="$(host_python)"
     echo "Creating ${VENV} with ${PY}..."
     "$PY" -m venv "$VENV"
     "${VENV}/bin/python" -m pip install -U pip
     install_torch_cpu_if_needed "${VENV}/bin/python"
-    "${VENV}/bin/python" -m pip install -e ".[dev,eval,demucs,roformer,separator]"
+    "${VENV}/bin/python" -m pip install -e ".[dev,eval,demucs,roformer,separator,analysis]"
     echo "Done. Run: ./scripts/dev.sh ui   (or ./scripts/dev.sh tester)"
     ;;
   install-demucs)

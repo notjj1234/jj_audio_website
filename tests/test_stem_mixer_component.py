@@ -847,15 +847,41 @@ def test_mixer_pan_slider_is_live_reported_on_release_and_centers():
     assert "state.pan[stem.id] = PAN_DEFAULT;" in main
 
 
-def test_mixer_pan_is_listening_only_and_the_ui_says_so():
+def test_mixer_pan_reaches_the_saved_mix():
     main = _mixer_main_ts()
-    assert "Pan is for listening here; saved files keep every track centered." in main
-    # Saving is untouched: no pan argument reaches the Python mix.
+    # Phase 1: saved mixes match playback, so the old listening-only note is gone.
+    assert "saved files keep every track centered" not in main
     page = (Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py").read_text(
         encoding="utf-8"
     )
     build = page[page.find("def _build_current_mix") : page.find("def _metronome_payload_for_mixer")]
-    assert "pan" not in build.lower()
+    assert "pans=pans" in build
+    assert "pans={n: clamp_pan((pans or {}).get(n)) for n in stem_names}" in build
+    assert "pans=pans" in page[page.find("def _render_downloads_panel") :]
+
+
+def test_mixer_count_in_holds_the_transport_at_the_loop_start():
+    main = _mixer_main_ts()
+    assert "if (this.ctx.currentTime < this.startedAt) return this.offset;" in main
+    assert "Math.ceil(remaining / (60 / bpm) - 0.05)" in main
+
+
+def test_mixer_labels_template_chords_as_a_draft():
+    main = _mixer_main_ts()
+    assert "Draft chords — a starting point; verify by ear." in main
+    assert "chords.every((chord) => !(Number(chord.confidence) > 0))" in main
+    css = _mixer_src("style.css")
+    assert ".practice-note {" in css
+
+
+def test_mixer_practice_restore_cannot_undo_a_local_loop_or_count_in_edit():
+    main = _mixer_main_ts()
+    assert "lastPracticeLoopArg" in main
+    assert "loopKey !== lastPracticeLoopArg && engine.getDuration() > 0" in main
+    assert "lastPracticeCountInArg" in main
+    assert "countInKey !== lastPracticeCountInArg" in main
+    # A new run resets the markers so its restored state is applied.
+    assert "lastPracticeLoopArg = null;\n  lastPracticeCountInArg = null;" in main
 
 
 def test_mixer_pan_layout_reads_in_words_and_stacks_when_narrow():
@@ -879,7 +905,7 @@ def test_stem_mixer_accepts_initial_pan_and_isolate_passes_it_clamped():
     page = (Path(__file__).resolve().parents[1] / "ui" / "pages" / "isolate.py").read_text(
         encoding="utf-8"
     )
-    assert 'saved_pan = saved.get("pan") if isinstance(saved.get("pan"), dict) else {}' in page
+    assert 'saved_pan = (\n        seed_mixer_state.get("pan")' in page
     assert "initial_pan={n: clamp_pan(saved_pan.get(n)) for n in stem_names}," in page
 
 

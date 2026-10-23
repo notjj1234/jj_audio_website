@@ -13,6 +13,7 @@ from ui.media import (
     cleanup_mix_artifacts,
     ensure_mixer_audio_paths,
     ensure_region_preview_wav,
+    media_mimetype_for_path,
     region_preview_cache_key,
     register_mixer_media,
     stem_media_urls,
@@ -41,6 +42,11 @@ def test_cleanup_mix_artifacts(tmp_path: Path):
 
 def test_mixer_preview_rate_is_full_quality():
     assert PREVIEW_SAMPLE_RATE == 44100
+
+
+def test_media_mimetype_keeps_pdf_a_pdf():
+    assert media_mimetype_for_path(Path("transcription.pdf")) == "application/pdf"
+    assert media_mimetype_for_path(Path("vocals.wav")) == "audio/wav"
 
 
 def test_register_mixer_media_registers_both_url_sets(monkeypatch):
