@@ -1,5 +1,7 @@
 # Moises UI craft — runtime reference and the Tyrian Nocturne direction
 
+**2026-10-23:** No Home or player pixels were measured on Moises 2.1.0. The desktop window was not captured. Every measurement below is from 2026-10-21 or earlier. Stance for Home and for Phase 1.6: these numbers are **our spec, not Moises 2.1.0 parity**. The player tasks are `15-PHASE-1.6-PLAN.md`. New evidence is `docs/research/moises/PAGE-INVENTORY.md`.
+
 **2026-10-21 Home parity:** §13 supersedes every Home measurement, token, and layout rule in §1.2, §1.5, §1.6, §2.1–§2.3, §4, and §5.1–§5.5. Player notes in §1.3 were not re-measured on this pass. The Home decision is in §13.3.
 
 **Status:** reference + design direction for Phase 1.5 (desktop UI craft). Not shipped. No code

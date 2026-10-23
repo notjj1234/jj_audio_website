@@ -1,6 +1,8 @@
 # Desktop UI redesign — Phase 1.5 (Tyrian Nocturne)
 
-**Status:** plan only. Not started. No code changes are made by this document.
+**2026-10-23 re-baseline:** The Home shell in §12 is already in the tree. It was re-checked the same day with the flag on and off. The pixel contract is **our spec, not Moises 2.1.0 parity**, because that build was not remeasured. The next UI build is Phase 1.6, the player. Guardrails unchanged: do not raise the 12 GB MPS gate (`src/audio_to_tab/hardware.py` `MPS_MIN_RAM_GB = 12.0`), do not unify Desktop Interface Lite with hosted `lite`, desktop isolation stays serial, no commit without approval.
+
+**Status:** Home shell implemented. This document remains the spec. No new code was required on 2026-10-23.
 **Date:** 2026-10-20. **Home parity revision: 2026-10-21, §12.** §12 supersedes §0–§11 for the Home screen, the shell, and the phase exit. Player tasks in UI-5 and UI-6 are deferred to Phase 1.6. Do not treat them as the Home gate.
 **Measurements:** `10-MOISES-UI-CRAFT.md` §13. Do not re-derive them.
 **Scope:** desktop only (`ui/` + the existing desktop component sources). Do not edit `web/` or

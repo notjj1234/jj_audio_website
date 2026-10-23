@@ -1,0 +1,96 @@
+{
+  "ok": true,
+  "evidence_id": "ev_bc443a3f5d7ae5bfb8adffe3d8409ee218c2040fc48f3086c9e553b7082bc36f",
+  "operation": "analyze_javascript_application",
+  "confidence": "derived",
+  "authority": "shipped-artifact",
+  "limitations": [
+    "Artifact integrity metadata contradicts observed bytes at node_modules/@moises-ai/plugin-server-win32-x64/dist/MoisesPluginServer.exe; the observed bytes are untrusted.",
+    "Caller-selected source analysis leaves 6515 inventoried files outside analysis scope. Inventory identity covers the complete artifact; relationships through unselected sources remain unknown.",
+    "CommonJS and ESM binding relationships were recovered from inert syntax and resolved only within the inventoried artifact container.",
+    "Graph coverage is incomplete; unavailable facts remain explicit and must not be read as absence.",
+    "JavaScript and HTML were parsed as inert text; bundle bootstrap code was never executed.",
+    "Static imports, entrypoints, workers, endpoints, and storage relationships do not prove runtime execution.",
+    "Static paths and relationships may remain unresolved when expressions are dynamic or obfuscated.",
+    "Webpack/Rspack factories were recovered from AST literals; REA did not invoke push handlers or bundle bootstrap code."
+  ],
+  "parameters": {
+    "format": "asar",
+    "integrity_policy": "record-and-continue",
+    "source_paths": [
+      "package.json"
+    ]
+  },
+  "duration": "24170ms",
+  "input_path": "C:\\Users\\orall\\AppData\\Local\\Programs\\moises-desktop\\resources\\app.asar",
+  "format": "asar",
+  "root_artifact_sha256": "e7242b3db57214f5a32ff24b4fb2e3f66d5ffabd6101381dbc4992de3d6bd284",
+  "integrity_contradictions": [
+    {
+      "contradiction_id": "ic_09a2bc3970497e7c8b1fbfd286ab8e2caf660379a5fa66c778e93392e1d02fb9",
+      "occurrence_id": "occ_8b4f67b9e675d9b2c271ab045c7fd5e2c2ba1326846a392c61014b3a77e28984",
+      "parent_artifact_id": "art_00ff9eafc933e6c024d27d363973905371432e641810a1065bdfc9978e94cd96",
+      "logical_path": "node_modules/@moises-ai/plugin-server-win32-x64/dist/MoisesPluginServer.exe",
+      "declared_sha256": "1e9066c774ad8b7b34eb52b9bfdf9ec04af9456ba7ebb05432347b7d531945f5",
+      "observed_sha256": "3b29000bdef1c794eaaae24a9de8b344dbc4e55ae68e33d4bfa21dea5cc88fed",
+      "entry_kind": "file",
+      "unpacked": true,
+      "trust": "observed-untrusted",
+      "provenance": "container-integrity-metadata-versus-observed-bytes",
+      "limitations": [
+        "Observed bytes contradict declared integrity metadata and cannot support equivalence."
+      ]
+    }
+  ],
+  "source_selection": {
+    "requested_paths": [
+      "package.json"
+    ],
+    "unselected_files": 6515
+  },
+  "summary": {
+    "browser_windows": 0,
+    "explicit_web_preferences": 0,
+    "preload_entrypoints": 0,
+    "context_bridge_apis": 0,
+    "exposed_api_members": 0,
+    "ipc": {
+      "operations": 0,
+      "literal_channels": 0,
+      "dynamic_channel_operations": 0,
+      "renderer_transmissions": 0,
+      "renderer_listeners": 0,
+      "main_handlers": 0,
+      "paired_renderer_transmissions": 0,
+      "ambiguous_renderer_transmissions": 0,
+      "unpaired_literal_renderer_transmissions": 0
+    },
+    "sender_validation_observations": 0,
+    "utility_processes": 0,
+    "resolved_utility_entrypoints": 0,
+    "native_addon_bindings": 0,
+    "resolved_native_addon_bindings": 0
+  },
+  "statistics": {
+    "relevant_files": 6516,
+    "nested_asar_containers": 0,
+    "text_bytes_read": 1206,
+    "invalid_utf8_files": 0,
+    "parsed_javascript_files": 0,
+    "skipped_javascript_files": 0,
+    "visited_ast_nodes": 0,
+    "findings": 0,
+    "modules": 0,
+    "parse_failures": 0
+  },
+  "result_limitations": [
+    "Artifact integrity metadata contradicts observed bytes at node_modules/@moises-ai/plugin-server-win32-x64/dist/MoisesPluginServer.exe; the observed bytes are untrusted.",
+    "Caller-selected source analysis leaves 6515 inventoried files outside analysis scope. Inventory identity covers the complete artifact; relationships through unselected sources remain unknown.",
+    "CommonJS and ESM binding relationships were recovered from inert syntax and resolved only within the inventoried artifact container.",
+    "Graph coverage is incomplete; unavailable facts remain explicit and must not be read as absence.",
+    "JavaScript and HTML were parsed as inert text; bundle bootstrap code was never executed.",
+    "Static imports, entrypoints, workers, endpoints, and storage relationships do not prove runtime execution.",
+    "Static paths and relationships may remain unresolved when expressions are dynamic or obfuscated.",
+    "Webpack/Rspack factories were recovered from AST literals; REA did not invoke push handlers or bundle bootstrap code."
+  ]
+}

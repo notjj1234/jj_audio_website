@@ -315,6 +315,69 @@ body {
 }
 
 /* Practice = grouped panel (same language as mix presets) */
+.mixer[data-ui="v2"] #practice-speed-popover,
+.mixer[data-ui="v2"] #mix-menu {
+  position: absolute;
+  z-index: 6;
+  top: 4.5rem;
+  right: 0.6rem;
+  width: min(22rem, calc(100% - 1.2rem));
+  margin-top: 0;
+}
+
+.mixer[data-ui="v2"] #mix-menu {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.75rem;
+  padding: 0.55rem 0.7rem;
+  background: var(--secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.mixer[data-ui="v2"] #mix-menu[hidden] {
+  display: none;
+}
+
+.mixer-practice[hidden] {
+  display: none;
+}
+
+.mixer[data-ui="v2"] .mixer-transport {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.mixer[data-ui="v2"] .mixer-transport .mixer-seek {
+  flex: 1 1 12rem;
+  min-width: 8rem;
+}
+
+.mixer[data-ui="v2"] #practice-panel[hidden] {
+  display: none;
+}
+
+@media (min-width: 1280px) {
+  .mixer[data-ui="v2"] .practice-panel-body {
+    max-height: 360px;
+  }
+}
+
+@media (max-width: 1024px) {
+  .mixer[data-ui="v2"] .mixer-transport {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 1023px) {
+  .mixer[data-ui="v2"] .practice-panel-body {
+    max-height: 280px;
+  }
+}
+
 .mixer-practice {
   display: flex;
   flex-direction: column;
@@ -1521,4 +1584,9 @@ body {
   .chord-diagram {
     width: 80px;
   }
+}
+
+.mixer[data-ui="v2"] .mixer-stage {
+  flex: 1 1 auto;
+  min-height: 0;
 }

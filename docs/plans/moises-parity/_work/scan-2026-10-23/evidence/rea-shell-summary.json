@@ -1,0 +1,78 @@
+{
+  "evidence_id": "ev_2015286d22cfc4a62451bbee9e1c1ca624e084e78ff6c80bf01cfaa20162ab93",
+  "operation": "analyze_javascript_application",
+  "confidence": "derived",
+  "authority": "shipped-artifact",
+  "limitations": [
+    "Artifact integrity metadata contradicts observed bytes at node_modules/@moises-ai/plugin-server-win32-x64/dist/MoisesPluginServer.exe; the observed bytes are untrusted.",
+    "Caller-selected source analysis leaves 6510 inventoried files outside analysis scope. Inventory identity covers the complete artifact; relationships through unselected sources remain unknown.",
+    "CommonJS and ESM binding relationships were recovered from inert syntax and resolved only within the inventoried artifact container.",
+    "Electron API identity follows proven lexical module aliases and structurally verified module-namespace interop. Other reassignments, dynamic selections, and visibly overwritten namespace members are unresolved; missing findings do not establish absence. Arbitrary call side effects and runtime registration are not evaluated.",
+    "Electron relationships are derived from inert syntax; runtime registration, reachability, defaults, and enforcement remain unproven.",
+    "Graph coverage is incomplete; unavailable facts remain explicit and must not be read as absence.",
+    "JavaScript and HTML were parsed as inert text; bundle bootstrap code was never executed.",
+    "Static imports, entrypoints, workers, endpoints, and storage relationships do not prove runtime execution.",
+    "Static paths and relationships may remain unresolved when expressions are dynamic or obfuscated.",
+    "Webpack/Rspack factories were recovered from AST literals; REA did not invoke push handlers or bundle bootstrap code."
+  ],
+  "summary": {
+    "browser_windows": 2,
+    "explicit_web_preferences": 2,
+    "preload_entrypoints": 0,
+    "context_bridge_apis": 2,
+    "exposed_api_members": 79,
+    "ipc": {
+      "operations": 140,
+      "literal_channels": 68,
+      "dynamic_channel_operations": 0,
+      "renderer_transmissions": 54,
+      "renderer_listeners": 35,
+      "main_handlers": 51,
+      "paired_renderer_transmissions": 54,
+      "ambiguous_renderer_transmissions": 0,
+      "unpaired_literal_renderer_transmissions": 0
+    },
+    "sender_validation_observations": 0,
+    "utility_processes": 1,
+    "resolved_utility_entrypoints": 0,
+    "native_addon_bindings": 0,
+    "resolved_native_addon_bindings": 0
+  },
+  "statistics": {
+    "relevant_files": 6516,
+    "nested_asar_containers": 0,
+    "text_bytes_read": 79019,
+    "invalid_utf8_files": 0,
+    "parsed_javascript_files": 5,
+    "skipped_javascript_files": 0,
+    "visited_ast_nodes": 22852,
+    "findings": 238,
+    "modules": 0,
+    "parse_failures": 0
+  },
+  "result_limitations": [
+    "Artifact integrity metadata contradicts observed bytes at node_modules/@moises-ai/plugin-server-win32-x64/dist/MoisesPluginServer.exe; the observed bytes are untrusted.",
+    "Caller-selected source analysis leaves 6510 inventoried files outside analysis scope. Inventory identity covers the complete artifact; relationships through unselected sources remain unknown.",
+    "CommonJS and ESM binding relationships were recovered from inert syntax and resolved only within the inventoried artifact container.",
+    "Electron API identity follows proven lexical module aliases and structurally verified module-namespace interop. Other reassignments, dynamic selections, and visibly overwritten namespace members are unresolved; missing findings do not establish absence. Arbitrary call side effects and runtime registration are not evaluated.",
+    "Electron relationships are derived from inert syntax; runtime registration, reachability, defaults, and enforcement remain unproven.",
+    "Graph coverage is incomplete; unavailable facts remain explicit and must not be read as absence.",
+    "JavaScript and HTML were parsed as inert text; bundle bootstrap code was never executed.",
+    "Static imports, entrypoints, workers, endpoints, and storage relationships do not prove runtime execution.",
+    "Static paths and relationships may remain unresolved when expressions are dynamic or obfuscated.",
+    "Webpack/Rspack factories were recovered from AST literals; REA did not invoke push handlers or bundle bootstrap code."
+  ],
+  "source_selection": {
+    "requested_paths": [
+      "out/main/index.js",
+      "out/main/audio-capture-host.js",
+      "out/main/chunks/capture-apis-J4FdMrZ-.js",
+      "out/preload/index.cjs",
+      "out/preload/webview.cjs",
+      "out/renderer/index.html"
+    ],
+    "unselected_files": 6510
+  },
+  "channels": [],
+  "urls": []
+}

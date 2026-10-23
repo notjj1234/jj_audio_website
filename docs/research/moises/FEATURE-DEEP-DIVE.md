@@ -1,0 +1,24 @@
+# Feature deep dive — 2026-10-23
+
+S8 capabilities. A control exists here only when this scan can show the effect or the shipped code that implements it. Marketing and help text are marked.
+
+| Capability | What was established | Limits | Quality controls | Formats | Weak or missing |
+|---|---|---|---|---|---|
+| Separation, stems, guitar models | Marketing home still says "27 stem types" and "Hi-Fi models". Help articles, not a run: Free is a 2-stem or 4-stem preset, 5 uploads a month, 5 minutes (P-S6-61). Premium lists a wider set and caps a job at 5 instruments (P-S6-65). Pro adds drum pieces and says multimedia stems are in Play (P-S6-66). Pro reasons say the VST gets 8 stems and mention Hi-Fi (P-S6-67). | Help text. Not a captured quota response. Prices still unknown. | UNKNOWN | UNKNOWN this scan | The help list and the "27 stem types" line are different claims. Neither was executed. |
+| Chords, key, tempo, beats, sections | Chord Finder and Guitar Capo Mode marketing pages were fetched (P-S6-18, P-S6-20). They describe chord names and capo shapes. Neither page contains `guitar tab` or `tablature`. Help says free metronome, chords, and lyrics cover the first minute, and Premium/Pro cover the whole file (P-S6-62). | That minute split is help text | UNKNOWN | UNKNOWN | The hosted player was not opened, so tab inside the player is still unknown. |
+| Lyrics | Lyric Writer routes exist in the shell menu. Transcription quality not run. | UNKNOWN | UNKNOWN | UNKNOWN | |
+| Pitch and tempo | Not opened. | UNKNOWN | UNKNOWN | n/a | |
+| Metronome, count-in, loop | Not opened. A help blurb mentions Smart Metronome as an example feature. | UNKNOWN | UNKNOWN | n/a | |
+| Mastering | Routes `/mastering`, `/mastering/upload`, `/upload/master`. Plugin filenames `Mastering.aaxplugin`, `Mastering.component`, `Mastering.vst3`. Help (P-S6-64): every plan can process; Free 5 minutes, Premium and Pro 20 minutes; exporting every mastered file is Pro; Premium can export the Reference track; web or desktop only. Not run. | Help text | UNKNOWN | UNKNOWN | |
+| Voice | Routes `/voice-studio` and `/voice-studio/upload`. Not run. | UNKNOWN | UNKNOWN | UNKNOWN | |
+| Generation | Help article "Moises AI Studio Credits", `updated_at` 2026-10-23. One credit is 30 seconds; partial blocks round up; the body says Free 10 per month (a bold tag splits the digits), Premium 200, Pro unlimited. Example 3 in the same article uses 100 for Premium. | Help text | UNKNOWN | "audio" in the article. Exact format UNKNOWN | Do not treat 10/200/100/unlimited as a captured quota response. |
+| Capture | Shipped addon over RtAudio 6.0.1, WASAPI default, ASIO on request, utility process. README says audify shipped through 2.0. Not run against a device. | Platforms with a prebuild: `darwin-arm64`, `win32-x64`. Others fail `addon-unavailable` per the README. | Frame size default 256 in the host. Buffer range reported by the addon. | Float32 interleaved callback | Windows prebuild "has not yet run against an interface" is README text, not this scan's test. |
+| Exports | Help has an export article. Not read in full. Shell can reveal a download. Formats UNKNOWN this scan. | UNKNOWN | UNKNOWN | UNKNOWN | |
+| Guitar tab | No `guitar`, `chord`, or `player2` string in the local renderer bundle (needle scan). Player route exists as `/player2/<id>` in a persisted tab. Public Chord Finder and Capo Mode pages do not contain `guitar tab` or `tablature`. Sitemap paths contain chord and capo, and no `tablature` path. | UNKNOWN | UNKNOWN | UNKNOWN | The hosted player was not opened. A missing marketing string is not proof the player has no tab. |
+| Collaboration | Marketing: arrange, record, and edit the same session in real time in the browser. Not run. | UNKNOWN | n/a | n/a | |
+| Video recording | Marketing section "Capture. Record. Share." Not run. | UNKNOWN | UNKNOWN | UNKNOWN | |
+| Plugins | Install, version check, VST host connection, and the filenames listed in the page inventory. Not installed. | UNKNOWN | n/a | aax, component, vst3 filenames observed | |
+| Moises Live | Marketing page P-S6-50. Desktop-only. The page says processing "runs entirely on-device" and "works offline". Not installed. | UNKNOWN | UNKNOWN | n/a | This contradicts the older help sentence that Moises needs the internet. Both are text. Neither was run. |
+| Account and billing | Login and signup pages. Help lists Premium and Pro, monthly or annual, Stripe, PayPal, App Store, Play Store, Ebanx. The file-length article links `https://studio.moises.ai/pricing/`. That URL redirected to login when opened earlier. `/business-api/` is a Music AI marketing page (P-S6-60), not an API spec. | Prices UNKNOWN | n/a | n/a | Do not republish old public prices as current. |
+
+Local shell does not perform separation. `out/renderer/index.html` cannot connect off-origin.

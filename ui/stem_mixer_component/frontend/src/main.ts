@@ -57,6 +57,29 @@ import {
   type TabData,
 } from "./analysis";
 
+let practiceSheetOpen: boolean | null = null;
+
+function onSpeedPopoverEscape(event: KeyboardEvent): void {
+  if (event.key !== "Escape") return;
+  const popover = document.getElementById("practice-speed-popover");
+  const button = document.getElementById("btn-speed-key");
+  const mix = document.getElementById("mix-menu");
+  const mixButton = document.getElementById("btn-mix");
+  const speedOpen = Boolean(popover && button && !popover.hidden);
+  const mixOpen = Boolean(mix && mixButton && !mix.hidden);
+  if (!speedOpen && !mixOpen) return;
+  event.preventDefault();
+  if (speedOpen && popover && button) {
+    popover.hidden = true;
+    button.setAttribute("aria-expanded", "false");
+  }
+  if (mixOpen && mix && mixButton) {
+    mix.hidden = true;
+    mixButton.setAttribute("aria-expanded", "false");
+  }
+  (mixOpen ? mixButton : button)?.focus();
+}
+
 const DB_MIN = -25;
 const DB_MAX = 25;
 const DB_DEFAULT = 0;
@@ -2590,7 +2613,7 @@ function renderPracticePanel(): void {
   if (tabs.length === 0) {
     practicePanelTab = "chords";
     body.innerHTML =
-      '<p class="practice-empty">No chords, sections, lyrics, or tab in this run. Re-run separation with analysis enabled.</p>';
+      '<p class="practice-empty">No chords, sections, lyrics, or tab in this run.</p>';
     updatePracticeHeader();
     scheduleFrameHeight();
     return;
@@ -2604,7 +2627,7 @@ function renderPracticePanel(): void {
   if (practicePanelTab === "chords") {
     if (chords.length === 0) {
       body.innerHTML =
-        '<p class="practice-empty">No chords found — re-run analysis.</p>';
+        '<p class="practice-empty">No chords in this run.</p>';
     } else {
       const chips = chords
         .map(
@@ -2641,7 +2664,7 @@ function renderPracticePanel(): void {
               `</div>`
           )
           .join("")}</div>`
-      : '<p class="practice-empty">No sections found — re-run analysis.</p>';
+      : '<p class="practice-empty">No sections in this run.</p>';
   } else if (practicePanelTab === "lyrics") {
     body.innerHTML = lyrics.length
       ? `<div class="lyrics-list">${lyrics
@@ -2990,7 +3013,7 @@ function renderUI(theme?: Theme): void {
   const primary = theme?.primaryColor ?? "#ff4b4b";
 
   root.innerHTML = `
-    <div class="mixer" tabindex="-1" style="--text:${textColor};--bg:${bg};--secondary:${secondary};--primary:${primary};--waveform-fill:${primary}">
+    <div class="mixer" data-ui="v2" tabindex="-1" style="--text:${textColor};--bg:${bg};--secondary:${secondary};--primary:${primary};--waveform-fill:${primary}">
       <header class="mixer-header">
         <div class="track-title" id="track-title"></div>
         <p class="mixer-status" id="status" aria-live="polite">Ready</p>
@@ -3013,6 +3036,65 @@ function renderUI(theme?: Theme): void {
           <span class="visually-hidden">Seek</span>
           <input type="range" id="seek" class="slider-seek" min="0" max="1000" value="0" step="1" disabled />
         </label>
+        <button type="button" class="ghost" id="btn-practice-sheet" aria-expanded="true" aria-controls="practice-panel">Practice</button>
+        <button type="button" class="ghost" id="btn-mix" aria-expanded="false" aria-controls="mix-menu">Mix</button>
+        <button type="button" class="ghost" id="btn-speed-key" aria-expanded="false" aria-controls="practice-speed-popover">Speed &amp; Key</button>
+      </div>
+      <div class="mixer-master">
+        <div id="mix-menu" hidden>
+          <div class="mixer-presets" role="group" aria-label="Mix presets">
+            <button type="button" class="preset-chip" data-preset="all">All</button>
+            <button type="button" class="preset-chip" data-preset="karaoke">Karaoke</button>
+            <button type="button" class="preset-chip" data-preset="acapella">Acapella</button>
+            <button type="button" class="preset-chip" data-preset="drumsBass">Drums + Bass</button>
+          </div>
+          <button type="button" class="ghost" id="btn-muteall">Mute all</button>
+          <button type="button" class="ghost" id="btn-reset">Reset mix</button>
+          <button type="button" class="ghost" id="btn-clearsolo" hidden>Clear solo</button>
+          <button type="button" class="ghost" id="btn-show-video" hidden>Show video</button>
+        </div>
+      </div>
+      <div class="mixer-practice" id="practice-speed-popover" role="group" aria-label="Speed and Key" hidden>
+        <div class="practice-heading">Speed &amp; Key</div>
+        <div class="practice-row">
+          <span class="practice-label" id="practice-speed-label">Speed 1.00×</span>
+          <button type="button" class="ghost practice-nudge" id="btn-speed-down" aria-label="Slower">−</button>
+          <input type="range" id="practice-speed" class="slider-speed" min="0.5" max="1.5" step="0.05" value="1" />
+          <button type="button" class="ghost practice-nudge" id="btn-speed-up" aria-label="Faster">+</button>
+        </div>
+        <div class="practice-row">
+          <span class="practice-label" id="practice-key-label">Key 0</span>
+          <button type="button" class="ghost practice-nudge" id="btn-key-down" aria-label="Lower key">−</button>
+          <input type="range" id="practice-key" class="slider-key" min="-6" max="6" step="1" value="0" />
+          <button type="button" class="ghost practice-nudge" id="btn-key-up" aria-label="Raise key">+</button>
+        </div>
+        <button type="button" class="ghost practice-reset" id="btn-practice-reset">Reset</button>
+        <p class="practice-export-note">
+          Save current mix includes Speed, Key, pan, mute/solo, and master.
+          Save all tracks stays original speed/key.
+        </p>
+        <p class="practice-status" id="practice-status" hidden></p>
+      </div>
+      <div class="count-in-status" id="count-in-status" aria-live="polite" hidden></div>
+      <div class="mixer-stage">
+        <div class="mixer-video-wrap" id="mixer-video-wrap" hidden>
+          <div class="mixer-video-toolbar">
+            <div class="video-toolbar-group" role="group" aria-label="Place video">
+              <button type="button" class="video-toolbar-btn mixer-video-drag" id="btn-drag-video" aria-label="Move video">Move</button>
+              <button type="button" class="video-toolbar-btn" id="btn-dock-video" hidden>Dock</button>
+              <button type="button" class="video-toolbar-btn" id="btn-hide-video">Hide video</button>
+            </div>
+            <span class="video-toolbar-divider" aria-hidden="true"></span>
+            <div class="video-toolbar-group" role="group" aria-label="Video position">
+              <button type="button" class="video-toolbar-btn video-snap-btn" data-snap="above" aria-pressed="true">Top</button>
+              <button type="button" class="video-toolbar-btn video-snap-btn" data-snap="below" aria-pressed="false">Bottom</button>
+              <button type="button" class="video-toolbar-btn video-snap-btn" data-snap="left" aria-pressed="false">Left</button>
+              <button type="button" class="video-toolbar-btn video-snap-btn" data-snap="right" aria-pressed="false">Right</button>
+            </div>
+          </div>
+          <div class="mixer-video" id="yt-player-slot"></div>
+          <div class="mixer-video-resize" id="btn-resize-video" role="separator" aria-label="Resize video"></div>
+        </div>
         <label class="master-vol">
           <span class="master-vol-label">Master</span>
           <span class="visually-hidden">Master volume in decibels</span>
@@ -3020,39 +3102,10 @@ function renderUI(theme?: Theme): void {
             min="${DB_MIN}" max="${DB_MAX}" step="0.5" value="${state.masterVolumeDb}" />
           <span id="master-vol-val" class="stem-db">${state.masterVolumeDb.toFixed(1)}</span>
         </label>
-        <div class="mixer-practice" role="group" aria-label="Speed and Key">
-          <div class="practice-heading">Speed &amp; Key</div>
-          <div class="practice-row">
-            <span class="practice-label" id="practice-speed-label">Speed 1.00×</span>
-            <button type="button" class="ghost practice-nudge" id="btn-speed-down" aria-label="Slower">−</button>
-            <input type="range" id="practice-speed" class="slider-speed" min="0.5" max="1.5" step="0.05" value="1" />
-            <button type="button" class="ghost practice-nudge" id="btn-speed-up" aria-label="Faster">+</button>
-          </div>
-          <div class="practice-row">
-            <span class="practice-label" id="practice-key-label">Key 0</span>
-            <button type="button" class="ghost practice-nudge" id="btn-key-down" aria-label="Lower key">−</button>
-            <input type="range" id="practice-key" class="slider-key" min="-6" max="6" step="1" value="0" />
-            <button type="button" class="ghost practice-nudge" id="btn-key-up" aria-label="Raise key">+</button>
-          </div>
-          <button type="button" class="ghost practice-reset" id="btn-practice-reset">Reset</button>
-          <p class="practice-export-note">
-            Save current mix includes Speed, Key, pan, mute/solo, and master.
-            Save all tracks stays original speed/key.
-          </p>
-          <p class="practice-status" id="practice-status" hidden></p>
+        <div class="mixer-stems-wrap">
+          <div class="mixer-stems" id="stems"></div>
+          <div class="mixer-stems-resize" id="btn-resize-stems" role="separator" aria-label="Resize stem waveforms" hidden></div>
         </div>
-      </div>
-      <div class="mixer-master">
-        <div class="mixer-presets" role="group" aria-label="Mix presets">
-          <button type="button" class="preset-chip" data-preset="all">All</button>
-          <button type="button" class="preset-chip" data-preset="karaoke">Karaoke</button>
-          <button type="button" class="preset-chip" data-preset="acapella">Acapella</button>
-          <button type="button" class="preset-chip" data-preset="drumsBass">Drums + Bass</button>
-        </div>
-        <button type="button" class="ghost" id="btn-muteall">Mute all</button>
-        <button type="button" class="ghost" id="btn-reset">Reset mix</button>
-        <button type="button" class="ghost" id="btn-clearsolo" hidden>Clear solo</button>
-        <button type="button" class="ghost" id="btn-show-video" hidden>Show video</button>
       </div>
       <details class="mixer-practice-panel" id="practice-panel" open>
         <summary>
@@ -3083,34 +3136,9 @@ function renderUI(theme?: Theme): void {
           <button type="button" class="practice-tab" data-practice-tab="tab" role="tab" aria-selected="false">Tab</button>
         </div>
         <div class="practice-panel-body" id="practice-body">
-          <p class="practice-empty">No analysis yet. Re-run separation to analyse this song.</p>
+          <p class="practice-empty">No analysis in this run.</p>
         </div>
       </details>
-      <div class="count-in-status" id="count-in-status" aria-live="polite" hidden></div>
-      <div class="mixer-stage">
-        <div class="mixer-video-wrap" id="mixer-video-wrap" hidden>
-          <div class="mixer-video-toolbar">
-            <div class="video-toolbar-group" role="group" aria-label="Place video">
-              <button type="button" class="video-toolbar-btn mixer-video-drag" id="btn-drag-video" aria-label="Move video">Move</button>
-              <button type="button" class="video-toolbar-btn" id="btn-dock-video" hidden>Dock</button>
-              <button type="button" class="video-toolbar-btn" id="btn-hide-video">Hide video</button>
-            </div>
-            <span class="video-toolbar-divider" aria-hidden="true"></span>
-            <div class="video-toolbar-group" role="group" aria-label="Video position">
-              <button type="button" class="video-toolbar-btn video-snap-btn" data-snap="above" aria-pressed="true">Top</button>
-              <button type="button" class="video-toolbar-btn video-snap-btn" data-snap="below" aria-pressed="false">Bottom</button>
-              <button type="button" class="video-toolbar-btn video-snap-btn" data-snap="left" aria-pressed="false">Left</button>
-              <button type="button" class="video-toolbar-btn video-snap-btn" data-snap="right" aria-pressed="false">Right</button>
-            </div>
-          </div>
-          <div class="mixer-video" id="yt-player-slot"></div>
-          <div class="mixer-video-resize" id="btn-resize-video" role="separator" aria-label="Resize video"></div>
-        </div>
-        <div class="mixer-stems-wrap">
-          <div class="mixer-stems" id="stems"></div>
-          <div class="mixer-stems-resize" id="btn-resize-stems" role="separator" aria-label="Resize stem waveforms" hidden></div>
-        </div>
-      </div>
     </div>
   `;
 
@@ -3586,6 +3614,41 @@ function bindPracticeControls(): void {
       afterSpeedChange();
     });
   };
+  const speedKeyBtn = document.getElementById("btn-speed-key");
+  const speedPopover = document.getElementById("practice-speed-popover");
+  if (speedKeyBtn && speedPopover) {
+    speedKeyBtn.onclick = () => {
+      const opening = speedPopover.hidden;
+      speedPopover.hidden = !opening;
+      speedKeyBtn.setAttribute("aria-expanded", opening ? "true" : "false");
+    };
+  }
+  const mixBtn = document.getElementById("btn-mix");
+  const mixMenu = document.getElementById("mix-menu");
+  if (mixBtn && mixMenu) {
+    mixBtn.onclick = () => {
+      const opening = mixMenu.hidden;
+      mixMenu.hidden = !opening;
+      mixBtn.setAttribute("aria-expanded", opening ? "true" : "false");
+    };
+  }
+  const sheetBtn = document.getElementById("btn-practice-sheet");
+  const sheet = document.getElementById("practice-panel");
+  if (sheetBtn && sheet) {
+    if (practiceSheetOpen === null) {
+      practiceSheetOpen = !window.matchMedia("(max-width: 900px)").matches;
+    }
+    sheet.hidden = !practiceSheetOpen;
+    sheetBtn.setAttribute("aria-expanded", practiceSheetOpen ? "true" : "false");
+    sheetBtn.onclick = () => {
+      const opening = sheet.hidden;
+      sheet.hidden = !opening;
+      practiceSheetOpen = opening;
+      sheetBtn.setAttribute("aria-expanded", opening ? "true" : "false");
+    };
+  }
+  document.removeEventListener("keydown", onSpeedPopoverEscape);
+  document.addEventListener("keydown", onSpeedPopoverEscape);
   const practiceGroup = document.querySelector(".mixer-practice");
   practiceGroup?.addEventListener("dblclick", (ev) => {
     if ((ev.target as HTMLElement).closest("button, input")) return;

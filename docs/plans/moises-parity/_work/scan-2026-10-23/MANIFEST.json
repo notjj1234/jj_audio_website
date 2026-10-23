@@ -1,0 +1,63 @@
+{
+  "scan_id": "scan-2026-10-23",
+  "acquired": "2026-10-23",
+  "host": "win32 x64",
+  "artifacts": [
+    {
+      "name": "Moises.exe",
+      "role": "installed Electron binary",
+      "version": "2.1.0",
+      "build": "261021a1gygumpb",
+      "platform": "win32-x64",
+      "bytes": 235577672,
+      "sha256": "161eb1d64dc908cb26e8f614e188fafadb4f36ac1df1c52775b06f872de5505d",
+      "path": "C:\\Users\\orall\\AppData\\Local\\Programs\\moises-desktop\\Moises.exe",
+      "acquired_how": "Already installed. FileVersion 261021a1gygumpb, ProductVersion 2.1.0.0. Uninstall registry DisplayName Moises 2.1.0.",
+      "mtime": "2026-10-21T21:52:10+09:00"
+    },
+    {
+      "name": "app.asar",
+      "role": "Electron application archive",
+      "version": "2.1.0",
+      "build": "261021a1gygumpb",
+      "platform": "win32-x64",
+      "bytes": 60980590,
+      "sha256": "e7242b3db57214f5a32ff24b4fb2e3f66d5ffabd6101381dbc4992de3d6bd284",
+      "path": "C:\\Users\\orall\\AppData\\Local\\Programs\\moises-desktop\\resources\\app.asar",
+      "acquired_how": "Beside the installed executable. package.json tdBuildId matches the exe.",
+      "file_count": 6711
+    },
+    {
+      "name": "Moises Setup 2.1.0 - Build 261021a1gygumpb-x64.exe",
+      "role": "pending updater payload, same build as the install",
+      "version": "2.1.0",
+      "build": "261021a1gygumpb",
+      "platform": "win32-x64",
+      "bytes": 116424656,
+      "sha256": "00fe2b6115edf41fb307ca1725b224b23280c73ddeb037555574a83e43a50833",
+      "path": "C:\\Users\\orall\\AppData\\Local\\moises-desktop-updater\\pending\\Moises Setup 2.1.0 - Build 261021a1gygumpb-x64.exe",
+      "acquired_how": "Already in the app updater pending directory. sha512 in update-info.json matches the ToDesktop latest.yml x64 entry."
+    }
+  ],
+  "update_feed": {
+    "url": "https://download.todesktop.com/220410vabqjud82/latest.yml",
+    "observed": "2026-10-23",
+    "version": "2.1.0",
+    "releaseDate": "2026-10-21T12:53:06.324Z",
+    "disposition_filename": "latest-build-261021a1gygumpb.yml",
+    "conclusion": "The installed build is the feed's current build on the day of the scan."
+  },
+  "rea": {
+    "cli": "rea-agents 6.7.0",
+    "node_used": "24.19.0 (Cursor helper). System Node on PATH is 20.18.0 and fails doctor until the helper is prepended.",
+    "mcp_in_this_session": false,
+    "opencode_registration": "missing at C:\\Users\\orall\\.config\\opencode\\opencode.jsonc",
+    "cursor_registration": "missing at C:\\Users\\orall\\.cursor\\mcp.json",
+    "skill_identity": "installed skill 45, package expected 42, doctor state stale. Setup was not applied."
+  },
+  "not_acquired": [
+    "iOS or Android installable package on this host",
+    "Authenticated HAR of studio.moises.ai",
+    "Logged-in Studio, Play, Mastering, Voice Studio, or Lyric Writer interiors"
+  ]
+}

@@ -1,5 +1,7 @@
 # Competitive inspiration plan — Moises → Audio Tools (similar, not same)
 
+**Superseded for scope by `docs/plans/moises-parity/04-SCOPE-CUT.md` (2026-10-23).** The competitor build in the sections below is 2.0.3 and is historical. Pan law, solo law, summing, and the rule against copying an unknown mixer law still apply. Do not treat the non-goals in section 0 as the current program.
+
 ## 0. Framing
 
 - Competitor: Moises desktop 2.0.3 (static REA via `REFERENCE.md`). App was not launched. `FULL-TEARDOWN.md` is complementary evidence (shell vs hosted studio). Its §10 is a loading playbook to inspire, not a clone list.

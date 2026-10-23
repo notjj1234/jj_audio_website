@@ -1,6 +1,22 @@
 # Evidence index
 
-REA `rea-agents` **6.5.0**. Session looked at `/Applications/Moises.app`. No runtime attach, no Frida, no Ghidra (`not_configured`). `audify.node` was not disassembled.
+## 2026-10-23 — Windows desktop 2.1.0
+
+REA CLI `rea-agents` **6.7.0** on Node 24.19.0. MCP was not connected. The 6.5.0 macOS IDs below are historical and are not current for build `261021a1gygumpb`.
+
+| Alias | ID | Tool | What it supports |
+|---|---|---|---|
+| E-FUSES | `ev_0f4108e432d35b24278c4b9b7e91a029647cf285903c576fa8ebf997e0326dd4` | `inspect-electron-fuses` | `Moises.exe` SHA-256 `161eb1d64dc908cb26e8f614e188fafadb4f36ac1df1c52775b06f872de5505d`. RunAsNode on, cookie encryption off, node CLI inspect arguments on, embedded ASAR integrity off, only-load-app-from-asar off. |
+| E-PKG | `ev_bc443a3f5d7ae5bfb8adffe3d8409ee218c2040fc48f3086c9e553b7082bc36f` | `analyze-javascript-application` | `package.json` only. Asar SHA-256 `e7242b3db57214f5a32ff24b4fb2e3f66d5ffabd6101381dbc4992de3d6bd284`. One integrity contradiction: unpacked `MoisesPluginServer.exe`. |
+| E-SHELL | `ev_2015286d22cfc4a62451bbee9e1c1ca624e084e78ff6c80bf01cfaa20162ab93` | `analyze-javascript-application` | Main, capture host, capture API chunk, both preloads, renderer HTML. 5 JS files, 22,852 AST nodes, 238 findings, 68 literal channels, 79 bridge members, 2 windows, 1 utility process. |
+
+Public follow-up the same day has no REA id. Direct GET of `sitemap.xml` was 200 (544,988 bytes, 3,041 locs). Help article ids and the four marketing URLs are in `docs/plans/moises-parity/08-EVIDENCE-LOG.md` section 15.
+
+Slice SHA-256 of the files E-SHELL parsed: main `7aee9bab8197932b8e9916d550c152869c8758066366eb9998f67df5704ff590`, capture host `650dafffb328ad0b38538fdb66b46d215205556aafc52090dc8e9d439017831b`, capture APIs `b9d7961159f43cb667e3d72e2d209945c96139344c81c1188cb42e3e7beb6639`, preload `c5650c0d6a45331bdd57c3fd8ef011bab31cf90109116b9596206c4f316b714f`, webview preload `ca97c93b63dc95a005d52f1aa426a5bb78ed9bff224b6cc67c125910c2b4d993`, HTML `f82a8c4079c25297dadc4559cda376dec67d7519bb774d0400573d841b16c048`.
+
+## Historical — 2026-10-17 macOS 2.0.3
+
+REA `rea-agents` **6.5.0**. Session looked at `/Applications/Moises.app`. No runtime attach, no Frida, no Ghidra (`not_configured`). `audify.node` was not disassembled. Do not cite this section as the current build.
 
 Claims in the other notes cite these IDs. A **no-match** trace is not evidence of absence.
 

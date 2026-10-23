@@ -1,37 +1,34 @@
-# Moises desktop — research brief
+# Moises desktop — research brief (2026-10-23)
 
-Agents: read [REFERENCE.md](REFERENCE.md) first. It is the full handoff in one file. This page is the short version.
+Read [PAGE-INVENTORY.md](PAGE-INVENTORY.md) and [FUNCTION-INVENTORY.md](FUNCTION-INVENTORY.md) for the row-level census. [REFERENCE.md](REFERENCE.md) is the handoff. This page is the short version.
 
-Static look at `/Applications/Moises.app` **2.0.3** (build `2609048vfr0p5is`, 2026-10-17) so we can improve our Isolate mixer. This is not a clone list and it does not include Moises source.
+## Artifact
+
+Windows desktop **2.1.0**, build `261021a1gygumpb`, installed at `%LocalAppData%\Programs\moises-desktop`. The ToDesktop feed `https://download.todesktop.com/220410vabqjud82/latest.yml` returned that same build on 2026-10-23 (`releaseDate` 2026-10-21). Asar SHA-256 `e7242b3db57214f5a32ff24b4fb2e3f66d5ffabd6101381dbc4992de3d6bd284`.
+
+The 2.0.3 macOS notes and the 2.0.18 runtime notes are historical. They are archived under `docs/plans/moises-parity/_work/archive-pre-rescan-2026-10-23/`.
 
 ## What it is
 
-Moises desktop is an **Electron** app (Vite-style `out/main`, `out/preload`, `out/renderer`), packaged with ToDesktop. The window title in the renderer shell is **Moises Studio**. One minified renderer bundle draws the studio UI. The main process owns windows, tabs, theme, updates, a plugin server, a VST-host connection channel, and a separate **audio-capture utility process** (`MoisesAudioCapture`) that loads the `audify` native addon (`RtAudio` / Opus builds sit beside it).
+An Electron shell (ToDesktop, `package.json` main `./out/main/index.js`) whose local page is a tabbed frame. The page title is Moises Studio. Its content security policy does not allow network calls. Play, Studio, Mastering, Voice Studio, Lyric Writer, and Home are hosted routes on `studio.moises.ai`, chosen from a new-tab menu in the main process. `sparkbars` is the Studio icon name in that menu.
 
-**Correction (FULL-TEARDOWN §9.4).** The local renderer does **not** mount the mixer. It draws titlebar, tabs, Settings, a blank page, and the New Project menu. Mixer components in that bundle are shared library code with **no shipped CSS and no mount**. Studio, Play, Mastering, and the mixer the user sees are hosted pages in native views (`studio.moises.ai`). Read [FULL-TEARDOWN.md](FULL-TEARDOWN.md) before treating a renderer literal as an on-screen desktop control.
+Capture is a utility process loading `native/capture/prebuilds/win32-x64/capture.node` (RtAudio 6.0.1, WASAPI by default). The shipped README says audify was the addon through 2.0. The process is still referred to as `MoisesAudioCapture` in main.
 
-The shell tab chrome is driven through `electronAPI.tab`. Stem playback is **not** an IPC feature. Literal `AudioContext`, `createGain`, `audioworklet`, and `wavesurfer` appear in the bundle as shared code. A feature trace did **not** index those literals.
+## What changed versus the last write-up
 
-## What to take for our mixer
+- Build is 2.1.0, not 2.0.3 or 2.0.18.
+- Capture addon is the custom RtAudio build, not audify.
+- Shell IPC is 68 literal channels and 79 bridge members (REA `ev_2015286d22cfc4a62451bbee9e1c1ca624e084e78ff6c80bf01cfaa20162ab93`), including a memory panel that the older bridge list did not center.
+- Logged-in interiors were not re-walked. A fullscreen video was on the primary display. This scan did not dismiss it.
+- The public sitemap is 3,041 URLs (405 English paths). Help text states a free tier of 5 uploads a month and 5-minute stems. Prices are still unpublished on the pages that loaded. Chord Finder and Capo Mode pages do not say guitar tab. The player was not opened.
 
-1. **P0 — tab strip.** Their shell can create, duplicate, close, close-others, close-right, reorder, preview, and context-menu a tab. Desktop Isolate now has duplicate, close others, close to the right, and reorder on Home | mix | +. Hover previews and a separate New Project product menu stay theirs.
-2. **P0 — track row.** Shared-library names include pan, record, input gain, and a parent track. Desktop now has a pan slider (our equal-power law) and a disclosure group that does not sum. Record and input gain stay with live capture, which is not a current product goal.
-3. **P1 — live input.** Capture is a utility process plus `audioCapture.open` / `listDevices`, not a stem fader. Only relevant if we record into a project.
-4. **Do not chase** VST hosting, lyrics, mastering, or voice-studio. Those are other tools in the same shell.
+## How to re-run
 
-Picture-sync and mix bounce were **not** established. Our video picture may already be ahead of what this pass could see.
+Use Node 22.19+, 24.11+, or 26. This machine's system Node is 20.18.0. The Cursor helper Node 24.19.0 can run the CLI. REA MCP was not registered. `rea setup` was not applied.
 
-## How to re-run (REA 6.5.0)
+1. `inspect-electron-fuses` on `Moises.exe`.
+2. `analyze-javascript-application` on `app.asar` with `--integrity-policy record-and-continue` and `--source-path` for `out/main/index.js`, `out/main/audio-capture-host.js`, `out/main/chunks/capture-apis-J4FdMrZ-.js`, `out/preload/index.cjs`, `out/preload/webview.cjs`, `out/renderer/index.html`.
+3. Do not commit the unfiltered JSON. The package-only run was about 86 MB of JSON before filtering.
+4. Walk the running app only when the user's display is free. Do not press Esc on a fullscreen video. Do not log in, upload, or purchase.
 
-Tools used: `open_binary`, `inspect_plist`, `inspect_electron_fuses`, `inspect_artifact`, `inspect_analysis_view`, `analyze_javascript_application`, `trace_application_feature`, `extract_artifact`.
-
-1. `open_binary` on `.../Moises.app/Contents/Resources/app.asar`, then `inspect_artifact` with `detail: "summary"` and `integrity_policy: "record-and-continue"`.
-2. Page inventory occurrences near the end of the archive for `out/main`, `out/preload`, `out/renderer`.
-3. **Do not trust `extract_artifact` bytes on this archive.** REA 6.5.0 materializes every member as a slice that starts at the ASAR header (`text_status: invalid-utf8` on `out/main/index.js`). Inventory **paths and sizes** are still usable. Electron’s embedded-ASAR integrity fuse is **disabled**, so the thousands of hash mismatches are this reader’s slices versus the header hashes, not a tamper finding.
-4. Re-slice with a normal ASAR header (8-byte size pickle, then the header pickle, then file payloads at `offset`/`size`; `unpacked` files live in `app.asar.unpacked`). Keep that tree **outside the repo** (this pass used `/tmp/moises-asar-fixed`).
-5. `analyze_javascript_application` on that directory, `format: "directory"`, `detail: "summary"`, `source_paths` = `package.json`, `out/main/index.js`, `out/main/audio-capture-host.js`, `out/preload/index.cjs`, `out/preload/webview.cjs`, `out/renderer/index.html`. Then a second call for `out/renderer/assets/index-CiDG_8MY.js` (raise `max_semantic_nodes_per_file`; this pass used 150000).
-6. `trace_application_feature` on the shell parent for `audio-capture`, `preload`, and `BrowserWindow`. UI words inside the renderer bundle returned **no-match**. That is not proof they are absent; confirm with a literal scan of the same file REA parsed, and label it as such.
-
-Evidence IDs and limits: [evidence-index.md](evidence-index.md). UX: [mixer-ux.md](mixer-ux.md). Stack: [architecture.md](architecture.md). Priorities: [gaps-vs-audio-tools.md](gaps-vs-audio-tools.md).
-
-No raw REA JSON is committed. Trace dumps include minified expression nodes and are large.
+Evidence IDs: [evidence-index.md](evidence-index.md).

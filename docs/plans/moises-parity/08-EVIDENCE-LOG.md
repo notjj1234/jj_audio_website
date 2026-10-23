@@ -457,3 +457,72 @@ Interactions, still with the flag on: a search with no matches showed “No song
 Flag unset, same 1440 viewport: sidebar 300, H1 44px, primary button 74px tall, header `display: flex`, no Home marker.
 
 Not browser-proven this pass: an empty library, the three skeleton rows, and an analyse alert. The copy and the loading branch are in the component. Reduced motion was not toggled in the OS. The full Tab order was not walked. `tests/test_api.py::test_upload_and_job` failed locally (1035 passed, 1 skipped). That test is the one macOS CI deselects. It was not changed.
+
+## 14. 2026-10-23 rescan (desktop 2.1.0)
+
+Commands and observations. Inferences are marked. Personal titles and ids are omitted. No HAR, cookie, or Sentry key is stored.
+
+### Observed
+
+- Installed `Moises.exe` FileVersion `261021a1gygumpb`, ProductVersion `2.1.0.0`, SHA-256 `161eb1d64dc908cb26e8f614e188fafadb4f36ac1df1c52775b06f872de5505d`, 235,577,672 bytes.
+- `app.asar` SHA-256 `e7242b3db57214f5a32ff24b4fb2e3f66d5ffabd6101381dbc4992de3d6bd284`, 60,980,590 bytes, 6,711 files. `package.json` version 2.1.0, `tdBuildId` `261021a1gygumpb`, main `./out/main/index.js`.
+- Update feed `https://download.todesktop.com/220410vabqjud82/latest.yml` returned version 2.1.0, same build, release `2026-10-21T12:53:06.324Z`. The x64 installer sha512 matches `update-info.json` in the pending updater directory.
+- REA fuses `ev_0f4108e432d35b24278c4b9b7e91a029647cf285903c576fa8ebf997e0326dd4`: inspect arguments enabled, ASAR integrity fuse disabled.
+- REA shell `ev_2015286d22cfc4a62451bbee9e1c1ca624e084e78ff6c80bf01cfaa20162ab93`: 68 literal IPC channels, 79 bridge members, 2 browser windows, 1 utility process.
+- Preload bridges read in full. Menu paths in main: Home `/home`, Play `/play` and `/upload/split` and `/upload/split/3`, Studio `/studio` and `/studio/new` with icon name `sparkbars`, Mastering, Voice Studio, Lyric Writer.
+- Capture README in the unpacked asar: custom RtAudio 6.0.1 addon, audify described as what shipped through 2.0. Process string `MoisesAudioCapture` is still in main.
+- Logged-out browser: `studio.moises.ai` redirects to `/auth/login`. Providers Google, Facebook, Apple, X, and email. Signup page rendered. No account was created.
+- Marketing home and help center categories Getting Started and Plans & Billing were fetched. Sitemap returned HTTP 500.
+- `src/audio_to_tab/hardware.py` still sets `MPS_MIN_RAM_GB = 12.0`.
+
+### Inferred
+
+- `sparkbars` is the Studio menu glyph because the string sits with the Studio paths and the icon file `sparkbars-*.png` is in the menu icon set. It is not a separate product name in the menu labels.
+
+### Not observed
+
+- Logged-in Home, Play, player, Studio, Mastering, Voice Studio, and Lyric Writer interiors.
+- Any separation, export, chord, lyric, or metronome run.
+- Mobile apps.
+- A HAR.
+
+### Blocker
+
+The primary display was playing fullscreen video. The Moises window was restored once, was not readable under that video, and was left minimized. Topmost was cleared. The scan did not press Esc.
+
+## 15. 2026-10-23 follow-up (public limits and this repo)
+
+### Observed
+
+- `https://moises.ai/sitemap.xml` direct GET 200, 544,988 bytes, 3,041 `<loc>` values. English unique paths 405. Feature paths 35. Product paths 17. No sitemap path contains `tablature`. The three paths matching the substring `tab` are Japanese interview slugs.
+- Help Center `articles.json?per_page=1` returns `count` 112.
+- Article bodies fetched the same day, and the limits written into `PAGE-INVENTORY.md` P-S6-61 through P-S6-67, plus the credits article `updated_at` 2026-10-23. Premium is 200 in the list and 100 in example 3. The Free "10" is split by a bold tag in the HTML.
+- `https://moises.ai/features/chord-finder` and `https://moises.ai/features/guitar-capo-mode/` GET 200. Stripped text has no `guitar tab` and no `tablature`.
+- `https://moises.ai/products/live/` GET 200. The page says desktop-only, on-device, and offline.
+- `https://moises.ai/business-api/` GET 200. Title is a Music AI marketing page.
+- Repo lines re-opened: `hardware.py` 410–418 and 421–438, `.streamlit/config.toml` 24, `ui/common.py` 37–52, `web/src/App.tsx` 105–113, `backend/config.py` 43–46 and 65.
+
+### Not observed
+
+- Enforcement of the 5-upload or 5-minute help text.
+- A dollar price.
+- Moises Live installed.
+- The other 351 English sitemap paths and 104 help articles.
+
+## 16. 2026-10-23 planning close
+
+Documentation only. No product source was edited in this step.
+
+### Observed this run
+
+- `ui/stem_mixer_component/frontend/src/main.ts` lines 2994–3113 render header, transport, master, practice `<details>`, then `.mixer-stage`.
+- Speed and Key inputs are inside `.mixer-transport` at lines 3023–3037. Master is `#master-vol` at lines 3016–3021.
+- Empty strings that tell the user to re-run are at lines 2593, 2607, 2644, and 3086. The lyrics empty string at line 2667 already names the reason.
+- `ui/stem_mixer_component/frontend/src/pan.ts` lines 1–20 document the equal-power law. It was not changed.
+- `PAGE-INVENTORY.md` still states 405 English paths, 54 classified, 351 unread, 112 help articles, 8 read, 104 unread, and 351+104=455.
+
+### Written
+
+- `15-PHASE-1.6-PLAN.md` is the next code plan. It moves the practice sheet below the stage and forbids pan-law edits.
+- `14-RESCAN-OPEN-QUESTIONS.md` marks every prior row CLOSED or BLOCKED and says whether it blocks Phase 1.6.
+- Home stays done. The 2026-10-23 Home check used our spec.

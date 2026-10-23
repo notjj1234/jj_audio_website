@@ -74,6 +74,43 @@ def _mixer_main_ts() -> str:
     ).read_text(encoding="utf-8")
 
 
+def test_speed_key_lives_in_a_popover():
+    text = _mixer_main_ts()
+    assert 'id="practice-speed-popover"' in text
+    assert 'aria-controls="practice-speed-popover"' in text
+    assert 'id="practice-speed"' in text
+    assert 'id="practice-key"' in text
+    transport = text[text.find('<div class="mixer-transport">') : text.find('<div class="mixer-master">')]
+    assert 'id="practice-speed"' not in transport
+
+
+def test_practice_empty_copy_names_the_reason():
+    text = _mixer_main_ts()
+    assert "Re-run separation to analyse this song." not in text
+    assert "Re-run separation with analysis enabled." not in text
+    assert "No chords found — re-run analysis." not in text
+    assert "No sections found — re-run analysis." not in text
+    assert "No lyrics found (instrumental, or the lyrics model is unavailable)." in text
+    assert 'id="btn-practice-sheet"' in text
+
+
+def test_master_sits_with_the_stage():
+    text = _mixer_main_ts()
+    stage = text[text.find('<div class="mixer-stage">') : text.find('<details class="mixer-practice-panel"')]
+    assert 'id="master-vol"' in stage
+    assert 'id="mix-menu"' in text
+    assert "data-preset=\"karaoke\"" in text
+
+
+def test_player_v2_puts_practice_after_stage():
+    text = _mixer_main_ts()
+    stage = text.find('<div class="mixer-stage">')
+    panel = text.find('<details class="mixer-practice-panel"')
+    assert stage != -1 and panel != -1
+    assert stage < panel
+    assert 'data-ui="v2"' in text
+
+
 def test_load_stems_creates_context_without_resume():
     text = _mixer_main_ts()
     load = text[text.find("async loadStems(") : text.find("applyGains(gains")]

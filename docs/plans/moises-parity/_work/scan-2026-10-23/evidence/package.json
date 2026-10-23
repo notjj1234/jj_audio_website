@@ -1,0 +1,47 @@
+{
+  "name": "moises-desktop",
+  "productName": "Moises",
+  "author": "Moises Systems <support@moises.ai>",
+  "homepage": "https://moises.ai",
+  "version": "2.1.0",
+  "description": "Moises Desktop App",
+  "type": "module",
+  "main": "./out/main/index.js",
+  "repository": "https://github.com/moises-ai/service-desktop-app",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "@electron-toolkit/utils": "^4.0.0",
+    "@expo/sudo-prompt": "^9.3.2",
+    "@moises-ai/plugin-server": "0.8.40",
+    "@sentry/electron": "^7.18.0",
+    "@todesktop/runtime": "^2.1.4",
+    "axios": "^1.5.1",
+    "extract-zip": "^2.0.1"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ],
+    "supportedArchitectures": {
+      "os": [
+        "current",
+        "darwin",
+        "win32"
+      ],
+      "cpu": [
+        "current",
+        "arm64",
+        "x64"
+      ]
+    },
+    "ignoredBuiltDependencies": [
+      "@firebase/util",
+      "dtrace-provider",
+      "protobufjs"
+    ]
+  },
+  "packageManager": "pnpm@10.28.2+sha512.41872f037ad22f7348e3b1debbaf7e867cfd448f2726d9cf74c08f19507c31d2c8e7a11525b983febc2df640b5438dee6023ebb1f84ed43cc2d654d2bc326264",
+  "tdBuildId": "261021a1gygumpb"
+}
