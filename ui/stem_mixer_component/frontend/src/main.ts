@@ -45,8 +45,10 @@ import {
   snapPanToCenter,
 } from "./pan";
 import {
+  capoDiagramSymbol,
   chordAt,
   chordShape,
+  replaceChordSymbol,
   clampLoop,
   formatChordSymbol,
   lyricLineAt,
@@ -58,6 +60,25 @@ import {
 } from "./analysis";
 
 let practiceSheetOpen: boolean | null = null;
+const chordSymbolEdits = new Map<number, string>();
+let chordEditKey = "";
+let capoFret = 0;
+
+function adoptAnalysis(next: AnalysisData | null): AnalysisData | null {
+  const key = (next?.chords ?? []).map((chord) => String(chord.start)).join(",");
+  if (key !== chordEditKey) {
+    chordEditKey = key;
+    chordSymbolEdits.clear();
+    capoFret = 0;
+  }
+  if (next?.chords) {
+    for (const [index, symbol] of chordSymbolEdits) {
+      const chord = next.chords[index];
+      if (chord) chord.symbol = symbol;
+    }
+  }
+  return next;
+}
 
 function onSpeedPopoverEscape(event: KeyboardEvent): void {
   if (event.key !== "Escape") return;
@@ -2632,10 +2653,10 @@ function renderPracticePanel(): void {
       const chips = chords
         .map(
           (chord, index) =>
-            `<button type="button" class="chord-chip" data-chord-index="${index}" data-seek="${chord.start}">` +
-            `<span class="chord-chip-symbol">${escapeHtml(formatChordSymbol(chord.symbol))}</span>` +
-            `<span class="chord-chip-time">${readableTime(chord.start)}</span>` +
-            `</button>`
+            `<div class="chord-chip" data-chord-index="${index}">` +
+            `<input class="chord-chip-symbol" data-chord-index="${index}" value="${escapeHtml(formatChordSymbol(chord.symbol))}" aria-label="Chord symbol" />` +
+            `<button type="button" class="chord-chip-time" data-seek="${chord.start}">${readableTime(chord.start)}</button>` +
+            `</div>`
         )
         .join("");
       const draftChords = chords.every((chord) => !(Number(chord.confidence) > 0));
@@ -2643,7 +2664,12 @@ function renderPracticePanel(): void {
         '<div class="chord-now">' +
         '<div class="chord-now-symbol" id="chord-now-symbol">—</div>' +
         '<div class="chord-now-diagram" id="chord-now-diagram"></div>' +
-        '<div class="chord-now-meta"><span id="chord-now-section">—</span><span class="capo-label">No capo</span></div>' +
+        '<div class="chord-now-meta"><span id="chord-now-section">—</span>' +
+        '<label class="capo-label"><span class="visually-hidden">Capo fret</span>' +
+        '<select id="chord-capo" aria-label="Capo fret">' +
+        '<option value="0">No capo</option>' +
+        Array.from({ length: 11 }, (_, index) => `<option value="${index + 1}">Capo ${index + 1}</option>`).join("") +
+        "</select></label></div>" +
         "</div>" +
         `<div class="chord-strip" id="chord-strip">${chips}</div>` +
         (draftChords
@@ -2704,6 +2730,40 @@ function renderPracticePanel(): void {
   body.querySelectorAll<HTMLElement>("[data-seek]").forEach((el) => {
     el.onclick = () => seekPractice(Number(el.dataset.seek));
   });
+  body.querySelectorAll<HTMLInputElement>("input.chord-chip-symbol").forEach((input) => {
+    input.onkeydown = (event) => {
+      event.stopPropagation();
+      if (event.key === "Enter") input.blur();
+    };
+    input.onclick = (event) => event.stopPropagation();
+    input.onchange = () => {
+      const index = Number(input.dataset.chordIndex);
+      const chords = analysisData?.chords;
+      const chord = chords?.[index];
+      if (!chord) return;
+      const next = replaceChordSymbol(chord.symbol, input.value);
+      if (!next) {
+        input.value = formatChordSymbol(chord.symbol);
+        return;
+      }
+      chord.symbol = next;
+      chordSymbolEdits.set(index, next);
+      input.value = next;
+      const diagramEl = document.getElementById("chord-now-diagram");
+      if (diagramEl) delete diagramEl.dataset.symbol;
+      updatePracticePanelAt(engine.currentTime(), true);
+    };
+  });
+  const capoSelect = document.getElementById("chord-capo") as HTMLSelectElement | null;
+  if (capoSelect) {
+    capoSelect.value = String(capoFret);
+    capoSelect.onchange = () => {
+      capoFret = Math.max(0, Math.min(11, Math.round(Number(capoSelect.value) || 0)));
+      const diagramEl = document.getElementById("chord-now-diagram");
+      if (diagramEl) delete diagramEl.dataset.symbol;
+      updatePracticePanelAt(engine.currentTime(), true);
+    };
+  }
   body.querySelectorAll<HTMLElement>("[data-word-start]").forEach((el) => {
     el.onclick = (event) => {
       // The line button also seeks. A word click is more precise.
@@ -2828,10 +2888,11 @@ function updatePracticePanelAt(t: number, force = false): void {
     const sectionEl = document.getElementById("chord-now-section");
     if (symbolEl) symbolEl.textContent = symbol;
     if (diagramEl && chord) {
-      const nextSymbol = chord.symbol;
-      if (diagramEl.dataset.symbol !== nextSymbol) {
-        diagramEl.dataset.symbol = nextSymbol;
-        diagramEl.innerHTML = chordDiagramSvg(nextSymbol);
+      const shapeSymbol = capoDiagramSymbol(chord.symbol, capoFret);
+      const drawn = `${shapeSymbol}|${capoFret}`;
+      if (diagramEl.dataset.symbol !== drawn) {
+        diagramEl.dataset.symbol = drawn;
+        diagramEl.innerHTML = chordDiagramSvg(shapeSymbol);
       }
     } else if (diagramEl) {
       diagramEl.innerHTML = "";
@@ -2936,7 +2997,7 @@ function applyPracticeArgs(args: {
   const dataChanged =
     JSON.stringify(nextAnalysis) !== JSON.stringify(analysisData) ||
     JSON.stringify(nextTab) !== JSON.stringify(tabData);
-  analysisData = nextAnalysis;
+  analysisData = adoptAnalysis(nextAnalysis);
   tabData = nextTab;
   if (nextAnalysis) {
     engine.setCountInGrid(
@@ -4331,7 +4392,7 @@ async function onRender(event: Event): Promise<void> {
   localVideoUrl = "";
   localVideoFailedUrl = "";
   hideYoutubeVideo = true;
-  analysisData = parseAnalysisArg(args.analysis);
+  analysisData = adoptAnalysis(parseAnalysisArg(args.analysis));
   tabData = parseTabArg(args.tab);
   renderUI(data.theme);
   applyYoutubeArgs(

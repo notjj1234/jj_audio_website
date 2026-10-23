@@ -18,14 +18,22 @@ type Card = {
 
 type Flash = { message?: string; error?: boolean } | null;
 
+type Setlist = {
+  id: string;
+  name: string;
+  tokens?: string[];
+};
+
 type Props = {
   nonce?: string;
   product?: string;
   cards?: Card[];
   recents?: Row[];
   rows?: Row[];
+  setlists?: Setlist[];
   loading?: boolean;
   flash?: Flash;
+  activeSetlist?: string;
 };
 
 type MenuState = {
@@ -49,6 +57,8 @@ const ICONS = {
 
 let query = "";
 let sortOldest = false;
+let activeSetlistId = "";
+let activeSetlistReady = false;
 let menu: MenuState | null = null;
 let restoreFocus = "";
 
@@ -136,6 +146,14 @@ function openMenu(state: MenuState): void {
 function paint(props: Props): void {
   lastProps = props;
   const nonce = props.nonce || "";
+  const setlists = props.setlists || [];
+  if (!activeSetlistReady) {
+    activeSetlistReady = true;
+    activeSetlistId = props.activeSetlist || "";
+  }
+  if (activeSetlistId && !setlists.some((item) => item.id === activeSetlistId)) {
+    activeSetlistId = "";
+  }
   const root = document.querySelector("#root");
   if (!root) return;
   root.replaceChildren();
@@ -192,7 +210,38 @@ function paint(props: Props): void {
   all.dataset.pill = "all";
   all.dataset.focusid = "pill-all";
   all.textContent = "All";
-  all.setAttribute("aria-pressed", "true");
+  all.setAttribute("aria-pressed", activeSetlistId ? "false" : "true");
+  all.addEventListener("click", () => {
+    activeSetlistId = "";
+    paint(lastProps);
+    send(nonce, "select_setlist", "");
+  });
+  const pills = [all];
+  setlists.forEach((item) => {
+    const pill = el("button", "pill");
+    pill.type = "button";
+    pill.dataset.pill = item.id;
+    pill.dataset.focusid = `pill-${item.id}`;
+    pill.textContent = item.name;
+    pill.setAttribute("aria-pressed", item.id === activeSetlistId ? "true" : "false");
+    pill.addEventListener("click", () => {
+      activeSetlistId = item.id;
+      paint(lastProps);
+      send(nonce, "select_setlist", item.id);
+    });
+    pills.push(pill);
+  });
+  const create = el("button", "pill");
+  create.type = "button";
+  create.dataset.pill = "new";
+  create.dataset.focusid = "pill-new";
+  create.textContent = "New setlist";
+  create.setAttribute("aria-pressed", "false");
+  create.addEventListener("click", () => {
+    const name = window.prompt("Setlist name");
+    if (name === null) return;
+    send(nonce, "new_setlist", name);
+  });
   const search = el("label", "search");
   search.appendChild(document.createRange().createContextualFragment(svg("search", 16)));
   const input = el("input");
@@ -218,7 +267,7 @@ function paint(props: Props): void {
     const box = sort.getBoundingClientRect();
     openMenu({ kind: "sort", token: "", focusId: "sort", x: box.left, y: box.bottom + 4 });
   });
-  toolbar.append(all, search, sort);
+  toolbar.append(...pills, create, search, sort);
   head.append(filesHeading, toolbar);
   home.append(head);
 
@@ -239,12 +288,19 @@ function paint(props: Props): void {
   } else {
     const source = props.rows || [];
     const needle = query.trim().toLowerCase();
+    const active = setlists.find((item) => item.id === activeSetlistId);
+    const allowed = active ? new Set(active.tokens || []) : null;
     let shown = source.filter((row) => {
+      if (allowed && !allowed.has(row.token)) return false;
       if (!needle) return true;
       return `${row.title} ${row.subtitle}`.toLowerCase().includes(needle);
     });
     shown = sortOldest ? [...shown].reverse() : shown;
-    if (source.length === 0) {
+    if (shown.length === 0 && active) {
+      const empty = el("p", "empty");
+      empty.textContent = needle ? "No songs match that search." : "No songs in this setlist.";
+      files.append(empty);
+    } else if (source.length === 0) {
       const empty = el("p", "empty");
       empty.textContent = "No songs yet.";
       files.append(empty);
@@ -333,6 +389,13 @@ function paint(props: Props): void {
                   : "analyse",
               id: menu.token,
             },
+            ...(setlists.length
+              ? setlists.map((item) => ({
+                  label: setlists.length === 1 ? "Add to setlist" : `Add to ${item.name}`,
+                  type: "add_to_setlist",
+                  id: `${item.id}|${menu?.token || ""}`,
+                }))
+              : [{ label: "Add to setlist", type: "add_to_setlist", id: `|${menu.token}` }]),
           ];
     items.forEach((item) => {
       const button = el("button");

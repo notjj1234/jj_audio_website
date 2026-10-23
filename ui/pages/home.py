@@ -10,6 +10,7 @@ from pathlib import Path
 import streamlit as st
 
 from ui.common import DATA_DIR, edition_product_name, list_recent_runs
+from ui.setlists import add_song, create_setlist, load_setlists, save_setlists
 from ui.design_tokens import ui_v2_enabled
 from ui.isolate_jobs import list_jobs, merge_library_runs
 from ui.isolate_state import (
@@ -221,11 +222,13 @@ def build_home_props(
     nonce: str | None = None,
     flash: tuple[str, bool] | None = None,
     loading: bool = False,
+    setlists: list[dict] | None = None,
 ) -> dict:
     """Browser payload. Paths stay in ``_TOKEN_MAP`` and never in the dict."""
     _TOKEN_MAP.clear()
     issued = nonce or secrets.token_hex(8)
     public_rows: list[dict[str, str]] = []
+    tokens_by_path: dict[str, str] = {}
     for row in rows:
         run_dir = str(row.get("run_dir") or "")
         summary = analysis_summary(row)
@@ -233,6 +236,7 @@ def build_home_props(
         if run_dir:
             token = hashlib.sha256(f"{issued}\n{run_dir}".encode()).hexdigest()[:16]
             _TOKEN_MAP[token] = run_dir
+            tokens_by_path[run_dir] = token
         public_rows.append(
             {
                 "token": token,
@@ -242,6 +246,17 @@ def build_home_props(
                 "action": "practice" if summary else "analyse",
             }
         )
+    public_setlists: list[dict] = []
+    for item in setlists or []:
+        if not isinstance(item, dict):
+            continue
+        ident = str(item.get("id") or "").strip()
+        name = " ".join(str(item.get("name") or "").split())
+        songs = item.get("songs")
+        if not ident or not name or not isinstance(songs, list):
+            continue
+        tokens = [tokens_by_path[str(song)] for song in songs if str(song) in tokens_by_path]
+        public_setlists.append({"id": ident, "name": name, "tokens": tokens})
     flash_payload = None
     if isinstance(flash, tuple) and len(flash) == 2:
         flash_payload = {"message": str(flash[0]), "error": bool(flash[1])}
@@ -251,14 +266,55 @@ def build_home_props(
         "cards": [dict(card) for card in _HOME_CARDS],
         "recents": public_rows[:6],
         "rows": public_rows,
+        "setlists": public_setlists,
         "loading": bool(loading),
         "flash": flash_payload,
     }
 
 
+def _setlists_path() -> Path:
+    return DATA_DIR / "setlists.json"
+
+
+def _remember_setlist(setlist_id: str) -> None:
+    st.session_state["home_v2_setlist"] = setlist_id
+
+
+def active_setlist_id(setlists: list[dict]) -> str:
+    """The setlist pill that should stay selected after a rerun."""
+    active = str(st.session_state.get("home_v2_setlist") or "")
+    if any(str(item.get("id") or "") == active for item in setlists):
+        return active
+    return ""
+
+
 def _handle_home_event(event: dict, tokens: dict[str, str]) -> None:
     kind = str(event.get("type") or "")
     ident = str(event.get("id") or "")
+    if kind == "new_setlist":
+        lists = load_setlists(_setlists_path())
+        created = create_setlist(lists, ident)
+        save_setlists(_setlists_path(), lists)
+        _remember_setlist(str(created["id"]))
+        st.rerun()
+        return
+    if kind == "add_to_setlist":
+        setlist_id, sep, token = ident.partition("|")
+        run_dir = tokens.get(token) if sep else ""
+        if not setlist_id or not run_dir:
+            _flash("Create a setlist first.", error=True)
+            st.rerun()
+            return
+        lists = load_setlists(_setlists_path())
+        if add_song(lists, setlist_id, run_dir):
+            save_setlists(_setlists_path(), lists)
+        _remember_setlist(setlist_id)
+        st.rerun()
+        return
+    if kind == "select_setlist":
+        _remember_setlist(ident)
+        st.rerun()
+        return
     if kind == "open_card":
         if ident == "learn":
             open_new_separation()
@@ -297,7 +353,9 @@ def _main_v2() -> None:
         product=edition_product_name(),
         flash=flash,
         loading=show_loading,
+        setlists=load_setlists(_setlists_path()),
     )
+    props["activeSetlist"] = active_setlist_id(props["setlists"])
     st.session_state["home_v2_nonce"] = props["nonce"]
     st.session_state["home_v2_tokens"] = dict(_TOKEN_MAP)
     try:

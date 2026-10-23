@@ -206,6 +206,7 @@ h2 {
 .toolbar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   min-width: 0;
   flex: 1;
@@ -221,7 +222,12 @@ h2 {
   font-size: 14px;
   line-height: 20px;
   font-weight: 500;
-  cursor: default;
+  cursor: pointer;
+}
+
+.pill[aria-pressed="false"] {
+  background: var(--home-wash);
+  color: var(--home-text);
 }
 
 .search {

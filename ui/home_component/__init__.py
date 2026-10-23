@@ -63,6 +63,8 @@ def home_library(
         cards=list(props.get("cards") or []),
         recents=list(props.get("recents") or []),
         rows=list(props.get("rows") or []),
+        setlists=list(props.get("setlists") or []),
+        activeSetlist=props.get("activeSetlist") or "",
         loading=bool(props.get("loading")),
         flash=props.get("flash"),
         key=key,

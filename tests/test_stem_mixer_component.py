@@ -74,6 +74,72 @@ def _mixer_main_ts() -> str:
     ).read_text(encoding="utf-8")
 
 
+def test_capo_and_chord_edit_rules():
+    import json
+    import subprocess
+
+    analysis = (
+        Path(__file__).resolve().parents[1]
+        / "ui"
+        / "stem_mixer_component"
+        / "frontend"
+        / "src"
+        / "analysis.ts"
+    )
+    frontend = analysis.parents[1]
+    script = r"""
+const ts = require("typescript");
+const fs = require("fs");
+const src = fs.readFileSync(process.argv[1], "utf8");
+const out = ts.transpileModule(src, {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+}).outputText;
+const module = { exports: {} };
+const load = new Function("exports", "module", out + "\nreturn module.exports;");
+const api = load(module.exports, module);
+const result = {
+  diagram: api.capoDiagramSymbol("G", 2),
+  minor: api.capoDiagramSymbol("Am", 2),
+  slash: api.capoDiagramSymbol("G/B", 2),
+  same: api.capoDiagramSymbol("G", 0),
+  label: api.capoLabel(2),
+  zero: api.capoLabel(0),
+  edited: api.replaceChordSymbol("C", "D:min"),
+  rejected: api.replaceChordSymbol("C", "nope"),
+};
+if (typeof api.capoDiagramSymbol !== "function") process.exit(2);
+process.stdout.write(JSON.stringify(result));
+"""
+    run = subprocess.run(
+        ["node", "-e", script, str(analysis)],
+        cwd=frontend,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode == 0, run.stderr
+    result = json.loads(run.stdout)
+    assert result == {
+        "diagram": "F",
+        "minor": "Gm",
+        "slash": "F/A",
+        "same": "G",
+        "label": "Capo 2",
+        "zero": "No capo",
+        "edited": "Dm",
+        "rejected": None,
+    }
+
+
+def test_chord_chip_is_editable_and_capo_has_a_control():
+    text = _mixer_main_ts()
+    assert 'class="chord-chip-symbol"' in text
+    assert "<input" in text[text.find("chord-chip-symbol") - 80 : text.find("chord-chip-symbol")]
+    assert 'id="chord-capo"' in text
+    assert "capoDiagramSymbol" in text
+    assert "No capo" in text
+
+
 def test_speed_key_lives_in_a_popover():
     text = _mixer_main_ts()
     assert 'id="practice-speed-popover"' in text

@@ -264,3 +264,69 @@ export function chordShape(symbol: string): ChordShape | null {
   );
   return { frets, baseFret: fret > 0 ? fret : 1 };
 }
+
+const PC_NAME = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+const SUFFIX_FROM_QUALITY: Record<Quality, string> = {
+  maj: "",
+  min: "m",
+  "7": "7",
+  maj7: "maj7",
+  m7: "m7",
+  sus4: "sus4",
+  dim: "dim",
+  aug: "aug",
+};
+
+function capoFret(capo: number): number {
+  return Math.max(0, Math.min(11, Math.round(Number(capo) || 0)));
+}
+
+function transposePitch(pc: number, semitones: number): string {
+  const steps = ((semitones % 12) + 12) % 12;
+  return PC_NAME[(pc + steps) % 12]!;
+}
+
+/** Sounding symbol transposed by semitones. Unknown text is returned unchanged. */
+export function transposeChordSymbol(symbol: string, semitones: number): string {
+  const formatted = formatChordSymbol(symbol);
+  if (formatted === "—") return formatted;
+  const [head, bass] = formatted.split("/");
+  const parsed = parseChord(head ?? "");
+  if (!parsed) return formatted;
+  const nextHead =
+    transposePitch(parsed.rootPc, semitones) + SUFFIX_FROM_QUALITY[parsed.quality];
+  if (!bass) return nextHead;
+  const bassPc = ROOT_PC[bass.trim()];
+  if (bassPc === undefined) return nextHead;
+  return `${nextHead}/${transposePitch(bassPc, semitones)}`;
+}
+
+/** Shape to draw above the capo. The stored chord name does not change. */
+export function capoDiagramSymbol(symbol: string, capo: number): string {
+  const fret = capoFret(capo);
+  const formatted = formatChordSymbol(symbol);
+  if (fret === 0) return formatted === "—" ? String(symbol ?? "") : formatted;
+  return transposeChordSymbol(formatted, -fret);
+}
+
+export function capoLabel(capo: number): string {
+  const fret = capoFret(capo);
+  return fret === 0 ? "No capo" : `Capo ${fret}`;
+}
+
+/** Accept a typed chord, or null when it is not a symbol this sheet can draw. */
+export function replaceChordSymbol(current: string, typed: string): string | null {
+  void current;
+  const formatted = formatChordSymbol(typed);
+  if (!formatted || formatted === "—") return null;
+  const [headRaw, bassRaw] = formatted.split("/");
+  const headMatch = (headRaw ?? "").trim().match(/^([A-Ga-g])([#b]?)(.*)$/);
+  if (!headMatch) return null;
+  const head = headMatch[1]!.toUpperCase() + (headMatch[2] ?? "") + (headMatch[3] ?? "");
+  if (!parseChord(head)) return null;
+  if (!bassRaw) return head;
+  const bassMatch = bassRaw.trim().match(/^([A-Ga-g])([#b]?)$/);
+  if (!bassMatch) return null;
+  return `${head}/${bassMatch[1]!.toUpperCase()}${bassMatch[2] ?? ""}`;
+}
