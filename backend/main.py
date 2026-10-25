@@ -25,6 +25,7 @@ from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
 from audio_to_tab.isolate import SUPPORTED_MODELS
+from audio_to_tab.phase3 import stem_names_from_artifacts
 from backend.account import delete_user_account
 from backend.auth import (
     REFRESH_COOKIE,
@@ -249,10 +250,17 @@ def refresh_token(request: Request, response: Response, db: Session = Depends(ge
     if not token:
         raise HTTPException(401, "Missing refresh token")
     payload = decode_token(token, "refresh")
+    from backend.refresh_store import refresh_jti_revoked, revoke_refresh_jti
+
+    presented = str(payload.get("jti") or "")
+    if presented and refresh_jti_revoked(presented):
+        raise HTTPException(401, "Refresh token revoked")
     user = get_user_by_id(db, payload["sub"])
     if not user:
         raise HTTPException(401, "User not found")
     access = create_access_token(user.id, user.email)
+    if presented:
+        revoke_refresh_jti(presented)
     new_refresh = create_refresh_token(user.id)
     response.set_cookie(
         REFRESH_COOKIE,
@@ -267,7 +275,18 @@ def refresh_token(request: Request, response: Response, db: Session = Depends(ge
 
 
 @app.post("/v1/auth/logout")
-def logout(response: Response) -> dict:
+def logout(request: Request, response: Response) -> dict:
+    token = request.cookies.get(REFRESH_COOKIE)
+    if token:
+        try:
+            payload = decode_token(token, "refresh")
+        except HTTPException:
+            payload = {}
+        jti = str(payload.get("jti") or "")
+        if jti:
+            from backend.refresh_store import revoke_refresh_jti
+
+            revoke_refresh_jti(jti)
     response.delete_cookie(REFRESH_COOKIE, path="/v1/auth")
     return {"status": "ok"}
 
@@ -482,6 +501,16 @@ def get_job(job_id: str, user=Depends(get_current_user)) -> JobResponse:
     if not job:
         raise HTTPException(404, "Job not found")
     return _job_response(job, user.id)
+
+
+@app.get("/v1/jobs/{job_id}/stems")
+def job_stem_names(job_id: str, user=Depends(get_current_user)) -> dict[str, list[str]]:
+    """Read-only stem names for a job this user owns."""
+    job = job_manager.get_owned(job_id, user.id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    kinds = [str(artifact.kind) for artifact in getattr(job, "artifacts", []) or []]
+    return {"stems": stem_names_from_artifacts(kinds)}
 
 
 @app.post("/v1/jobs/{job_id}/cancel", response_model=JobResponse)

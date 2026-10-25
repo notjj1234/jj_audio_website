@@ -109,3 +109,90 @@ def test_home_screen_offers_setlists():
     assert "New setlist" in built
     assert "No songs in this setlist." in built
     assert "select_setlist" in built
+    assert "Remove from setlist" in frontend
+    assert "Rename" in frontend
+    assert "Delete setlist" in frontend
+    assert "Remove from setlist" in built
+    assert "Rename" in built
+    assert "Delete setlist" in built
+
+
+def test_rename_blank_keeps_id_and_song_order():
+    from ui.setlists import add_song, create_setlist, rename_setlist
+
+    lists: list[dict] = []
+    created = create_setlist(lists, "Gig")
+    assert add_song(lists, created["id"], "/songs/a") is True
+    assert add_song(lists, created["id"], "/songs/b") is True
+    assert rename_setlist(lists, created["id"], "   ") is True
+    assert lists[0]["id"] == created["id"]
+    assert lists[0]["name"] == "Setlist"
+    assert lists[0]["songs"] == ["/songs/a", "/songs/b"]
+    assert rename_setlist(lists, "missing", "Other") is False
+    assert len(lists) == 1
+    assert lists[0]["name"] == "Setlist"
+
+
+def test_delete_setlist_leaves_the_song_file(tmp_path: Path):
+    from ui.setlists import add_song, create_setlist, delete_setlist
+
+    song = tmp_path / "song.wav"
+    song.write_bytes(b"x")
+    lists: list[dict] = []
+    created = create_setlist(lists, "Gig")
+    assert add_song(lists, created["id"], str(song)) is True
+    assert delete_setlist(lists, created["id"]) is True
+    assert lists == []
+    assert song.is_file()
+    assert delete_setlist(lists, created["id"]) is False
+
+
+def test_home_remove_rename_and_delete_use_tokens(tmp_path: Path, monkeypatch):
+    import json
+
+    import ui.pages.home as home
+    from ui.setlists import load_setlists
+
+    monkeypatch.setattr(home, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(home.st, "rerun", lambda: None)
+    song = tmp_path / "song.wav"
+    song.write_bytes(b"keep")
+    home._handle_home_event({"type": "new_setlist", "id": "Friday"}, {})
+    lists = load_setlists(tmp_path / "setlists.json")
+    setlist_id = lists[0]["id"]
+    props = home.build_home_props(
+        rows=[{"run_dir": str(song), "title": "x"}],
+        setlists=lists,
+    )
+    token = props["rows"][0]["token"]
+    home._handle_home_event(
+        {"type": "add_to_setlist", "id": f"{setlist_id}|{token}"},
+        dict(home._TOKEN_MAP),
+    )
+    home._handle_home_event(
+        {"type": "rename_setlist", "id": f"{setlist_id}|Late|Show"},
+        {},
+    )
+    renamed = load_setlists(tmp_path / "setlists.json")
+    assert renamed[0]["id"] == setlist_id
+    assert renamed[0]["name"] == "Late|Show"
+    assert renamed[0]["songs"] == [str(song)]
+    props = home.build_home_props(
+        rows=[{"run_dir": str(song), "title": "x"}],
+        setlists=renamed,
+    )
+    encoded = json.dumps(props)
+    assert str(song) not in encoded
+    assert "run_dir" not in encoded
+    assert props["setlists"][0]["name"] == "Late|Show"
+    home._handle_home_event(
+        {"type": "remove_from_setlist", "id": f"{setlist_id}|{props['rows'][0]['token']}"},
+        dict(home._TOKEN_MAP),
+    )
+    removed = load_setlists(tmp_path / "setlists.json")
+    assert removed[0]["songs"] == []
+    assert song.is_file()
+    home._handle_home_event({"type": "delete_setlist", "id": setlist_id}, {})
+    assert load_setlists(tmp_path / "setlists.json") == []
+    assert home.active_setlist_id([]) == ""
+    assert song.is_file()

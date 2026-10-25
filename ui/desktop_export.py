@@ -260,3 +260,21 @@ def choose_export_dir(
     if plat == "darwin":
         picked = Path(str(picked).rstrip("/"))
     return picked if picked.exists() or picked.parent.exists() else None
+
+
+def write_wav_48_24(src: Path, dest: Path) -> Path:
+    """Write a WAV at 48 kHz / 24-bit. The source file is left unchanged."""
+    import numpy as np
+    import soundfile as sf
+
+    data, rate = sf.read(str(src), always_2d=True)
+    rate = int(rate)
+    if rate != 48000 and len(data):
+        new_len = max(1, int(round(len(data) * 48000 / rate)))
+        old_x = np.linspace(0.0, 1.0, len(data), endpoint=False)
+        new_x = np.linspace(0.0, 1.0, new_len, endpoint=False)
+        columns = [np.interp(new_x, old_x, data[:, channel]) for channel in range(data.shape[1])]
+        data = np.stack(columns, axis=1)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(dest), data, 48000, subtype="PCM_24")
+    return dest

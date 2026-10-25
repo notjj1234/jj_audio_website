@@ -1,0 +1,42 @@
+[
+  {
+    "id": "clean_line",
+    "category": "monophonic",
+    "wav": "clean_line.wav",
+    "midi": "clean_line.mid",
+    "note_count": 12,
+    "tempo_bpm": 100.0,
+    "source": "synthesized (Karplus-Strong) by eval/generate_guitar_fixtures.py",
+    "licence": "same as this repository (MIT)"
+  },
+  {
+    "id": "chord_progression",
+    "category": "polyphonic-strummed",
+    "wav": "chord_progression.wav",
+    "midi": "chord_progression.mid",
+    "note_count": 42,
+    "tempo_bpm": 90.0,
+    "source": "synthesized (Karplus-Strong) by eval/generate_guitar_fixtures.py",
+    "licence": "same as this repository (MIT)"
+  },
+  {
+    "id": "mixed_band",
+    "category": "full-mix",
+    "wav": "mixed_band.wav",
+    "midi": "mixed_band.mid",
+    "note_count": 42,
+    "tempo_bpm": 90.0,
+    "source": "synthesized guitar + bass + drums by eval/generate_guitar_fixtures.py",
+    "licence": "same as this repository (MIT)"
+  },
+  {
+    "id": "real_guitar_el_noi_30s",
+    "category": "real-recording",
+    "wav": "real_guitar_el_noi_30s.wav",
+    "midi": null,
+    "note_count": null,
+    "tempo_bpm": null,
+    "source": "Wikimedia Commons, 'El Noi de la Mare (guitar).ogg', performer/uploader Jujutacular, first 30 s; https://commons.wikimedia.org/wiki/File:El_Noi_de_la_Mare_(guitar).ogg",
+    "licence": "Public domain"
+  }
+]

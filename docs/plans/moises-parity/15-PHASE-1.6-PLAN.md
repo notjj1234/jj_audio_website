@@ -1,6 +1,6 @@
 # Player shell Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Recompose the desktop practice player so the stage stays put and the practice sheet sits below it, without changing the audio graph.
 
@@ -43,7 +43,7 @@ Current order, read at `main.ts` 2994–3113: `.mixer-header`, `.mixer-transport
 - Consumes: existing ids `practice-panel`, `btn-playpause`, `seek`, `stems`
 - Produces: DOM order header, transport, stage, practice panel, plus `data-ui="v2"` on `.mixer`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_player_v2_puts_practice_after_stage():
@@ -55,21 +55,21 @@ def test_player_v2_puts_practice_after_stage():
     assert 'data-ui="v2"' in text
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Run: `.venv311\Scripts\python.exe -m pytest tests/test_stem_mixer_component.py::test_player_v2_puts_practice_after_stage -q`
 
 Expected: FAIL because the panel is currently before the stage and `data-ui` is absent.
 
-- [ ] **Step 3: Move the block**
+- [x] **Step 3: Move the block**
 
 Cut the `<details class="mixer-practice-panel" ...>` element, including its summary, toolbar, tabs, and body, and paste it after the `.mixer-stage` closing `</div>`. Add `data-ui="v2"` on the `.mixer` root. Do not rename `id="practice-panel"`, `id="practice-body"`, or the tab `data-practice-tab` values. Do not edit `setPracticeRate`, `setPracticeSemitones`, `startCountIn`, or `startSources`.
 
-- [ ] **Step 4: Re-run the test**
+- [x] **Step 4: Re-run the test**
 
 Expected: PASS.
 
-- [ ] **Step 5: Stop before commit**
+- [x] **Step 5: Stop before commit**
 
 Do not commit unless this conversation asks.
 
@@ -90,7 +90,7 @@ Do not commit unless this conversation asks.
 - Consumes: `#practice-speed` (min 0.5, max 1.5, step 0.05) and `#practice-key` (min -6, max 6, step 1)
 - Produces: a closed-by-default popover that still contains those two inputs and `#btn-practice-reset`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_speed_key_lives_in_a_popover():
@@ -103,17 +103,17 @@ def test_speed_key_lives_in_a_popover():
     assert 'id="practice-speed"' not in transport
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Run: `.venv311\Scripts\python.exe -m pytest tests/test_stem_mixer_component.py::test_speed_key_lives_in_a_popover -q`
 
 Expected: FAIL. The sliders are inside `.mixer-transport` today (`main.ts` 3023–3037).
 
-- [ ] **Step 3: Move the controls**
+- [x] **Step 3: Move the controls**
 
 Leave a button in the transport: label `Speed & Key`, `aria-expanded="false"`, `aria-controls="practice-speed-popover"`. Put the existing speed row, key row, and Reset button inside `<div id="practice-speed-popover" hidden>`. Wire the button to toggle `hidden` and `aria-expanded`. Escape sets `hidden` and returns focus to the button. Keep the existing `input` listeners. Range stays 0.5–1.5 and −6–+6.
 
-- [ ] **Step 4: Re-run the test**
+- [x] **Step 4: Re-run the test**
 
 Expected: PASS.
 
@@ -134,7 +134,7 @@ Expected: PASS.
 - Consumes: `#master-vol`, `#btn-muteall`, `#btn-reset`, `#btn-clearsolo`, `.preset-chip`
 - Produces: `#master-vol` inside `.mixer-stage`, and the preset/reset buttons inside `<div id="mix-menu" hidden>`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_master_sits_with_the_stage():
@@ -147,15 +147,15 @@ def test_master_sits_with_the_stage():
 
 This assertion assumes Task 1 has already moved the practice panel after the stage. If Task 1 is not done, the slice is empty and the test fails closed.
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Expected: FAIL. `#master-vol` is inside `.mixer-transport` (`main.ts` 3016–3021).
 
-- [ ] **Step 3: Move the nodes**
+- [x] **Step 3: Move the nodes**
 
 Move the master `<label class="master-vol">` into `.mixer-stage`, above `#stems`. Move Mute all, Reset mix, Clear solo, Show video, and the four preset chips into `<div id="mix-menu" hidden>`. Add a transport button `Mix`, `aria-controls="mix-menu"`. Do not change preset `data-preset` values `all`, `karaoke`, `acapella`, `drumsBass`. Do not change `clampPan` or the solo/mute handlers.
 
-- [ ] **Step 4: Re-run the test and the pan tests**
+- [x] **Step 4: Re-run the test and the pan tests**
 
 Run: `.venv311\Scripts\python.exe -m pytest tests/test_stem_mixer_component.py::test_master_sits_with_the_stage tests/test_mixer_pan.py -q`
 
@@ -178,7 +178,7 @@ Expected: PASS. A pan failure means this task touched the law. Revert that part.
 - Consumes: the lyrics string already at line 2667, which names the reason
 - Produces: the same reason-shaped copy for the generic and chord empties, and a sheet that can collapse
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_practice_empty_copy_names_the_reason():
@@ -191,11 +191,11 @@ def test_practice_empty_copy_names_the_reason():
     assert 'id="btn-practice-sheet"' in text
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Expected: FAIL. Those two re-run strings are in `main.ts` today.
 
-- [ ] **Step 3: Change copy and add a collapse control**
+- [x] **Step 3: Change copy and add a collapse control**
 
 Replace the initial body string with `No analysis in this run.` Replace the chord empty string with `No chords in this run.` Replace `No sections found — re-run analysis.` with `No sections in this run.` Replace the all-tabs empty string with `No chords, sections, lyrics, or tab in this run.` Leave the lyrics string unchanged. Add `<button type="button" id="btn-practice-sheet">Practice</button>` in the transport. It toggles the `hidden` attribute on `#practice-panel`. Do not change lyric-word timestamps or tab measure ids.
 
@@ -207,7 +207,7 @@ In `style.css`, under `.mixer[data-ui="v2"]`:
 
 These heights are our spec from `10` §1.3, not a new Moises measurement.
 
-- [ ] **Step 4: Re-run the test**
+- [x] **Step 4: Re-run the test**
 
 Expected: PASS.
 
@@ -223,7 +223,7 @@ Expected: PASS.
 - Modify: `ui/stem_mixer_component/frontend/build/` only by the build command
 - Test: `tests/test_stem_mixer_component.py`
 
-- [ ] **Step 1: Typecheck and build**
+- [x] **Step 1: Typecheck and build**
 
 Run from `ui/stem_mixer_component/frontend`: `node .\node_modules\typescript\bin\tsc --noEmit`
 
@@ -231,7 +231,7 @@ Then from the repo root: `powershell -File scripts/dev.ps1 mixer-build` if that 
 
 Expected: exit 0. Then `.venv311\Scripts\python.exe -m pytest tests/test_stem_mixer_component.py tests/test_mixer_pan.py -q` passes.
 
-- [ ] **Step 2: Browser check**
+- [x] **Step 2: Browser check**
 
 Open the desktop app. Load one existing mix. At 1440, 1280, 1024, and 900 confirm:
 

@@ -8,10 +8,12 @@ import soundfile as sf
 
 from audio_to_tab.analysis import ChordEvent
 from audio_to_tab.chords import (
+    _absorb_short_runs,
     _merge_events,
     _normalize_symbol,
     _snap_to_beat,
     detect_chords,
+    estimate_tuning_semitones,
 )
 
 SR = 22050
@@ -57,7 +59,7 @@ def _write_progression(path, symbols=("C", "F", "G", "C"), *, chord_sec: float =
         ("C/E", "C/E"),
         ("H", None),
         ("Cadd9", None),
-        ("C6", None),
+        ("C6", "C6"),
         ("N", None),
         ("", None),
         (None, None),
@@ -99,7 +101,8 @@ def test_detect_chords_on_synthetic_progression(tmp_path):
     assert "F" in symbols
     assert "G" in symbols
     assert symbols[-1] == "C"
-    assert all(event.confidence == 0.0 for event in events)
+    assert all(0.0 <= event.confidence <= 1.0 for event in events)
+    assert any(event.confidence > 0.0 for event in events)
     assert [e.start for e in events] == sorted(e.start for e in events)
     assert all(0.0 <= e.start < e.end <= 8.05 for e in events)
     assert all(e.end - e.start >= 0.10 - 1e-9 for e in events)
@@ -112,7 +115,8 @@ def test_detect_chords_without_beats_uses_fixed_grid(tmp_path):
     events = detect_chords(path, beats=(), bpm=None)
 
     assert events
-    assert all(e.confidence == 0.0 for e in events)
+    assert all(0.0 <= e.confidence <= 1.0 for e in events)
+    assert any(e.confidence > 0.0 for e in events)
     assert [e.start for e in events] == sorted(e.start for e in events)
 
 
@@ -152,3 +156,160 @@ def test_progress_callback_is_called(tmp_path):
 
     assert messages
     assert any("chord" in message.lower() for message in messages)
+
+
+def _tone(duration: float, *partials: tuple[float, float], sr: int = SR) -> np.ndarray:
+    t = np.arange(int(sr * duration), dtype=np.float64) / sr
+    y = np.zeros_like(t)
+    for frequency, amplitude in partials:
+        y += amplitude * np.sin(2 * np.pi * frequency * t)
+    return y
+
+
+def test_tuning_estimated_on_detuned_render():
+    cents = 30.0
+    ratio = 2 ** (cents / 1200.0)
+    y = _tone(
+        2.0,
+        (261.63 * ratio, 0.2),
+        (329.63 * ratio, 0.16),
+        (392.00 * ratio, 0.12),
+        (523.25 * ratio, 0.05),
+    )
+    estimate = estimate_tuning_semitones(y, SR)
+    assert abs(estimate - 0.30) <= 0.15
+
+
+def test_maj7_prior_beats_overtone_template(tmp_path):
+    # C major triad. B is only the 3rd harmonic of E, quieter than the chord tones.
+    y = _tone(
+        2.0,
+        (261.63, 0.20),
+        (329.63, 0.16),
+        (392.00, 0.14),
+        (329.63 * 3, 0.04),
+    )
+    path = tmp_path / "overtone.wav"
+    sf.write(path, y, SR)
+    events = detect_chords(path, beats=tuple(i * 0.5 for i in range(5)), bpm=120.0)
+    assert events
+    assert all(event.symbol == "C" for event in events)
+
+
+def test_sounded_major_seventh_stays(tmp_path):
+    y = _tone(
+        2.0,
+        (261.63, 0.18),
+        (329.63, 0.16),
+        (392.00, 0.14),
+        (493.88, 0.15),
+        (587.33, 0.03),
+    )
+    path = tmp_path / "maj7.wav"
+    sf.write(path, y, SR)
+    events = detect_chords(path, beats=tuple(i * 0.5 for i in range(5)), bpm=120.0, provisional_key="C")
+    assert events
+    assert events[0].symbol.startswith("Cmaj7")
+
+
+def test_bass_non_chord_tone_does_not_rename_the_root(tmp_path):
+    guitar = _tone(2.0, (261.63, 0.20), (329.63, 0.16), (392.00, 0.14))
+    bass = _tone(2.0, (87.31, 0.45))
+    guitar_path = tmp_path / "guitar.wav"
+    bass_path = tmp_path / "bass.wav"
+    sf.write(guitar_path, guitar, SR)
+    sf.write(bass_path, bass, SR)
+    events = detect_chords(
+        guitar_path,
+        beats=tuple(i * 0.5 for i in range(5)),
+        bpm=120.0,
+        provisional_key="C",
+        bass_path=bass_path,
+    )
+    assert events
+    assert all(event.symbol.split("/")[0].startswith("C") for event in events)
+
+
+def test_bass_third_may_slash_but_does_not_become_the_root(tmp_path):
+    guitar = _tone(2.0, (261.63, 0.20), (329.63, 0.16), (392.00, 0.14))
+    bass = _tone(2.0, (82.41, 0.5))
+    guitar_path = tmp_path / "guitar.wav"
+    bass_path = tmp_path / "bass.wav"
+    sf.write(guitar_path, guitar, SR)
+    sf.write(bass_path, bass, SR)
+    events = detect_chords(
+        guitar_path,
+        beats=tuple(i * 0.5 for i in range(5)),
+        bpm=120.0,
+        provisional_key="C",
+        bass_path=bass_path,
+    )
+    assert events
+    assert any(event.symbol == "C/E" for event in events)
+    assert all(not event.symbol.startswith("E") for event in events)
+
+
+def test_short_flicker_is_merged():
+    events = [
+        ChordEvent(0.0, 2.0, "C", 0.8, simple="C", medium="C"),
+        ChordEvent(2.0, 2.1, "G", 0.4, simple="G", medium="G"),
+        ChordEvent(2.1, 4.0, "C", 0.8, simple="C", medium="C"),
+    ]
+    absorbed = _absorb_short_runs(events, [0.5, 0.2, 0.5], beat_sec=0.5)
+    assert [(event.start, event.end, event.symbol) for event in absorbed] == [(0.0, 4.0, "C")]
+
+
+def test_same_root_quality_flicker_under_one_beat_stays():
+    # One-beat same-root absorb scored clean root 0.896. Within-bar chops stay blocked.
+    events = [
+        ChordEvent(0.0, 2.0, "C", 0.8, simple="C", medium="C"),
+        ChordEvent(2.0, 2.6, "Cmaj7", 0.4, simple="C", medium="Cmaj7"),
+        ChordEvent(2.6, 4.0, "C", 0.8, simple="C", medium="C"),
+    ]
+    absorbed = _absorb_short_runs(events, [0.5, 0.2, 0.5], beat_sec=1.0)
+    assert [event.symbol for event in absorbed] == ["C", "Cmaj7", "C"]
+
+
+def test_different_root_inside_the_beat_is_kept():
+    events = [
+        ChordEvent(0.0, 2.0, "C", 0.8, simple="C", medium="C"),
+        ChordEvent(2.0, 2.6, "F", 0.4, simple="F", medium="F"),
+        ChordEvent(2.6, 4.0, "C", 0.8, simple="C", medium="C"),
+    ]
+    absorbed = _absorb_short_runs(events, [0.5, 0.2, 0.5], beat_sec=1.0)
+    assert [event.symbol for event in absorbed] == ["C", "F", "C"]
+
+
+def test_confidence_is_not_constant(tmp_path):
+    clear = _tone(2.0, (261.63, 0.2), (329.63, 0.16), (392.00, 0.14))
+    messy = _tone(
+        2.0,
+        (261.63, 0.12),
+        (277.18, 0.12),
+        (311.13, 0.12),
+        (369.99, 0.12),
+        (415.30, 0.12),
+    )
+    y = np.concatenate([clear, messy, clear])
+    path = tmp_path / "mixed.wav"
+    sf.write(path, y, SR)
+    events = detect_chords(path, beats=tuple(i * 0.5 for i in range(13)), bpm=120.0)
+    confidences = [event.confidence for event in events]
+    assert confidences
+    assert all(0.0 <= value <= 1.0 for value in confidences)
+    assert len(set(round(value, 3) for value in confidences)) > 1
+
+
+def test_no_chords_in_silence(tmp_path):
+    tone = _tone(2.0, (261.63, 0.2), (329.63, 0.16), (392.00, 0.14))
+    y = np.concatenate([np.zeros(SR * 2), tone])
+    path = tmp_path / "gap.wav"
+    sf.write(path, y, SR)
+    events = detect_chords(path, beats=tuple(i * 0.5 for i in range(9)), bpm=120.0)
+    pitched = [
+        event
+        for event in events
+        if event.symbol.upper() != "N" and event.start < 1.5 and event.end > 0.0
+    ]
+    assert pitched == []
+    assert any(event.symbol.upper() == "N" and event.start < 1.0 for event in events)

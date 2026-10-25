@@ -1724,3 +1724,180 @@ def test_worker_busy_false_when_process_dead(jobs_dir: Path, monkeypatch):
     assert jobs._ACTIVE_PROCESS is None
     assert jobs.active_job_id() is None
     assert not (jobs.active_job_id() and jobs.worker_busy())
+
+
+def _batch_spec(path: Path, root: Path) -> IsolateJobSpec:
+    return IsolateJobSpec(
+        id="",
+        audio_path=str(path),
+        output_dir=str(root / "out" / path.parent.name),
+        title=path.stem,
+        model="htdemucs_6s",
+        device="cpu",
+        quality="fast",
+    )
+
+
+def _touch_songs(root: Path, count: int) -> list[Path]:
+    paths: list[Path] = []
+    for index in range(count):
+        folder = root / f"song{index:02d}"
+        folder.mkdir()
+        name = "song.wav" if index < 2 else f"track{index}.wav"
+        path = folder / name
+        path.write_bytes(b"x")
+        paths.append(path)
+    return paths
+
+
+def test_local_batch_enqueues_three_oldest_first(jobs_dir: Path, monkeypatch):
+    import ui.isolate_jobs as jobs
+
+    monkeypatch.setattr(jobs, "ensure_worker_started", lambda: None)
+    monkeypatch.setattr(jobs, "_execute_job", lambda job_id: (_ for _ in ()).throw(AssertionError(job_id)))
+    paths = _touch_songs(jobs_dir, 3)
+    result = jobs.enqueue_local_batch(
+        paths,
+        section_selected=False,
+        youtube_url="",
+        make_spec=lambda path: _batch_spec(path, jobs_dir),
+    )
+    assert len(result.job_ids) == 3
+    assert result.omitted == 0
+    assert result.blocked is None
+    queued = jobs._queued_job_ids()
+    assert queued == result.job_ids
+    specs = [read_spec(job_id) for job_id in queued]
+    assert [spec.audio_path for spec in specs if spec] == [str(path) for path in paths]
+    assert [spec.device for spec in specs if spec] == ["cpu", "cpu", "cpu"]
+    assert [spec.model for spec in specs if spec] == ["htdemucs_6s"] * 3
+    assert specs[0] is not None and specs[1] is not None
+    assert specs[0].title == specs[1].title == "song"
+    assert read_status(queued[0])["status"] == "queued"
+
+
+def test_local_batch_leaves_out_the_21st_file(jobs_dir: Path, monkeypatch):
+    import ui.isolate_jobs as jobs
+
+    monkeypatch.setattr(jobs, "ensure_worker_started", lambda: None)
+    paths = _touch_songs(jobs_dir, 21)
+    result = jobs.enqueue_local_batch(
+        paths,
+        section_selected=False,
+        youtube_url="",
+        make_spec=lambda path: _batch_spec(path, jobs_dir),
+    )
+    assert len(result.job_ids) == 20
+    assert result.omitted == 1
+    queued_paths = {
+        spec.audio_path
+        for job_id in jobs._queued_job_ids()
+        if (spec := read_spec(job_id)) is not None
+    }
+    assert str(paths[20]) not in queued_paths
+    assert str(paths[0]) in queued_paths
+    assert len(jobs._queued_job_ids()) == 20
+
+
+def test_local_batch_section_enqueues_nothing(jobs_dir: Path, monkeypatch):
+    import ui.isolate_jobs as jobs
+
+    monkeypatch.setattr(jobs, "ensure_worker_started", lambda: None)
+    paths = _touch_songs(jobs_dir, 3)
+    result = jobs.enqueue_local_batch(
+        paths,
+        section_selected=True,
+        youtube_url="",
+        make_spec=lambda path: (_ for _ in ()).throw(AssertionError(path)),
+    )
+    assert result.job_ids == []
+    assert result.blocked == "Separate one file when a section is selected."
+    assert jobs._queued_job_ids() == []
+
+
+def test_local_batch_youtube_enqueues_nothing(jobs_dir: Path, monkeypatch):
+    import ui.isolate_jobs as jobs
+
+    monkeypatch.setattr(jobs, "ensure_worker_started", lambda: None)
+    paths = _touch_songs(jobs_dir, 2)
+    result = jobs.enqueue_local_batch(
+        paths,
+        section_selected=False,
+        youtube_url="https://www.youtube.com/watch?v=abcdefghijk",
+        make_spec=lambda path: (_ for _ in ()).throw(AssertionError(path)),
+    )
+    assert result.job_ids == []
+    assert result.blocked
+    assert "YouTube" in result.blocked
+    assert jobs._queued_job_ids() == []
+
+
+def test_local_batch_reports_a_missing_file_and_keeps_the_rest(jobs_dir: Path, monkeypatch):
+    import ui.isolate_jobs as jobs
+
+    monkeypatch.setattr(jobs, "ensure_worker_started", lambda: None)
+    paths = _touch_songs(jobs_dir, 2)
+    missing = jobs_dir / "gone" / "missing.wav"
+    result = jobs.enqueue_local_batch(
+        [paths[0], missing, paths[1]],
+        section_selected=False,
+        youtube_url="",
+        make_spec=lambda path: _batch_spec(path, jobs_dir),
+    )
+    assert len(result.job_ids) == 2
+    assert result.failed == ["missing.wav"]
+    assert [spec.audio_path for job_id in result.job_ids if (spec := read_spec(job_id))] == [
+        str(paths[0]),
+        str(paths[1]),
+    ]
+
+
+def test_isolate_uploader_accepts_multiple_files():
+    source = Path(__file__).resolve().parents[1].joinpath("ui", "pages", "isolate.py").read_text(
+        encoding="utf-8"
+    )
+    assert "accept_multiple_files=True" in source
+    assert source.count('key="isolate_extra_tracks"') == 1
+    assert source.count("st.file_uploader(") == 2
+
+
+def _stem(path: Path, scale: float) -> None:
+    sr = 22050
+    y = np.full(sr, scale, dtype=np.float32)
+    sf.write(str(path), y, sr)
+
+
+def test_harmony_source_prefers_stem_sum(tmp_path: Path):
+    import ui.isolate_jobs as jobs
+
+    for name, scale in (("guitar", 0.2), ("piano", 0.1), ("other", 0.05), ("bass", 0.15)):
+        _stem(tmp_path / f"{name}.wav", scale)
+    _stem(tmp_path / "no_vocals.wav", 0.4)
+    mix = tmp_path / "mix.wav"
+    _stem(mix, 0.5)
+    artifacts = {name: tmp_path / f"{name}.wav" for name in ("guitar", "piano", "other", "bass", "no_vocals")}
+
+    harmony, _vocals, _metro, kind = jobs._analysis_sources(artifacts, mix)
+
+    assert kind == "stem_sum"
+    assert harmony is not None
+    assert harmony.name == "harmony_sum.wav"
+    data, _sr = sf.read(str(harmony))
+    assert float(np.max(np.abs(data))) == pytest.approx(0.99, abs=0.02)
+    assert harmony.resolve() != artifacts["no_vocals"].resolve()
+
+
+def test_harmony_source_keeps_other_when_no_guitar(tmp_path: Path):
+    import ui.isolate_jobs as jobs
+    from audio_to_tab.isolate import fold_other_into_guitar
+
+    other = tmp_path / "other.wav"
+    _stem(other, 0.2)
+    artifacts = {"other": other}
+    fold_other_into_guitar(artifacts)
+
+    assert other.is_file()
+    assert "other" in artifacts
+    harmony, _vocals, _metro, kind = jobs._analysis_sources(artifacts, tmp_path / "missing.wav")
+    assert kind == "other"
+    assert harmony == other

@@ -51,6 +51,7 @@ def default_project(
         },
         "analysis": DEFAULT_ANALYSIS,
         "tab": DEFAULT_TAB,
+        "stem_trims": {},
     }
 
 
@@ -132,7 +133,26 @@ def _normalise(raw: dict[str, Any], *, now: float | None = None) -> dict[str, An
         "practice": _coerce_practice(raw.get("practice")),
         "analysis": str(raw.get("analysis") or DEFAULT_ANALYSIS),
         "tab": str(raw.get("tab") or DEFAULT_TAB),
+        "stem_trims": _coerce_trims(raw.get("stem_trims")),
     }
+
+
+def _coerce_trims(raw: Any) -> dict[str, dict[str, float]]:
+    if not isinstance(raw, dict):
+        return {}
+    trims: dict[str, dict[str, float]] = {}
+    for name, trim in raw.items():
+        if not isinstance(trim, dict):
+            continue
+        try:
+            start = float(trim.get("start"))
+            end = float(trim.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(start) or not math.isfinite(end) or end < start:
+            continue
+        trims[str(name)] = {"start": start, "end": end}
+    return trims
 
 
 def load_project(run_dir: Path | str) -> tuple[dict[str, Any], str | None]:
@@ -178,6 +198,7 @@ def _content(project: dict[str, Any]) -> str:
         "practice": project.get("practice", {}),
         "analysis": project.get("analysis", DEFAULT_ANALYSIS),
         "tab": project.get("tab", DEFAULT_TAB),
+        "stem_trims": project.get("stem_trims", {}),
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 

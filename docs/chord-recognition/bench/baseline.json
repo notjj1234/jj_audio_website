@@ -1,0 +1,301 @@
+{
+  "git_sha": "417eecb311d21ad29a8ab91836277871fb3361ab",
+  "librosa_version": "0.11.0",
+  "synthetic": {
+    "root_wcsr_clean": 1.0,
+    "majmin_wcsr_clean": 1.0,
+    "majmin_wcsr_realistic": 0.9948333333333332,
+    "sevenths_wcsr_clean": 1.0,
+    "sevenths_wcsr_realistic": 0.8143333333333332,
+    "root_wcsr_realistic": 0.9948333333333332,
+    "mirex_wcsr_clean": 1.0,
+    "tracks": [
+      {
+        "track": "C_major_pop-clean",
+        "mode": "clean",
+        "score": {
+          "thirds": 1.0,
+          "thirds_inv": 1.0,
+          "triads": 1.0,
+          "triads_inv": 1.0,
+          "tetrads": 1.0,
+          "tetrads_inv": 1.0,
+          "root": 1.0,
+          "mirex": 1.0,
+          "majmin": 1.0,
+          "majmin_inv": 1.0,
+          "sevenths": 1.0,
+          "sevenths_inv": 1.0,
+          "underseg": 1.0,
+          "overseg": 1.0,
+          "seg": 1.0,
+          "segments": 8
+        }
+      },
+      {
+        "track": "G_major_pop-clean",
+        "mode": "clean",
+        "score": {
+          "thirds": 1.0,
+          "thirds_inv": 1.0,
+          "triads": 1.0,
+          "triads_inv": 1.0,
+          "tetrads": 1.0,
+          "tetrads_inv": 1.0,
+          "root": 1.0,
+          "mirex": 1.0,
+          "majmin": 1.0,
+          "majmin_inv": 1.0,
+          "sevenths": 1.0,
+          "sevenths_inv": 1.0,
+          "underseg": 1.0,
+          "overseg": 1.0,
+          "seg": 1.0,
+          "segments": 8
+        }
+      },
+      {
+        "track": "A_minor-clean",
+        "mode": "clean",
+        "score": {
+          "thirds": 1.0,
+          "thirds_inv": 1.0,
+          "triads": 1.0,
+          "triads_inv": 1.0,
+          "tetrads": 1.0,
+          "tetrads_inv": 1.0,
+          "root": 1.0,
+          "mirex": 1.0,
+          "majmin": 1.0,
+          "majmin_inv": 1.0,
+          "sevenths": 1.0,
+          "sevenths_inv": 1.0,
+          "underseg": 1.0,
+          "overseg": 1.0,
+          "seg": 1.0,
+          "segments": 8
+        }
+      },
+      {
+        "track": "jazz_ii_V_I-clean",
+        "mode": "clean",
+        "score": {
+          "thirds": 1.0,
+          "thirds_inv": 1.0,
+          "triads": 1.0,
+          "triads_inv": 1.0,
+          "tetrads": 1.0,
+          "tetrads_inv": 1.0,
+          "root": 1.0,
+          "mirex": 1.0,
+          "majmin": 1.0,
+          "majmin_inv": 1.0,
+          "sevenths": 1.0,
+          "sevenths_inv": 1.0,
+          "underseg": 1.0,
+          "overseg": 1.0,
+          "seg": 1.0,
+          "segments": 6
+        }
+      },
+      {
+        "track": "slash_chords-clean",
+        "mode": "clean",
+        "score": {
+          "thirds": 1.0,
+          "thirds_inv": 1.0,
+          "triads": 1.0,
+          "triads_inv": 1.0,
+          "tetrads": 1.0,
+          "tetrads_inv": 1.0,
+          "root": 1.0,
+          "mirex": 1.0,
+          "majmin": 1.0,
+          "majmin_inv": 1.0,
+          "sevenths": 1.0,
+          "sevenths_inv": 1.0,
+          "underseg": 1.0,
+          "overseg": 1.0,
+          "seg": 1.0,
+          "segments": 8
+        }
+      },
+      {
+        "track": "quality_zoom-clean",
+        "mode": "clean",
+        "score": {
+          "thirds": 1.0,
+          "thirds_inv": 1.0,
+          "triads": 1.0,
+          "triads_inv": 1.0,
+          "tetrads": 1.0,
+          "tetrads_inv": 1.0,
+          "root": 1.0,
+          "mirex": 1.0,
+          "majmin": 1.0,
+          "majmin_inv": 1.0,
+          "sevenths": 1.0,
+          "sevenths_inv": 1.0,
+          "underseg": 1.0,
+          "overseg": 1.0,
+          "seg": 1.0,
+          "segments": 8
+        }
+      },
+      {
+        "track": "C_major_pop-realistic",
+        "mode": "realistic",
+        "score": {
+          "thirds": 0.969,
+          "thirds_inv": 0.969,
+          "triads": 0.969,
+          "triads_inv": 0.969,
+          "tetrads": 0.969,
+          "tetrads_inv": 0.969,
+          "root": 0.969,
+          "mirex": 0.969,
+          "majmin": 0.969,
+          "majmin_inv": 0.969,
+          "sevenths": 0.969,
+          "sevenths_inv": 0.969,
+          "underseg": 0.969,
+          "overseg": 0.969,
+          "seg": 0.969,
+          "segments": 8
+        }
+      },
+      {
+        "track": "G_major_pop-realistic",
+        "mode": "realistic",
+        "score": {
+          "thirds": 1.0,
+          "thirds_inv": 1.0,
+          "triads": 1.0,
+          "triads_inv": 1.0,
+          "tetrads": 1.0,
+          "tetrads_inv": 1.0,
+          "root": 1.0,
+          "mirex": 1.0,
+          "majmin": 1.0,
+          "majmin_inv": 1.0,
+          "sevenths": 1.0,
+          "sevenths_inv": 1.0,
+          "underseg": 1.0,
+          "overseg": 1.0,
+          "seg": 1.0,
+          "segments": 8
+        }
+      },
+      {
+        "track": "A_minor-realistic",
+        "mode": "realistic",
+        "score": {
+          "thirds": 1.0,
+          "thirds_inv": 1.0,
+          "triads": 1.0,
+          "triads_inv": 1.0,
+          "tetrads": 1.0,
+          "tetrads_inv": 1.0,
+          "root": 1.0,
+          "mirex": 1.0,
+          "majmin": 1.0,
+          "majmin_inv": 1.0,
+          "sevenths": 1.0,
+          "sevenths_inv": 1.0,
+          "underseg": 1.0,
+          "overseg": 1.0,
+          "seg": 1.0,
+          "segments": 8
+        }
+      },
+      {
+        "track": "jazz_ii_V_I-realistic",
+        "mode": "realistic",
+        "score": {
+          "thirds": 1.0,
+          "thirds_inv": 1.0,
+          "triads": 1.0,
+          "triads_inv": 1.0,
+          "tetrads": 0.25,
+          "tetrads_inv": 0.25,
+          "root": 1.0,
+          "mirex": 1.0,
+          "majmin": 1.0,
+          "majmin_inv": 1.0,
+          "sevenths": 0.25,
+          "sevenths_inv": 0.25,
+          "underseg": 1.0,
+          "overseg": 1.0,
+          "seg": 1.0,
+          "segments": 6
+        }
+      },
+      {
+        "track": "slash_chords-realistic",
+        "mode": "realistic",
+        "score": {
+          "thirds": 1.0,
+          "thirds_inv": 1.0,
+          "triads": 1.0,
+          "triads_inv": 1.0,
+          "tetrads": 1.0,
+          "tetrads_inv": 1.0,
+          "root": 1.0,
+          "mirex": 1.0,
+          "majmin": 1.0,
+          "majmin_inv": 1.0,
+          "sevenths": 1.0,
+          "sevenths_inv": 1.0,
+          "underseg": 1.0,
+          "overseg": 1.0,
+          "seg": 1.0,
+          "segments": 8
+        }
+      },
+      {
+        "track": "quality_zoom-realistic",
+        "mode": "realistic",
+        "score": {
+          "thirds": 1.0,
+          "thirds_inv": 1.0,
+          "triads": 1.0,
+          "triads_inv": 1.0,
+          "tetrads": 0.75,
+          "tetrads_inv": 0.75,
+          "root": 1.0,
+          "mirex": 1.0,
+          "majmin": 1.0,
+          "majmin_inv": 1.0,
+          "sevenths": 0.667,
+          "sevenths_inv": 0.667,
+          "underseg": 0.875,
+          "overseg": 1.0,
+          "seg": 0.875,
+          "segments": 7
+        }
+      }
+    ]
+  },
+  "proxy": {
+    "available": true,
+    "runs": [
+      {
+        "run": "46b84e7b-dbb5-4c25-817a-53c4cd85b02d",
+        "role": "waltz",
+        "stored_beats_per_measure": 4,
+        "meter_correct": false,
+        "segments": 145,
+        "segs_per_bar": 2.641257679953275,
+        "maj7_share": 0.1793103448275862,
+        "sus4_share": 0.23448275862068965,
+        "non_diatonic_share": 0.5448275862068965,
+        "share_events_under_one_beat": 0.21379310344827587,
+        "key": "Dm"
+      }
+    ]
+  },
+  "root_wcsr_clean": 1.0,
+  "majmin_wcsr_clean": 1.0,
+  "majmin_wcsr_realistic": 0.9948333333333332,
+  "sevenths_wcsr_realistic": 0.8143333333333332
+}

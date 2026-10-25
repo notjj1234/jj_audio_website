@@ -140,14 +140,56 @@ def test_chord_chip_is_editable_and_capo_has_a_control():
     assert "No capo" in text
 
 
+def test_stem_meter_follows_fader_gain_and_playhead():
+    text = _mixer_main_ts()
+    level = text[text.find("function stemMeterLevel") : text.find("function meterSampleIndex")]
+    assert "function stemMeterLevel(" in level
+    assert "* gain" in level
+    apply = text[text.find("function applyStateGains") : text.find("function formatTime")]
+    assert "paintStemMeters(" in apply
+    callback = text[text.find("engine.setTimeCallback") : text.find("engine.setTimeCallback") + 1200]
+    assert "paintStemMeters(" in callback
+    css = (
+        Path(__file__).resolve().parents[1]
+        / "ui"
+        / "stem_mixer_component"
+        / "frontend"
+        / "src"
+        / "style.css"
+    ).read_text(encoding="utf-8")
+    rule = css[css.find(".stem-meter {") : css.find(".stem-meter {") + 500]
+    assert "width: 4.5rem" in rule
+    assert "height: 0.4rem" in rule
+    assert "transition: width 80ms linear" in rule
+
+
+def test_sidebar_chord_posts_from_the_playhead():
+    text = _mixer_main_ts()
+    callback = text[text.find("engine.setTimeCallback") : text.find("engine.setTimeCallback") + 1600]
+    assert "postSidebarChord(" in callback
+    block = text[text.find("function sidebarChordPayload") : text.find("function seekPractice")]
+    assert "chordAt(" in block
+    assert "formatChordSymbol(" in block
+    assert "chordDiagramSvg(" in block
+    assert "capoDiagramSymbol(" in block
+    assert 'source: "att-sidebar-chord"' in block
+    assert "chords[0]" in block
+    assert 'targetOrigin: "*"' in block or 'postMessage(message, "*")' in block
+    assert "reportState(" not in block
+    assert "setComponentValue(" not in block
+
+
 def test_speed_key_lives_in_a_popover():
     text = _mixer_main_ts()
     assert 'id="practice-speed-popover"' in text
     assert 'aria-controls="practice-speed-popover"' in text
-    assert 'id="practice-speed"' in text
-    assert 'id="practice-key"' in text
-    transport = text[text.find('<div class="mixer-transport">') : text.find('<div class="mixer-master">')]
-    assert 'id="practice-speed"' not in transport
+    popover = text[text.find('id="practice-speed-popover"') : text.find('id="count-in-status"')]
+    assert 'id="practice-speed"' in popover
+    assert 'id="practice-key"' in popover
+    controls = text[
+        text.find('<div class="mixer-transport-controls">') : text.find('<label class="mixer-seek">')
+    ]
+    assert 'id="practice-speed"' not in controls
 
 
 def test_practice_empty_copy_names_the_reason():

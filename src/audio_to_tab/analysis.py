@@ -42,7 +42,7 @@ import statistics
 import time
 from bisect import bisect_left
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -58,6 +58,8 @@ class ChordEvent:
     end: float
     symbol: str
     confidence: float
+    simple: str = ""
+    medium: str = ""
 
 
 @dataclass(frozen=True)
@@ -102,6 +104,7 @@ class AnalysisResult:
     models: dict[str, Any] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
     created_at: float = 0.0
+    chart: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-ready dict (tuples become lists, no numpy scalars)."""
@@ -122,6 +125,8 @@ class AnalysisResult:
                     "end": float(c.end),
                     "symbol": str(c.symbol),
                     "confidence": float(c.confidence),
+                    "simple": str(c.simple),
+                    "medium": str(c.medium),
                 }
                 for c in self.chords
             ],
@@ -150,6 +155,7 @@ class AnalysisResult:
             "models": {str(k): v for k, v in self.models.items()},
             "warnings": [str(w) for w in self.warnings],
             "created_at": float(self.created_at),
+            "chart": self.chart,
         }
 
 
@@ -215,7 +221,16 @@ def _coerce_chord(raw: Any) -> ChordEvent | None:
     symbol = _text(raw.get("symbol"))
     if span is None or symbol is None:
         return None
-    return ChordEvent(start=span[0], end=span[1], symbol=symbol, confidence=_confidence(raw.get("confidence")))
+    simple = _text(raw.get("simple")) or ""
+    medium = _text(raw.get("medium")) or ""
+    return ChordEvent(
+        start=span[0],
+        end=span[1],
+        symbol=symbol,
+        confidence=_confidence(raw.get("confidence")),
+        simple=simple,
+        medium=medium,
+    )
 
 
 def _coerce_section(raw: Any) -> Section | None:
@@ -298,6 +313,8 @@ def _from_dict(raw: Mapping[str, Any]) -> AnalysisResult:
 
     models = raw.get("models")
     warnings = raw.get("warnings")
+    chart = raw.get("chart")
+    chart = dict(chart) if isinstance(chart, dict) else None
     key = _text(raw.get("key"))
     language = _text(raw.get("lyrics_language"))
 
@@ -322,6 +339,7 @@ def _from_dict(raw: Mapping[str, Any]) -> AnalysisResult:
         models=dict(models) if isinstance(models, dict) else {},
         warnings=tuple(str(w) for w in warnings) if isinstance(warnings, list) else (),
         created_at=_finite_float(raw.get("created_at")) or 0.0,
+        chart=chart,
     )
 
 
@@ -446,6 +464,8 @@ def analyze_audio(
     audio_path: Path,
     *,
     harmony_path: Path | None = None,
+    harmony_source_kind: str | None = None,
+    bass_path: Path | None = None,
     vocals_path: Path | None = None,
     metronome_diagnostics: Path | None = None,
     source_fingerprint: str,
@@ -455,10 +475,9 @@ def analyze_audio(
 ) -> AnalysisResult:
     """Run the analysis stages, isolating each failure into a warning.
 
-    The implementation order is beats → chords → key → sections → lyrics. Chords precede key on
-    purpose: the key estimator prefers the chord histogram (see the Task 0 decision record), which
-    is materially better than raw chroma on guitar/pop mixes. This is a deliberate deviation from
-    the original plan's stage order; the UI still presents one "analysis" stage.
+    Order is beats → provisional key → chords → final key → sections → lyrics → chart.
+    The provisional key is chroma-only and feeds the chord prior. The stored key is
+    recomputed from the decoded chords so a biased chord track cannot justify itself.
     """
     audio_path = Path(audio_path)
     duration = _finite_float(duration_sec)
@@ -483,9 +502,18 @@ def analyze_audio(
         grid = BeatGrid(None, "low", (), (), 4, ())
     warnings.extend(grid.warnings)
 
+    _report(progress, "provisional key")
+    provisional: str | None = None
+    harmony = Path(harmony_path) if harmony_path is not None else audio_path
+    try:
+        from audio_to_tab.key import provisional_key_from_audio
+
+        provisional, _provisional_score = provisional_key_from_audio(harmony)
+    except Exception as exc:
+        warnings.append(f"provisional key failed: {exc}")
+
     _report(progress, "chords")
     chords: list[ChordEvent] = []
-    harmony = Path(harmony_path) if harmony_path is not None else audio_path
     try:
         from audio_to_tab.chords import detect_chords
 
@@ -493,6 +521,10 @@ def analyze_audio(
             harmony,
             beats=grid.beats,
             bpm=grid.bpm,
+            provisional_key=provisional,
+            beats_per_measure=grid.beats_per_measure,
+            downbeats=grid.downbeats,
+            bass_path=bass_path,
             progress=lambda message: _report(progress, message),
         )
     except Exception as exc:
@@ -513,6 +545,8 @@ def analyze_audio(
             bpm=grid.bpm,
             beats=grid.beats,
             chords=chords,
+            downbeats=grid.downbeats,
+            beats_per_measure=grid.beats_per_measure,
         )
     except Exception as exc:
         warnings.append(f"key estimation failed: {exc}")
@@ -550,7 +584,18 @@ def analyze_audio(
             except Exception as exc:
                 warnings.append(f"lyrics transcription failed: {exc}")
 
-    return AnalysisResult(
+    models: dict[str, Any] = {
+        "chords": "template-viterbi-1",
+        "key": "chord-histogram-1" if chords else "chroma-profile-1",
+        "sections": "recurrence-1",
+        "lyrics": lyrics_model,
+    }
+    if harmony_source_kind:
+        models["harmony_source"] = str(harmony_source_kind)
+    if provisional:
+        models["provisional_key"] = provisional
+
+    result = AnalysisResult(
         source_fingerprint=str(source_fingerprint),
         duration_sec=duration,
         bpm=grid.bpm,
@@ -564,15 +609,18 @@ def analyze_audio(
         sections=tuple(sections),
         lyrics=tuple(lyrics),
         lyrics_language=lyrics_language,
-        models={
-            "chords": "template-viterbi-1",
-            "key": "chord-histogram-1" if chords else "chroma-profile-1",
-            "sections": "recurrence-1",
-            "lyrics": lyrics_model,
-        },
+        models=models,
         warnings=tuple(warnings),
         created_at=time.time(),
     )
+    try:
+        from audio_to_tab.chart import build_chart
+
+        result = replace(result, chart=build_chart(result).to_dict())
+    except Exception as exc:
+        warnings.append(f"chart failed: {exc}")
+        result = replace(result, warnings=tuple(warnings))
+    return result
 
 
 def save_analysis(path: Path, result: AnalysisResult) -> Path:

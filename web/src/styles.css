@@ -408,6 +408,12 @@ button.danger,
   padding: 0.45rem 0.9rem;
 }
 
+.mixer button.live-play {
+  min-width: 7rem;
+  min-height: 3.25rem;
+  font-size: 1.35rem;
+}
+
 .mixer button.ghost {
   min-height: 36px;
   padding: 0.25rem 0.45rem;
@@ -704,6 +710,126 @@ button.danger,
   flex-wrap: wrap;
   align-items: center;
   gap: 0.15rem 0.85rem;
+}
+
+.mixer-master[hidden],
+.mixer-practice[hidden],
+.practice-sheet[hidden] {
+  display: none;
+}
+
+.mixer-stage {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.practice-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--haze);
+}
+
+.practice-sheet-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.35rem 1rem;
+}
+
+.practice-sheet-head h3,
+.practice-sheet-head p {
+  margin: 0;
+}
+
+.practice-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.practice-sheet .chord-sheet,
+.practice-sheet .section-list,
+.practice-sheet .lyrics-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.practice-sheet .chord-strip {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.45rem;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+}
+
+.practice-sheet .chord-chip.active {
+  outline: 2px solid var(--accent, #c45c26);
+  outline-offset: 1px;
+}
+
+.practice-sheet .chord-now {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+}
+
+.practice-sheet .chord-now-symbol {
+  font-size: 1.6rem;
+  font-weight: 600;
+}
+
+.practice-sheet .chord-diagram {
+  width: 92px;
+  height: 112px;
+}
+
+.practice-sheet .chord-nut,
+.practice-sheet .chord-string,
+.practice-sheet .chord-fret {
+  stroke: var(--ink);
+  stroke-width: 1.4;
+}
+
+.practice-sheet .chord-dot,
+.practice-sheet .chord-open {
+  fill: var(--ink);
+}
+
+.practice-sheet .chord-mute,
+.practice-sheet .chord-fret-label {
+  fill: var(--ink);
+  font-size: 10px;
+}
+
+.practice-sheet .chord-chip,
+.practice-sheet .section-list button,
+.practice-sheet .lyrics-list button {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.practice-sheet .chord-chip-symbol {
+  width: 4.5rem;
+  min-height: 36px;
+}
+
+.practice-sheet .tab-measure {
+  margin: 0.2rem 0 0.6rem;
+  overflow-x: auto;
+  font-family: ui-monospace, monospace;
+}
+
+.practice-sheet .practice-empty {
+  margin: 0;
 }
 
 .mixer-stems {

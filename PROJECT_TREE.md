@@ -48,7 +48,7 @@ The **Tab PDF path (`pipeline.py`) and the Isolate path (`isolate.py`)** are bot
 | Guitar stem engine | `src/audio_to_tab/isolate.py` (`IsolateConfig`, `separate_stems`, fold, bass-bleed, low-end recovery, pre/refined), `src/audio_to_tab/separate.py` (Demucs / guitar-ft), `src/audio_to_tab/roformer.py`, `src/audio_to_tab/scnet.py` |
 | SCNet backend | `src/audio_to_tab/scnet.py`; dispatch in `isolate.py` / CLI `cli/isolate.py`; tests `tests/test_scnet.py` |
 | Live mixer (desktop iframe) | Edit `ui/stem_mixer_component/frontend/src/main.ts` + `pan.ts` + `metronomeClicks.ts` + `style.css`, then `make mixer-build`. Pan law is `pan.ts` (equal-power, −100..100), copied in `web/src/mixer/pan.ts`. Live click-track Accent/rate/sound on the metronome row (hot-swap; no full stem reload). **Background play:** `installWakeHooks` recovers on visible/pageshow only — does **not** soft-pause on document hide. Loader: `ui/stem_mixer_component/__init__.py` (`youtube_video_id`, `local_video_url`, `video_offset_sec`, `hide_youtube_video`). Preview encode: `ui/media.py`. Downloads: build mix **on Save**, not on every mute/solo or pan move. |
-| Practice player / analysis (desktop) | Engine: `src/audio_to_tab/analysis.py` + `chords.py` / `key.py` / `sections.py` / `lyrics.py`; worker stages in `ui/isolate_jobs.py`; tab artifact via `tab_generate.py`; player state `ui/project.py` (`project.json`); panel + loop/count-in in `ui/stem_mixer_component/frontend/src/main.ts` / `analysis.ts`. Outputs per run: `analysis.json`, `analysis_diagnostics.json`, `tab/transcription.{tab,pdf,mid}`, `tab/tab.json`, `project.json`. Chords are an editable draft (`confidence=0.0`). |
+| Practice player / analysis (desktop) | Engine: `src/audio_to_tab/analysis.py` + `chords.py` / `chord_symbols.py` / `chart.py` / `key.py` / `sections.py` / `lyrics.py`; worker stages in `ui/isolate_jobs.py`; tab artifact via `tab_generate.py`; player state `ui/project.py` (`project.json`); panel + loop/count-in in `ui/stem_mixer_component/frontend/src/main.ts` / `analysis.ts`. Outputs per run: `analysis.json`, `analysis_diagnostics.json`, `chart.musicxml`, `chart.txt`, `tab/transcription.{tab,pdf,mid}`, `tab/tab.json`, `project.json`. Chord `confidence` is the top-two softmax gap. |
 | Region picker (desktop iframe) | Edit `ui/region_picker_component/frontend/src/main.ts` + `style.css`, then `make region-picker-build`. Loader: `ui/region_picker_component/__init__.py`. Wired in `ui/pages/isolate.py` (`_render_region_controls`) |
 | Mix tabs (desktop iframe) | Edit `ui/mix_tabs_component/frontend/src/main.ts` + `style.css`, then `make mix-tabs-build`. Loader: `ui/mix_tabs_component/__init__.py`. Moises-style Home\|mix\|+ strip on Isolate |
 | Mixer picture (desktop) | YouTube iframe or local `source_video` beside the stems, synced to mixer time. Wiring: `ui/pages/isolate.py`, `ui/isolate_state.py` (`mixer_youtube_video_id`, `mixer_local_video_path`, `prefer_local_mixer_picture`), offset `ui/isolate_jobs.py` (`video_offset_sec_for_run`), preview file `download_youtube_preview_video` in `src/audio_to_tab/ingest.py`. In the iframe: move/resize, snaps left/right/above/below, free-float (`videoLayout` in `sessionStorage`). Local file is tried first and can fall back to the YouTube id. |
@@ -117,9 +117,13 @@ Shared engine. Import as `audio_to_tab`.
 - `audio_to_tab/pdf_render.py` — ASCII/MIDI → PDF (ReportLab).
 - `audio_to_tab/tempo.py` — tempo from audio/MIDI.
 - `audio_to_tab/metronome.py` — adaptive (“floating”) metronome: one onset envelope → global + curve-driven `beat_track` (librosa 0.11); gate keeps quiet regular intros; accents use `body_start_sec`; `click_times_1x` is the mixer/rebake contract; optional `bpm_curve` in diagnostics; `MetronomeRenderOptions` / `rebake_metronome_artifact` (accent, rate, sound).
-- `audio_to_tab/analysis.py` — song analysis schema/cache/orchestrator (`AnalysisResult`, chord/section/lyric spans, `analysis_cache_key`). Order: beats → chords → key → sections → lyrics.
-- `audio_to_tab/key.py` — key estimate from the chord histogram, chroma fallback.
-- `audio_to_tab/chords.py` — CQT chroma + triad templates + Viterbi draft chord track (no new runtime deps; events carry `confidence=0.0`).
+- `audio_to_tab/analysis.py` — song analysis schema/cache/orchestrator (`AnalysisResult`, chord/section/lyric spans, optional `chart`, `analysis_cache_key`). `SCHEMA_VERSION` stays 1. Order: beats → provisional key → chords → key → sections → lyrics → chart.
+- `audio_to_tab/key.py` — Krumhansl provisional key (bass breaks relative-major ties) and a duration-weighted chord histogram.
+- `audio_to_tab/chord_symbols.py` — frozen `Chord` parse, render, transpose, capo shape, display level, chord tones.
+- `audio_to_tab/chords.py` — tuned HPSS CQT chroma, weighted templates, z-scored priors, beat-synchronous Viterbi. `confidence` is the softmax top-two gap.
+- `audio_to_tab/chart.py` — `ChartDocument` from an analysis and its beat grid. Continuation cells are empty.
+- `audio_to_tab/export_musicxml.py` — chart to a MusicXML 3.1 subset (harmony + lyrics), stdlib only.
+- `audio_to_tab/export_text.py` — chart to ChordPro-ish text.
 - `audio_to_tab/sections.py` — librosa self-similarity/novelty sections, minimum 8 s.
 - `audio_to_tab/lyrics.py` — `faster-whisper` small int8 from the pinned local model dir.
 - `audio_to_tab/rhythm.py` — beat-grid quantize for tab events.
@@ -263,7 +267,7 @@ Desktop freeze + installers. How-to: `DESKTOP.md`.
 - `test_mixer.py` — mix helpers, pan matrix/export (center bit-identical, hard left/right, mute).
 - `test_metronome.py` — adaptive metronome (curve helpers, vocal-intro pulse, steady-tempo regression, 48 kHz, talking-intro gate) + render/rebake / `bpm_curve` diagnostics.
 - `test_analysis.py`, `test_analysis_orchestrator.py` — analysis schema/cache and stage fallbacks.
-- `test_chords.py`, `test_key.py`, `test_sections.py`, `test_lyrics.py` — per-stage analysis engines.
+- `test_chords.py`, `test_chord_symbols.py`, `test_chord_bench.py`, `test_chart.py`, `test_export_musicxml.py`, `test_key.py`, `test_sections.py`, `test_lyrics.py` — per-stage analysis engines, the chord bench scorer, and chart export.
 - `test_tab_generate.py` — tab document / measure spans.
 - `test_project.py` — `project.json` round-trip, clamping, write-on-change, seeding, artifact loading.
 - `test_home.py` — Home analysis line, Practice/Analyse actions, `analyse_existing_run`.

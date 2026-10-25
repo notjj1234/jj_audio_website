@@ -10,7 +10,10 @@ Do one slice, then stop and name the next slice. Do not start Phase 3 until ever
 - Phase 1.5 Home is done. `AUDIO_TOOLS_UI_V2=0` still falls back to the old Home.
 - Phase 1.6 player layout is done. Plan: `15-PHASE-1.6-PLAN.md`.
 - Phase 2 chord edit and capo are done. Plan: `16-PHASE-2-CHORDS.md`. Type a symbol on one chip. Capo is fret 0–11. Fret 0 says "No capo". The sounding name stays. The diagram uses the shape transposed down by that many frets.
-- Phase 2 local setlists are partly done. Plan: `17-PHASE-2-SETLISTS.md`. Create, add, and filter work. The file is `data/ui_runs/setlists.json`. The browser gets ids and tokens, never file paths.
+- Phase 2 local setlists are done, including remove, rename, and delete. Plan: `17-PHASE-2-SETLISTS.md`. The browser gets ids and tokens, never file paths.
+- Phase 2 website practice sheet, desktop batch queue, and the remaining Phase 2 rows are done. Direct media links save as a local file. Hi-Fi is the installed fine-tuned Demucs model. Chord levels are Easy, Medium, and Hard. Korean is the first extra language. The bug list is fixed.
+- Phase 3 is complete. The library folder, sync folder, 27-stem catalogue, stem trim, MusicXML, DAWproject, one-level undo, share tokens, session codes, notes, comments, setlist title import, prompts, voice names, peak-normal Master, Auto Mix, shelves, studio clips, buses, MIDI notes, and the read-only stem route are local. The website player can record after a confirm and has a large Play control. Lite and Pro stay the only plan switch.
+- Skipped, and not left open: the drum staff, an installer model downloader, and a bundled lyrics model. iOS and Android native apps are skipped because they need a new toolchain. VST / AU / AAX is skipped. WASAPI/ASIO is skipped. Google, Facebook, Apple, or X login are skipped.
 
 ## Rules that stay in force
 
@@ -29,15 +32,7 @@ Do one slice, then stop and name the next slice. Do not start Phase 3 until ever
 
 ## Next slice
 
-Finish the setlist screen, then the website player. The website player was not started.
-
-Setlist store can already remove a song (`ui/setlists.py` `remove_song`). Home cannot. Add, on the existing Home screen:
-
-- Remove one song from the selected setlist.
-- Rename a setlist.
-- Delete a setlist.
-
-Keep paths out of the iframe. A blank rename stays "Setlist". Deleting a list does not delete the songs from the library. Rebuild Home. Extend `tests/test_setlists.py`. Do not start sharing.
+None. Phase 3 is complete.
 
 ## Phase 2 after that
 

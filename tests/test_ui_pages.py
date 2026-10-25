@@ -340,7 +340,7 @@ def test_hosted_isolate_blocks_over_cap_and_section_until_duration() -> None:
         / "StemMixer.tsx"
     ).read_text(encoding="utf-8")
     assert "SLEEP_RESUME_HINT" in mixer
-    assert 'className="primary"' in mixer
+    assert 'className="primary live-play"' in mixer
     assert 'prev === SLEEP_RESUME_HINT' in mixer
 
 

@@ -8,7 +8,6 @@ from fastapi.testclient import TestClient
 
 from backend.account import delete_user_account
 from backend.auth import hash_password
-from backend.db import SessionLocal
 from backend.models import Job, JobArtifact, JobKindDB, JobStatusDB, Upload, User
 from backend.storage import LocalStorage, reset_storage
 from tests.backend_test_utils import configure_backend
@@ -101,6 +100,8 @@ def test_delete_me_endpoint_for_anonymous(tmp_path, monkeypatch):
 
         gone = client.get("/v1/auth/me", headers=headers)
         assert gone.status_code in (401, 403)
+
+        from backend.db import SessionLocal
 
         db = SessionLocal()
         try:

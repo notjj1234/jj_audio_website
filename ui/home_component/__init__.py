@@ -65,6 +65,10 @@ def home_library(
         rows=list(props.get("rows") or []),
         setlists=list(props.get("setlists") or []),
         activeSetlist=props.get("activeSetlist") or "",
+        # The Deleted filter reads this list. Omitting it left every trash move invisible.
+        trashed=list(props.get("trashed") or []),
+        locale=props.get("locale") or "en",
+        strings=dict(props.get("strings") or {}),
         loading=bool(props.get("loading")),
         flash=props.get("flash"),
         key=key,

@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.request
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -96,6 +97,44 @@ def is_youtube_url(url: str) -> bool:
     if host in _YOUTUBE_HOSTS:
         return True
     return host.endswith(".youtube.com")
+
+
+_DIRECT_MEDIA_SUFFIXES = frozenset({".mp3", ".wav", ".flac", ".m4a", ".mp4", ".mov", ".webm", ".mkv"})
+_DIRECT_MEDIA_MAX_BYTES = 500 * 1024 * 1024
+_DIRECT_MEDIA_BLOCKED_HOSTS = frozenset({"localhost", "127.0.0.1", "0.0.0.0", "::1"})
+
+
+def is_direct_media_url(url: str) -> bool:
+    """True for an http(s) link whose path ends in a local audio or video type."""
+    text = (url or "").strip()
+    parsed = urlparse(text)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if is_youtube_url(text):
+        return False
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host or host in _DIRECT_MEDIA_BLOCKED_HOSTS or host.endswith(".localhost"):
+        return False
+    return Path(parsed.path).suffix.lower() in _DIRECT_MEDIA_SUFFIXES
+
+
+def download_direct_media(url: str, output_dir: str | Path) -> Path:
+    """Save a direct media link into ``output_dir``. No YouTube, no HTML page."""
+    if not is_direct_media_url(url):
+        raise ValueError("Only a direct audio or video link is allowed")
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    name = Path(urlparse(url.strip()).path).name
+    dest = out_dir / name
+    request = urllib.request.Request(url.strip(), headers={"User-Agent": "AudioTools"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        data = response.read(_DIRECT_MEDIA_MAX_BYTES + 1)
+    if len(data) > _DIRECT_MEDIA_MAX_BYTES:
+        raise ValueError("That file is larger than 500 MB")
+    if not data:
+        raise ValueError("The link returned an empty file")
+    dest.write_bytes(data)
+    return dest
 
 
 def _require_ffmpeg() -> str:

@@ -552,6 +552,10 @@ def _write_band_limited_other(other: Path, dest: Path) -> Path:
 
 
 def _drop_other_stem(artifacts: dict[str, Path]) -> None:
+    """Remove Other only after it has been folded into an existing guitar stem."""
+    guitar = artifacts.get("guitar")
+    if guitar is None or not Path(guitar).is_file():
+        return
     other = artifacts.pop("other", None)
     if other is None:
         return

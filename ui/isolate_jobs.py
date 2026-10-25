@@ -12,6 +12,7 @@ import multiprocessing
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 import traceback
@@ -30,6 +31,14 @@ _WORKER_THREAD: threading.Thread | None = None
 _WORKER_STOP = threading.Event()
 _ACTIVE_JOB_ID: str | None = None
 _ACTIVE_PROCESS: multiprocessing.Process | None = None
+_ANALYSIS_LOCK = threading.Lock()
+_ANALYSIS_THREAD: threading.Thread | None = None
+_ANALYSIS_STOP = threading.Event()
+_ANALYSIS_PROCESS: multiprocessing.Process | None = None
+_ANALYSIS_RUN: str | None = None
+_ANALYSIS_SKIPPED: set[str] = set()
+_FOREGROUND_NAME = "background_analysis_foreground.json"
+_STATUS_NAME = "background_analysis_status.json"
 
 
 @dataclass
@@ -80,6 +89,8 @@ class IsolateJobSpec:
     metronome_accent: bool = True
     metronome_rate: float = 1.0
     metronome_sound: str = "classic"
+    lead_rhythm: bool = False
+    lead_rhythm_mode: str = "confident"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -109,8 +120,8 @@ def isolate_config_kwargs_from_spec(spec: IsolateJobSpec) -> dict[str, Any]:
         "emit_stems": tuple(spec.emit_stems) if spec.emit_stems else None,
         "fold_other_into_guitar": spec.fold_other_into_guitar,
         "fold_other_mode": spec.fold_other_mode,
-        "lead_rhythm": False,
-        "lead_rhythm_mode": "confident",
+        "lead_rhythm": bool(spec.lead_rhythm),
+        "lead_rhythm_mode": str(spec.lead_rhythm_mode or "confident"),
         "low_end_restore_db": spec.low_end_restore_db,
         "sub_bass_debleed": spec.sub_bass_debleed,
         "demucs_segment": spec.demucs_segment,
@@ -303,6 +314,53 @@ def requeue_job(job_id: str) -> str | None:
     # would otherwise be mistaken for results of the retry.
     retry = replace(spec, id="", created_at=0.0, output_dir=str(run_output_dir()))
     return enqueue_job(retry)
+
+
+BATCH_FILE_LIMIT = 20
+SECTION_BATCH_BLOCK = "Separate one file when a section is selected."
+YOUTUBE_BATCH_BLOCK = "Clear the YouTube URL before queueing several files."
+
+
+@dataclass
+class LocalBatchResult:
+    job_ids: list[str]
+    omitted: int
+    blocked: str | None
+    failed: list[str]
+
+
+def enqueue_local_batch(
+    paths: list[Path],
+    *,
+    section_selected: bool,
+    youtube_url: str,
+    make_spec: Callable[[Path], IsolateJobSpec],
+) -> LocalBatchResult:
+    """Queue local files on the existing serial worker. One job at a time."""
+    if section_selected:
+        return LocalBatchResult([], 0, SECTION_BATCH_BLOCK, [])
+    if str(youtube_url or "").strip():
+        return LocalBatchResult([], 0, YOUTUBE_BATCH_BLOCK, [])
+    accepted = list(paths[:BATCH_FILE_LIMIT])
+    omitted = max(0, len(paths) - BATCH_FILE_LIMIT)
+    failed: list[str] = []
+    ready: list[Path] = []
+    for path in accepted:
+        if path.is_file():
+            ready.append(path)
+        else:
+            failed.append(path.name)
+    started = time.time()
+    job_ids: list[str] = []
+    for index, path in enumerate(ready):
+        spec = make_spec(path)
+        spec.audio_path = str(path)
+        spec.created_at = started + index * 0.001
+        spec.start_sec = 0.0
+        spec.max_duration_sec = None
+        spec.region_label = None
+        job_ids.append(enqueue_job(spec))
+    return LocalBatchResult(job_ids, omitted, None, failed)
 
 
 def enqueue_job(spec: IsolateJobSpec) -> str:
@@ -1335,19 +1393,104 @@ def _first_existing_artifact(
     return None
 
 
+def _load_mono(path: Path) -> tuple[Any, int]:
+    import numpy as np
+    import soundfile as sf
+
+    data, sr = sf.read(str(path), always_2d=True)
+    mono = data.mean(axis=1).astype(np.float64)
+    return mono, int(sr)
+
+
+def _write_harmony_sum(
+    artifacts: dict[str, Any],
+    source_path: str | Path,
+) -> tuple[Path | None, str]:
+    """Sum guitar+piano+other. Bass stays out of the template chroma."""
+    import numpy as np
+    import soundfile as sf
+
+    guitar = _first_existing_artifact(artifacts, ("guitar",))
+    if guitar is None:
+        return None, ""
+    names = ("guitar", "piano", "other")
+    pieces: list[Any] = []
+    sample_rate = 0
+    for name in names:
+        path = _first_existing_artifact(artifacts, (name,))
+        if path is None:
+            continue
+        try:
+            mono, sr = _load_mono(path)
+        except Exception:
+            continue
+        if sample_rate == 0:
+            sample_rate = sr
+        elif sr != sample_rate and mono.size:
+            import librosa
+
+            mono = librosa.resample(mono, orig_sr=sr, target_sr=sample_rate)
+        pieces.append(mono)
+    if not pieces or sample_rate <= 0:
+        return None, ""
+    length = max(int(piece.size) for piece in pieces)
+    stacked = np.zeros(length, dtype=np.float64)
+    for piece in pieces:
+        stacked[: piece.size] += piece
+    sum_rms = float(np.sqrt(np.mean(stacked**2))) if stacked.size else 0.0
+    source = Path(source_path)
+    if source.is_file() and sum_rms > 0:
+        mix = None
+        mix_sr = sample_rate
+        try:
+            mix, mix_sr = _load_mono(source)
+        except Exception:
+            mix = None
+        if mix is not None and mix_sr != sample_rate and mix.size:
+            import librosa
+
+            mix = librosa.resample(mix, orig_sr=mix_sr, target_sr=sample_rate)
+        mix_rms = float(np.sqrt(np.mean(np.square(mix)))) if mix is not None and mix.size else 0.0
+        if mix_rms > 0 and sum_rms > 2.0 * mix_rms:
+            return None, "too_loud"
+    peak = float(np.max(np.abs(stacked))) if stacked.size else 0.0
+    if peak > 0:
+        stacked *= 0.99 / peak
+    dest = guitar.parent / "harmony_sum.wav"
+    sf.write(str(dest), stacked.astype(np.float32), sample_rate, subtype="PCM_16")
+    return dest, "stem_sum"
+
+
 def _analysis_sources(
     artifacts: dict[str, Any],
     source_path: str | Path,
-) -> tuple[Path | None, Path | None, Path | None]:
-    """Pick harmony/vocals/metronome inputs without assuming a stem set."""
-    harmony = _first_existing_artifact(artifacts, ("no_vocals", "other"))
-    source = Path(source_path)
-    if harmony is None and source.is_file():
-        harmony = source
+) -> tuple[Path | None, Path | None, Path | None, str | None]:
+    """Pick harmony/vocals/metronome inputs without assuming a stem set.
+
+    Priority is stem sum (guitar+piano+other), then ``no_vocals``, then
+    ``other``, then the full mix. Bass is not part of the sum.
+    """
     vocals = _first_existing_artifact(artifacts, ("vocals",))
     metronome = artifacts.get("metronome_diagnostics")
     metro_path = Path(str(metronome)) if metronome and Path(str(metronome)).is_file() else None
-    return harmony, vocals, metro_path
+    harmony: Path | None = None
+    kind: str | None = None
+    if _first_existing_artifact(artifacts, ("guitar",)) is not None:
+        summed, summed_kind = _write_harmony_sum(artifacts, source_path)
+        if summed is not None:
+            harmony, kind = summed, summed_kind
+    if harmony is None:
+        no_vocals = _first_existing_artifact(artifacts, ("no_vocals",))
+        if no_vocals is not None:
+            harmony, kind = no_vocals, "no_vocals"
+    if harmony is None:
+        other = _first_existing_artifact(artifacts, ("other",))
+        if other is not None:
+            harmony, kind = other, "other"
+    source = Path(source_path)
+    if harmony is None and source.is_file():
+        harmony, kind = source, "mix_fallback"
+    return harmony, vocals, metro_path, kind
 
 
 def _run_analysis_stage(
@@ -1363,7 +1506,7 @@ def _run_analysis_stage(
     from audio_to_tab.analysis import analyze_audio, save_analysis
 
     run_dir = Path(run_dir)
-    harmony, vocals, metronome = _analysis_sources(artifacts, source_path)
+    harmony, vocals, metronome, harmony_kind = _analysis_sources(artifacts, source_path)
     source = Path(source_path)
     fingerprint = (source_fingerprint or "").strip()
     if not fingerprint:
@@ -1376,6 +1519,7 @@ def _run_analysis_stage(
         "source_fingerprint": fingerprint,
         "source_path": str(source),
         "harmony_path": str(harmony) if harmony is not None else None,
+        "harmony_source_kind": harmony_kind,
         "vocals_path": str(vocals) if vocals is not None else None,
         "metronome_diagnostics": str(metronome) if metronome is not None else None,
         "duration_sec": duration,
@@ -1392,6 +1536,8 @@ def _run_analysis_stage(
         result = analyze_audio(
             harmony,
             harmony_path=harmony,
+            harmony_source_kind=harmony_kind,
+            bass_path=_first_existing_artifact(artifacts, ("bass",)),
             vocals_path=vocals,
             metronome_diagnostics=metronome,
             source_fingerprint=fingerprint,
@@ -1399,6 +1545,16 @@ def _run_analysis_stage(
             progress=progress,
         )
         analysis_path = save_analysis(run_dir / _ANALYSIS_FILENAME, result)
+        try:
+            from audio_to_tab.chart import build_chart
+            from audio_to_tab.export_musicxml import write_musicxml
+            from audio_to_tab.export_text import write_chart_text
+
+            document = build_chart(result, title=source.stem)
+            write_musicxml(document, run_dir / "chart.musicxml")
+            write_chart_text(document, run_dir / "chart.txt")
+        except Exception as exc:
+            diagnostics["export_error"] = str(exc)
         diagnostics.update(
             {
                 "bpm": result.bpm,
@@ -1433,9 +1589,15 @@ def analyse_existing_run(run_dir: Path | str) -> tuple[bool, str]:
 
     Returns ``(ok, message)``. This is synchronous on purpose: it is a one-shot
     repair for old runs that predate analysis, not a second job queue.
+    Background backlog uses ``start_background_analysis`` instead.
     """
     if worker_busy():
         return False, "Wait for the current separation to finish, then analyse."
+    return _analyse_run_in_place(run_dir)
+
+
+def _analyse_run_in_place(run_dir: Path | str) -> tuple[bool, str]:
+    """Write analysis.json and the meta summary for one finished run."""
     run_dir = Path(run_dir)
     meta_path = run_dir / "meta.json"
     try:
@@ -1448,7 +1610,7 @@ def analyse_existing_run(run_dir: Path | str) -> tuple[bool, str]:
     artifacts: dict[str, Any] = (
         dict(raw_artifacts) if isinstance(raw_artifacts, dict) else {}
     )
-    harmony, _vocals, _metronome = _analysis_sources(artifacts, "")
+    harmony, _vocals, _metronome, _harmony_kind = _analysis_sources(artifacts, "")
     if harmony is None:
         return False, "No guitar/instrumental stem to analyse."
     try:
@@ -1478,6 +1640,271 @@ def analyse_existing_run(run_dir: Path | str) -> tuple[bool, str]:
     if warning:
         return True, f"Analysis ready with warnings: {warning}"
     return True, "Analysis ready. Open Practice."
+
+
+def _analyse_process_result(run_dir: str) -> int:
+    """0 when the summary is written, 1 when this run should not be retried."""
+    try:
+        ok, _message = _analyse_run_in_place(run_dir)
+    except Exception:
+        return 1
+    return 0 if ok else 1
+
+
+def _analyse_process_entry(run_dir: str) -> None:
+    """Child-process target. Stays off the Streamlit script thread."""
+    sys.exit(_analyse_process_result(run_dir))
+
+
+def foreground_state_path() -> Path:
+    return DATA_DIR / _FOREGROUND_NAME
+
+
+def write_analysis_foreground(active_run: str | None) -> None:
+    """Remember the song open in the mixer so background analysis can step aside."""
+    payload = {"active_run": str(active_run) if active_run else None}
+    try:
+        _write_json_atomic(foreground_state_path(), payload)
+    except (OSError, TypeError, ValueError):
+        return
+
+
+def read_analysis_foreground() -> str | None:
+    data = _read_json(foreground_state_path())
+    if not isinstance(data, dict):
+        return None
+    run_dir = data.get("active_run")
+    text = str(run_dir or "").strip()
+    return text or None
+
+
+def background_status_path() -> Path:
+    return DATA_DIR / _STATUS_NAME
+
+
+def write_background_analysis_status(
+    *,
+    state: str,
+    title: str = "",
+    remaining: int = 0,
+    run_dir: str = "",
+    finished_run: str = "",
+    skipped: list[str] | None = None,
+    path: Path | None = None,
+) -> None:
+    """Record the backlog line the UI shows. Tests pass ``path`` so user data stays untouched."""
+    if path is None and os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    payload = {
+        "state": state if state in {"analysing", "waiting", "idle"} else "idle",
+        "title": title,
+        "remaining": max(0, int(remaining)),
+        "run_dir": run_dir,
+        "finished_run": finished_run,
+        "skipped": sorted(str(item) for item in (skipped or [])),
+    }
+    target = path or background_status_path()
+    current = _read_json(target)
+    if current == payload:
+        return
+    try:
+        _write_json_atomic(target, payload)
+    except (OSError, TypeError, ValueError):
+        return
+
+
+def read_background_analysis_status() -> dict[str, Any]:
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return {}
+    data = _read_json(background_status_path())
+    return data if isinstance(data, dict) else {}
+
+
+def _publish_analysis_progress(
+    rows: list[dict],
+    *,
+    state: str,
+    run_dir: str = "",
+    finished_run: str = "",
+) -> None:
+    from ui.pages.home import analysis_summary, run_label
+
+    title = ""
+    remaining = 0
+    for row in rows:
+        item = str(row.get("run_dir") or "")
+        if not item or item in _ANALYSIS_SKIPPED:
+            continue
+        if analysis_summary(row):
+            continue
+        remaining += 1
+        if item == run_dir:
+            title = run_label(row)
+    if remaining <= 0:
+        state = "idle"
+        run_dir = ""
+        title = ""
+    write_background_analysis_status(
+        state=state,
+        title=title,
+        remaining=remaining,
+        run_dir=run_dir if state == "analysing" else "",
+        finished_run=finished_run,
+        skipped=sorted(_ANALYSIS_SKIPPED),
+    )
+
+
+def advance_background_analysis(
+    rows: list[dict],
+    *,
+    separation_busy: bool,
+    skipped: set[str],
+    active_run: str | None,
+    analyse,
+) -> str | None:
+    """Analyse one eligible finished run. Returns that run dir, or None when idle.
+
+    ``skipped`` gains a run only after a no-stem or failed analysis. A busy
+    separator leaves the set unchanged and analyses nothing.
+    """
+    from ui.pages.home import auto_analysis_should_skip, next_auto_analysis
+
+    chosen = next_auto_analysis(
+        rows,
+        busy=separation_busy,
+        skipped=skipped,
+        active_run=active_run,
+    )
+    if not chosen:
+        return None
+    try:
+        ok, message = analyse(chosen)
+    except Exception as exc:
+        ok, message = False, str(exc)
+    if auto_analysis_should_skip(ok, message):
+        skipped.add(chosen)
+    return chosen
+
+
+def _stop_analysis_child(proc: multiprocessing.Process) -> None:
+    """End a background analysis child from the analysis thread, not the UI thread."""
+    if proc.is_alive():
+        proc.terminate()
+    proc.join(timeout=1.0)
+
+
+def _library_for_background() -> list[dict]:
+    from ui.pages.home import library_rows
+
+    return library_rows(None, limit=10000)
+
+
+def _poll_background_analysis() -> None:
+    """Start or reap one analysis child. Returns immediately."""
+    global _ANALYSIS_PROCESS, _ANALYSIS_RUN
+    from ui.pages.home import next_auto_analysis
+
+    proc = _ANALYSIS_PROCESS
+    finished_run = ""
+    if proc is not None:
+        separation_busy = jobs_active() or worker_busy()
+        if separation_busy:
+            _stop_analysis_child(proc)
+            _ANALYSIS_PROCESS = None
+            _ANALYSIS_RUN = None
+            _publish_analysis_progress(_library_for_background(), state="waiting")
+            return
+        if proc.is_alive():
+            active = read_analysis_foreground()
+            if not (active and active == _ANALYSIS_RUN):
+                return
+            others = next_auto_analysis(
+                _library_for_background(),
+                busy=False,
+                skipped=set(_ANALYSIS_SKIPPED),
+                active_run=active,
+            )
+            if not others or others == active:
+                return
+            _stop_analysis_child(proc)
+            _ANALYSIS_PROCESS = None
+            _ANALYSIS_RUN = None
+        else:
+            code = proc.exitcode
+            run_dir = _ANALYSIS_RUN or ""
+            proc.join(timeout=0)
+            _ANALYSIS_PROCESS = None
+            _ANALYSIS_RUN = None
+            if run_dir and code not in (0, None):
+                _ANALYSIS_SKIPPED.add(run_dir)
+            elif code == 0 and run_dir:
+                finished_run = run_dir
+    if jobs_active() or worker_busy():
+        _publish_analysis_progress(
+            _library_for_background(),
+            state="waiting",
+            finished_run=finished_run,
+        )
+        return
+    rows = _library_for_background()
+    active = read_analysis_foreground()
+    chosen = next_auto_analysis(
+        rows,
+        busy=False,
+        skipped=set(_ANALYSIS_SKIPPED),
+        active_run=active,
+    )
+    if not chosen or jobs_active() or worker_busy():
+        _publish_analysis_progress(rows, state="idle", finished_run=finished_run)
+        return
+    child = multiprocessing.Process(
+        target=_analyse_process_entry,
+        args=(chosen,),
+        name="att-background-analysis",
+        daemon=True,
+    )
+    child.start()
+    _ANALYSIS_PROCESS = child
+    _ANALYSIS_RUN = chosen
+    _publish_analysis_progress(
+        rows,
+        state="analysing",
+        run_dir=chosen,
+        finished_run=finished_run,
+    )
+
+
+def _background_analysis_loop() -> None:
+    while not _ANALYSIS_STOP.is_set():
+        try:
+            _poll_background_analysis()
+        except Exception:
+            pass
+        _ANALYSIS_STOP.wait(0.8 if _ANALYSIS_PROCESS is not None else 2.0)
+
+
+def start_background_analysis() -> None:
+    """Start the one-song analysis thread once. A no-op under pytest."""
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    if os.environ.get("ATT_BACKGROUND_ANALYSIS", "1").strip() == "0":
+        return
+    # A spawned child re-runs ui/app.py as ``__mp_main__``. It must never start
+    # its own analysis thread, or every child would spawn another.
+    if multiprocessing.parent_process() is not None:
+        return
+    global _ANALYSIS_THREAD
+    with _ANALYSIS_LOCK:
+        if _ANALYSIS_THREAD is not None and _ANALYSIS_THREAD.is_alive():
+            return
+        _ANALYSIS_STOP.clear()
+        thread = threading.Thread(
+            target=_background_analysis_loop,
+            name="att-background-analysis",
+            daemon=True,
+        )
+        thread.start()
+        _ANALYSIS_THREAD = thread
 
 
 def _run_tab_stage(

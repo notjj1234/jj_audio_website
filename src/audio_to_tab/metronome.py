@@ -31,10 +31,10 @@ _INTRO_ENERGY_RATIO = 0.2
 _STABLE_IOI_REL = 0.2
 _STABLE_MIN_BEATS = 4
 _DEFAULT_BEATS_PER_MEASURE = 4
-_METER_CANDIDATES = (3, 4)
+_METER_CANDIDATES = (2, 3, 4, 6)
 _METER_MIN_MEASURES = 3
-_METER_MIN_CONTRAST = 1.15
-_METER_WIN_MARGIN = 1.05
+_METER_FOUR_TIEBREAK = 1.03
+_METER_ACCENT_WIN_SEC = 0.06
 _HOP_LENGTH = 512
 _TEMPO_SMOOTH_SEC = 6.0
 # Non-1x octave runs shorter than this are octave errors, not a new tempo.
@@ -172,6 +172,8 @@ class MetronomeResult:
     bpm_curve_t: tuple[float, ...] = ()
     bpm_curve_bpm: tuple[float, ...] = ()
     downbeat_sec: float | None = None
+    meter_confidence: float = 0.0
+    meter_candidates: tuple[tuple[int, float], ...] = ()
 
     def slim_meta(self) -> dict[str, Any]:
         return {
@@ -888,57 +890,125 @@ def gate_unreliable_intro_beats(
     return gated, body_start
 
 
+@dataclass(frozen=True)
+class MeterEstimate:
+    beats_per_measure: int
+    confidence: float
+    candidates: tuple[tuple[int, float], ...]
+
+
+def _fixed_window_rms(detected: np.ndarray, mono: np.ndarray, sr: int, *, win_sec: float) -> np.ndarray:
+    """RMS on a constant-length window. Short edges are zero-padded, not truncated.
+
+    Truncating the window at t=0 inflates RMS (same click, fewer samples) and
+    makes a flat click track look like a downbeat. Padding keeps every beat
+    comparable so the 4/4 tie-break is doing the work, not the file edge.
+    """
+    times = np.asarray(detected, dtype=np.float64).reshape(-1)
+    audio = np.asarray(mono, dtype=np.float64).reshape(-1)
+    out = np.zeros(times.size, dtype=np.float64)
+    if sr <= 0 or audio.size == 0 or times.size == 0:
+        return out
+    win = max(1, int(float(win_sec) * int(sr)))
+    width = win * 2
+    n = audio.size
+    for index, beat in enumerate(times):
+        center = round(float(beat) * int(sr))
+        start = center - win
+        buf = np.zeros(width, dtype=np.float64)
+        src_start = max(0, start)
+        src_end = min(n, start + width)
+        if src_end > src_start:
+            dest = src_start - start
+            buf[dest : dest + (src_end - src_start)] = audio[src_start:src_end]
+        out[index] = float(np.sqrt(np.mean(buf * buf)))
+    return out
+
+
+def _percussive_mono(mono: np.ndarray, sr: int) -> np.ndarray:
+    """Percussive component used for accent scoring. Falls back to the mix."""
+    audio = np.asarray(mono, dtype=np.float32).reshape(-1)
+    if audio.size < max(8, int(sr * 0.05)) or sr <= 0:
+        return audio
+    try:
+        import librosa
+
+        _harmonic, percussive = librosa.effects.hpss(audio)
+    except Exception:
+        logger.debug("Meter HPSS failed; scoring the mix", exc_info=True)
+        return audio
+    percussive = np.asarray(percussive, dtype=np.float32).reshape(-1)
+    return percussive if percussive.size else audio
+
+
+def _score_meter(energies: np.ndarray, meter: int) -> float:
+    """Mean, over complete bars and the best phase, of downbeat RMS / other-beat RMS."""
+    count = int(energies.size)
+    if meter < 2 or count < _METER_MIN_MEASURES * meter:
+        return 0.0
+    n_bars = count // meter
+    best = 0.0
+    for phase in range(meter):
+        folded = np.roll(energies, -phase)[: n_bars * meter].reshape(n_bars, meter)
+        others = folded[:, 1:]
+        other_mean = others.mean(axis=1)
+        valid = other_mean > 1e-12
+        if not np.any(valid):
+            continue
+        ratios = folded[valid, 0] / other_mean[valid]
+        best = max(best, float(np.mean(ratios)))
+    return best
+
+
+def estimate_meter(
+    detected: np.ndarray,
+    mono: np.ndarray,
+    sr: int,
+    bpm: float,
+) -> MeterEstimate:
+    """Score meters 2, 3, 4 and 6. A 1.03 tie-break favours 4; it is not a default."""
+    empty = MeterEstimate(_DEFAULT_BEATS_PER_MEASURE, 0.0, ())
+    times = np.asarray(detected, dtype=np.float64).reshape(-1)
+    times = np.sort(times[np.isfinite(times)])
+    if sr <= 0 or bpm <= 0 or len(mono) == 0:
+        return empty
+    if times.size < _METER_MIN_MEASURES * min(_METER_CANDIDATES):
+        return empty
+    accents = _fixed_window_rms(
+        times,
+        _percussive_mono(mono, sr),
+        sr,
+        win_sec=_METER_ACCENT_WIN_SEC,
+    )
+    if not np.any(accents > 0):
+        return empty
+    scores = {
+        meter: _score_meter(accents, meter)
+        for meter in _METER_CANDIDATES
+        if times.size >= _METER_MIN_MEASURES * meter
+    }
+    scores = {meter: score for meter, score in scores.items() if score > 0}
+    if not scores:
+        return empty
+    boosted = {
+        meter: score * (_METER_FOUR_TIEBREAK if meter == _DEFAULT_BEATS_PER_MEASURE else 1.0)
+        for meter, score in scores.items()
+    }
+    winner = max(boosted, key=lambda meter: (boosted[meter], meter == _DEFAULT_BEATS_PER_MEASURE))
+    runner_up = max((value for meter, value in boosted.items() if meter != winner), default=0.0)
+    confidence = float(boosted[winner] / runner_up) if runner_up > 0 else 1.0
+    ranked = tuple(sorted(scores.items(), key=lambda item: item[1], reverse=True))
+    return MeterEstimate(int(winner), confidence, ranked)
+
+
 def detect_beats_per_measure(
     detected: np.ndarray,
     mono: np.ndarray,
     sr: int,
     bpm: float,
 ) -> int:
-    """Infer 3 or 4 beats per measure from where the accents land.
-
-    Scores each candidate meter by how much louder its strongest beat class is
-    than the rest (per-beat RMS). A 4/4 accent pattern read as 3 (or vice versa)
-    smears across every class and scores ~1.0, so the contrast separates them.
-    Falls back to 4 whenever the audio is too short or the accents are flat.
-    """
-    times = np.asarray(detected, dtype=np.float64).reshape(-1)
-    times = np.sort(times[np.isfinite(times)])
-    if sr <= 0 or bpm <= 0 or len(mono) == 0:
-        return _DEFAULT_BEATS_PER_MEASURE
-    if times.size < _METER_MIN_MEASURES * min(_METER_CANDIDATES):
-        return _DEFAULT_BEATS_PER_MEASURE
-
-    energies = _beat_local_rms(times, mono, sr)
-    if not np.any(energies > 0):
-        return _DEFAULT_BEATS_PER_MEASURE
-
-    index = np.arange(times.size, dtype=np.int64)
-    scores: dict[int, float] = {}
-    for meter in _METER_CANDIDATES:
-        if times.size < _METER_MIN_MEASURES * meter:
-            continue
-        best = 0.0
-        for phase in range(meter):
-            on = energies[index % meter == phase]
-            off = energies[index % meter != phase]
-            if on.size == 0 or off.size == 0:
-                continue
-            off_mean = float(np.mean(off))
-            if off_mean <= 0:
-                continue
-            best = max(best, float(np.mean(on)) / off_mean)
-        if best > 0:
-            scores[meter] = best
-    if not scores:
-        return _DEFAULT_BEATS_PER_MEASURE
-
-    winner = max(scores, key=lambda m: scores[m])
-    runner_up = max((s for m, s in scores.items() if m != winner), default=0.0)
-    if scores[winner] < _METER_MIN_CONTRAST:
-        return _DEFAULT_BEATS_PER_MEASURE
-    if scores[winner] < _METER_WIN_MARGIN * runner_up:
-        return _DEFAULT_BEATS_PER_MEASURE
-    return int(winner)
+    """Infer beats per measure from percussive accents. Returns 4 when audio is too short."""
+    return estimate_meter(detected, mono, sr, bpm).beats_per_measure
 
 
 def _beat_band_energy(
@@ -1483,8 +1553,9 @@ def generate_metronome_stem(
 
     measure = max(1, int(beats_per_measure))
     meter_beats = body_beats if body_beats.size >= _MIN_BEATS else gated
+    meter_estimate = estimate_meter(meter_beats, mono, native_sr, bpm)
     if measure == _DEFAULT_BEATS_PER_MEASURE:
-        measure = detect_beats_per_measure(meter_beats, mono, native_sr, bpm)
+        measure = meter_estimate.beats_per_measure
 
     times, downbeat_sec, doubled = align_click_grid_to_downbeat(
         times,
@@ -1550,6 +1621,8 @@ def generate_metronome_stem(
         bpm_curve_t=curve_t,
         bpm_curve_bpm=curve_b,
         downbeat_sec=float(downbeat_sec),
+        meter_confidence=float(meter_estimate.confidence),
+        meter_candidates=meter_estimate.candidates,
     )
 
 
@@ -1567,6 +1640,8 @@ def write_metronome_diagnostics(path: Path, result: MetronomeResult) -> Path:
         "detected_times": list(result.detected_times),
         "click_times_1x": list(result.click_times_1x),
         "beats_per_measure": result.beats_per_measure,
+        "meter_confidence": float(result.meter_confidence),
+        "meter_candidates": [[int(meter), float(score)] for meter, score in result.meter_candidates],
         "render": result.render.to_dict(),
     }
     if result.downbeat_sec is not None:
@@ -1640,6 +1715,20 @@ def _result_from_payload(
     source = str(payload.get("source") or "source")
     measure = max(1, int(payload.get("beats_per_measure") or 4))
     curve_t, curve_b = _bpm_curve_from_payload(payload.get("bpm_curve"))
+    meter_confidence = 0.0
+    try:
+        meter_confidence = float(payload.get("meter_confidence") or 0.0)
+    except (TypeError, ValueError):
+        meter_confidence = 0.0
+    meter_candidates: list[tuple[int, float]] = []
+    raw_candidates = payload.get("meter_candidates")
+    if isinstance(raw_candidates, list):
+        for item in raw_candidates:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                try:
+                    meter_candidates.append((int(item[0]), float(item[1])))
+                except (TypeError, ValueError):
+                    continue
     stored_downbeat = payload.get("downbeat_sec")
     downbeat_sec = None
     if stored_downbeat is not None:
@@ -1664,6 +1753,8 @@ def _result_from_payload(
         bpm_curve_t=curve_t,
         bpm_curve_bpm=curve_b,
         downbeat_sec=downbeat_sec,
+        meter_confidence=meter_confidence,
+        meter_candidates=tuple(meter_candidates),
     )
 
 

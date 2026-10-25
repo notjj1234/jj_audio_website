@@ -60,6 +60,9 @@ def _as_path(raw: str) -> Path | None:
         if parsed.scheme != "file":
             return None
         text = unquote(parsed.path)
+        # file:///C:/song.mp4 parses as /C:/song.mp4
+        if len(text) >= 3 and text[0] == "/" and text[2] == ":":
+            text = text[1:]
     if not text:
         return None
     return Path(text)
@@ -92,7 +95,7 @@ def paths_from_argv(argv: Sequence[str]) -> tuple[list[Path], list[Path]]:
             continue
         if not is_file:
             continue
-        if is_opened_audio(path):
+        if is_opened_audio(path) or is_opened_video(path):
             accepted.append(path)
         else:
             declined.append(path)

@@ -1,10 +1,14 @@
 /** Pure practice-panel helpers. No DOM, no audio — safe to unit test later. */
 
+export type ChordLevel = "simple" | "medium" | "chart";
+
 export type ChordEvent = {
   start: number;
   end: number;
   symbol: string;
   confidence?: number;
+  simple?: string;
+  medium?: string;
 };
 
 export type Section = {
@@ -33,6 +37,7 @@ export type AnalysisData = {
   downbeats?: number[];
   beats_per_measure?: number;
   chords?: ChordEvent[];
+  chart?: unknown;
   sections?: Section[];
   lyrics?: LyricLine[];
   lyrics_language?: string | null;
@@ -329,4 +334,166 @@ export function replaceChordSymbol(current: string, typed: string): string | nul
   const bassMatch = bassRaw.trim().match(/^([A-Ga-g])([#b]?)$/);
   if (!bassMatch) return null;
   return `${head}/${bassMatch[1]!.toUpperCase()}${bassMatch[2] ?? ""}`;
+}
+
+const PC_FLAT = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
+
+export type Spelling = "sharp" | "flat";
+
+export function spellPitchClass(pc: number, spelling: Spelling): string {
+  const names = spelling === "flat" ? PC_FLAT : PC_NAME;
+  const index = ((Math.round(pc) % 12) + 12) % 12;
+  return names[index]!;
+}
+
+const PC_FROM_NAME: Record<string, number> = {
+  C: 0,
+  "C#": 1,
+  Db: 1,
+  D: 2,
+  "D#": 3,
+  Eb: 3,
+  E: 4,
+  F: 5,
+  "F#": 6,
+  Gb: 6,
+  G: 7,
+  "G#": 8,
+  Ab: 8,
+  A: 9,
+  "A#": 10,
+  Bb: 10,
+  B: 11,
+};
+
+export function spellChordSymbol(symbol: string, spelling: Spelling): string {
+  const formatted = formatChordSymbol(symbol);
+  if (formatted === "—") return formatted;
+  const rewrite = (token: string): string => {
+    const match = token.match(/^([A-Ga-g][#b]?)(.*)$/);
+    if (!match) return token;
+    const raw = match[1] ?? "";
+    const name = raw.charAt(0).toUpperCase() + raw.slice(1);
+    const pc = PC_FROM_NAME[name];
+    if (pc === undefined) return token;
+    return spellPitchClass(pc, spelling) + (match[2] ?? "");
+  };
+  const [head, bass] = formatted.split("/");
+  const next = rewrite(head ?? "");
+  return bass ? `${next}/${rewrite(bass)}` : next;
+}
+
+/** Easy is a triad or sus. Medium is a 6th or 7th. Everything else is Hard. */
+export function chordDifficulty(symbol: string): "" | "Easy" | "Medium" | "Hard" {
+  const formatted = formatChordSymbol(symbol);
+  if (!formatted || formatted === "—") return "";
+  const quality = (formatted.split("/")[0] ?? "").replace(/^[A-G][#b]?/, "");
+  if (quality === "" || quality === "m" || quality === "5" || quality === "sus2" || quality === "sus4") {
+    return "Easy";
+  }
+  if (["6", "m6", "7", "maj7", "m7", "add9"].includes(quality)) return "Medium";
+  return "Hard";
+}
+
+export const CAPO_PRESETS = [
+  { id: "open", label: "Open", fret: 0 },
+  { id: "capo2", label: "Capo 2", fret: 2 },
+  { id: "capo5", label: "Capo 5", fret: 5 },
+  { id: "capo7", label: "Capo 7", fret: 7 },
+] as const;
+
+export function replaceSectionLabel(current: string, typed: string): string {
+  const text = typed.replace(/\s+/g, " ").trim();
+  return text || current;
+}
+
+export function replaceLyricLine(current: string, typed: string): string {
+  const text = typed.replace(/\s+/g, " ").trim();
+  return text || current;
+}
+
+export function replaceMeasureText(current: string, typed: string): string | null {
+  void current;
+  const text = typed.trim();
+  if (!/^[\d\-xX|.\s]+$/.test(text)) return null;
+  return text;
+}
+
+export function formatBassTab(pitches: number[]): string {
+  const strings = [
+    { name: "G", open: 43 },
+    { name: "D", open: 38 },
+    { name: "A", open: 33 },
+    { name: "E", open: 28 },
+  ];
+  return strings
+    .map((string) => {
+      const frets = pitches.map((pitch) => {
+        const fret = Math.round(pitch) - string.open;
+        return fret >= 0 && fret <= 24 ? String(fret) : "-";
+      });
+      return `${string.name}|${frets.join("-")}`;
+    })
+    .join("\n");
+}
+
+export function listenCents(hz: number): number {
+  if (!Number.isFinite(hz) || hz <= 0) return 0;
+  return Math.round(1200 * Math.log2(hz / 440) * 100) / 100;
+}
+
+/** Output latency plus a user offset, clamped so a bad device cannot shove the chart. */
+export function outputLatencyMs(
+  ctx: { outputLatency?: number; baseLatency?: number } | null | undefined,
+  userOffsetMs = 0
+): number {
+  const seconds = ctx?.outputLatency ?? ctx?.baseLatency ?? 0;
+  const raw = (Number.isFinite(seconds) ? seconds : 0) * 1000 + (Number.isFinite(userOffsetMs) ? userOffsetMs : 0);
+  return Math.min(250, Math.max(0, raw));
+}
+
+/** Acoustic time: the transport clock plus the time the speakers are behind it. */
+export function chartTimeSeconds(audioTime: number, latencyMs: number): number {
+  const time = Number.isFinite(audioTime) ? audioTime : 0;
+  const latency = Number.isFinite(latencyMs) ? latencyMs : 0;
+  return time + latency / 1000;
+}
+
+const CHORD_HYSTERESIS_SEC = 0.02;
+
+/** Move forward only after the next chord has been current for 20 ms. Rewind on a seek. */
+export function advanceChordIndex(
+  chords: { start: number }[] | undefined,
+  index: number,
+  chartTime: number
+): number {
+  if (!Array.isArray(chords) || chords.length === 0 || !Number.isFinite(chartTime)) return 0;
+  let cursor = Math.max(0, Math.min(Math.floor(index) || 0, chords.length - 1));
+  const startAt = (i: number): number => finite(chords[i]?.start, Number.POSITIVE_INFINITY);
+  if (chartTime < startAt(cursor)) cursor = 0;
+  while (cursor + 1 < chords.length && chartTime >= startAt(cursor + 1) + CHORD_HYSTERESIS_SEC) {
+    cursor += 1;
+  }
+  return cursor;
+}
+
+/** Scroll offset that puts the chip's centre on the strip's centre, clamped to the scroll range. */
+export function scrollLeftToCenter(
+  container: { clientWidth: number; scrollWidth: number },
+  chip: { offsetLeft: number; offsetWidth: number }
+): number {
+  const view = Math.max(0, container.clientWidth);
+  const target = chip.offsetLeft + chip.offsetWidth / 2 - view / 2;
+  const max = Math.max(0, container.scrollWidth - view);
+  return Math.max(0, Math.min(target, max));
+}
+
+/** Symbol for the selected display level. An empty reduced form falls back to the chart symbol. */
+export function displaySymbol(
+  chord: { symbol: string; simple?: string; medium?: string },
+  level: ChordLevel
+): string {
+  if (level === "simple" && chord.simple) return chord.simple;
+  if (level === "medium" && chord.medium) return chord.medium;
+  return chord.symbol;
 }

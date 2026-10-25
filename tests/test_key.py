@@ -7,7 +7,7 @@ import pytest
 import soundfile as sf
 
 from audio_to_tab.analysis import ChordEvent
-from audio_to_tab.key import estimate_key
+from audio_to_tab.key import MAJOR_PROFILE, estimate_key, provisional_key
 
 
 def _write_chord(path, freqs, *, duration: float = 2.0, sr: int = 22050) -> None:
@@ -104,6 +104,28 @@ def test_noisy_chords_do_not_invent_a_key(tmp_path):
     # An unparseable progression falls back to chroma rather than returning garbage.
     assert key == "C"
     assert confidence in {"high", "medium", "low"}
+
+
+def test_relative_minor_broken_by_bass():
+    minor = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
+    chroma = MAJOR_PROFILE + np.roll(minor, 9)
+    bass_a = np.zeros(12)
+    bass_a[9] = 1.0
+    bass_c = np.zeros(12)
+    bass_c[0] = 1.0
+
+    minor_name, _minor_score = provisional_key(chroma, bass_a)
+    major_name, _major_score = provisional_key(chroma, bass_c)
+
+    assert minor_name == "Am"
+    assert major_name == "C"
+
+
+def test_provisional_key_matches_profile_on_c_major_scale():
+    name, score = provisional_key(MAJOR_PROFILE, np.zeros(12))
+
+    assert name == "C"
+    assert score > 0.8
 
 
 @pytest.mark.parametrize("symbol", ["C", "Cm", "C7", "Cmaj7", "Cm7", "Csus4", "Cdim"])

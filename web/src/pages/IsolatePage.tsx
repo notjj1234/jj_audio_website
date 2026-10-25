@@ -4,6 +4,7 @@ import { JobProgress } from "../components/JobProgress";
 import { ProcessingModeSelect, resolveProcessingMode } from "../components/ProcessingModeSelect";
 import { RegionPicker } from "../components/RegionPicker";
 import { StemMixer } from "../components/StemMixer";
+import { practiceFromJob } from "./isolatePractice";
 import type { StemInfo } from "../mixer/engine";
 import {
   fullFileTrimNotice,
@@ -392,6 +393,7 @@ export function IsolatePage() {
     }
   }
 
+  const practice = practiceFromJob(job);
   const stems: StemInfo[] = useMemo(() => {
     if (!job || job.status !== "succeeded") return [];
     return Object.entries(job.artifacts)
@@ -700,7 +702,9 @@ export function IsolatePage() {
               </a>
             ))}
           </div>
-          {stems.length > 0 && <StemMixer stems={stems} />}
+          {stems.length > 0 && (
+            <StemMixer stems={stems} analysis={practice.analysis} tab={practice.tab} />
+          )}
         </div>
       )}
     </div>

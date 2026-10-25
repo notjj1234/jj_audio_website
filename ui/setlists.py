@@ -70,3 +70,22 @@ def remove_song(setlists: list[dict], setlist_id: str, run_dir: str) -> bool:
         songs.remove(song)
         return True
     return False
+
+
+def rename_setlist(setlists: list[dict], setlist_id: str, name: str) -> bool:
+    cleaned = " ".join(str(name or "").split()) or "Setlist"
+    for item in setlists:
+        if str(item.get("id") or "") != setlist_id:
+            continue
+        item["name"] = cleaned
+        return True
+    return False
+
+
+def delete_setlist(setlists: list[dict], setlist_id: str) -> bool:
+    for index, item in enumerate(setlists):
+        if str(item.get("id") or "") != setlist_id:
+            continue
+        del setlists[index]
+        return True
+    return False

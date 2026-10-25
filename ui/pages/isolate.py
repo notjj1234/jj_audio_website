@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import logging
 import os
@@ -32,6 +33,7 @@ from ui.desktop_export import (
     export_mix_to_folder,
     export_song_dir,
     export_tracks_to_folder,
+    write_wav_48_24,
     open_path_in_os,
 )
 from ui.desktop_notify import notify as desktop_notify
@@ -59,6 +61,7 @@ from ui.isolate_jobs import (
     delete_finished_job,
     delete_library_run,
     enqueue_job,
+    enqueue_local_batch,
     ensure_worker_started,
     format_job_error,
     jobs_visible_in_queue,
@@ -104,6 +107,7 @@ from ui.isolate_state import (
     close_open_mix_tab,
     draft_tab_job_overlays,
     mix_tab_event_index,
+    mixer_focus_run_dir,
     move_open_mix_tab,
     pending_open_job_ids,
     focus_new_draft_tab,
@@ -279,9 +283,11 @@ from audio_to_tab.hardware import (  # noqa: E402
 from audio_to_tab.ingest import (  # noqa: E402
     YouTubeDownloadError,
     YouTubeSearchError,
+    download_direct_media,
     download_youtube_audio,
     download_youtube_preview_video,
     format_youtube_duration,
+    is_direct_media_url,
     is_youtube_url,
     normalize_audio,
     search_youtube_videos,
@@ -1306,6 +1312,8 @@ def _render_live_mixer(
         count_in_bars=int(practice_seed.get("count_in_bars") or 0),
         initial_rate=float(practice_seed.get("playback_rate") or 1.0),
         initial_semitones=int(practice_seed.get("playback_semitones") or 0),
+        stem_trims=project.get("stem_trims") if isinstance(project, dict) else {},
+        seek_sec=st.session_state.pop("isolate_seek_sec", None),
         key=mixer_key,
     )
 
@@ -1925,13 +1933,20 @@ def _render_engine_panel(
             else " Only applies when the track mix is 4-stem Demucs (no guitar/piano)."
         )
         st.checkbox(
-            "Use fine-tuned 4-stem Demucs (htdemucs_ft)",
+            "Hi-Fi (fine-tuned Demucs)",
             disabled=not four_stem,
             help=(
                 "Meta htdemucs_ft: usually cleaner vocals/drums/bass than stock 4-stem. "
                 "Slower. Ignored for 6-stem guitar/piano jobs." + four_stem_help
             ),
             key="isolate_htdemucs_ft",
+            **persist,
+        )
+        st.checkbox(
+            "Split lead and rhythm guitar",
+            disabled=resolved["model"] != "htdemucs_6s",
+            help="Uses the guitar stem already in this job. No extra model.",
+            key="isolate_lead_rhythm",
             **persist,
         )
         # Rendered unconditionally but disabled off-model, with the reason stated.
@@ -2563,15 +2578,33 @@ def _render_separation_controls() -> dict:
         st.session_state["isolate_speed_preset"] = DEFAULT_SPEED_PRESET
     persist = _persist_kwargs()
 
-    uploaded = st.file_uploader(
+    uploaded_raw = st.file_uploader(
         "Upload audio or video",
         type=_HOME_UPLOAD_TYPES,
-        help="MP3, WAV, FLAC, M4A, MP4, MOV, WEBM, or MKV. Video audio is extracted on this computer.",
+        accept_multiple_files=True,
+        help="MP3, WAV, FLAC, M4A, MP4, MOV, WEBM, or MKV. Video audio is extracted on this computer. Several files are queued one at a time.",
         key=f"isolate_upload_{st.session_state.get('isolate_upload_key', 0)}",
     )
-    _sync_upload_output_name(uploaded)
-    if uploaded is not None:
-        _ensure_pending_audio(uploaded)
+    uploads = list(uploaded_raw) if isinstance(uploaded_raw, list) else []
+    single = uploads[0] if len(uploads) == 1 else None
+    uploaded = uploads if len(uploads) > 1 else single
+    if len(uploads) > 1:
+        extra = len(uploads) - 20
+        if extra == 1:
+            st.caption(
+                f"{len(uploads)} files selected. The first 20 will be queued. 1 file was left out."
+            )
+        elif extra > 1:
+            st.caption(
+                f"{len(uploads)} files selected. The first 20 will be queued. {extra} files were left out."
+            )
+        else:
+            st.caption(
+                f"{len(uploads)} files selected. Each file is queued with the same tracks and speed."
+            )
+    elif single is not None:
+        _sync_upload_output_name(single)
+        _ensure_pending_audio(single)
 
     youtube_error: str | None = None
     url_row = st.columns([4, 1], vertical_alignment="bottom")
@@ -2598,8 +2631,8 @@ def _render_separation_controls() -> dict:
     #     "Off until you paste a URL or search. Enable only if you have rights."
     # )
     url_ready = youtube_url.strip()
-    if url_ready and not is_youtube_url(url_ready):
-        youtube_error = "Only YouTube URLs are allowed."
+    if url_ready and not is_youtube_url(url_ready) and not is_direct_media_url(url_ready):
+        youtube_error = "Paste a YouTube link or a direct audio or video file link."
         st.error(youtube_error)
     elif url_ready and is_youtube_url(url_ready):
         pending = st.session_state.get("isolate_pending_audio_path")
@@ -2658,16 +2691,16 @@ def _render_separation_controls() -> dict:
 
     carry_over_path = st.session_state.get("carry_over_audio_path")
     carry_over_name = st.session_state.get("carry_over_audio_name")
-    if not uploaded and carry_over_path and Path(carry_over_path).exists():
+    if not single and len(uploads) <= 1 and carry_over_path and Path(carry_over_path).exists():
         st.caption(
             f"Using carried-over audio: **{carry_over_name}**. "
             "Upload a file above to use something else instead."
         )
-    default_name = Path(uploaded.name).stem if uploaded else Path(carry_over_name or "").stem
+    default_name = Path(single.name).stem if single else Path(carry_over_name or "").stem
     if default_name and not st.session_state.get("isolate_output_name"):
         st.session_state["isolate_output_name"] = default_name
 
-    audio_path = _active_source_path(uploaded)
+    audio_path = _active_source_path(single)
 
     st.text_input(
         "Output name",
@@ -2780,6 +2813,8 @@ def _render_separation_controls() -> dict:
         "bleed_gate": engine_fields["bleed_gate"],
         "bass_bleed_mitigation": engine_fields["bass_bleed_mitigation"],
         "guitar_ensemble": engine_fields["guitar_ensemble"],
+        "lead_rhythm": engine_fields["lead_rhythm"],
+        "lead_rhythm_mode": engine_fields["lead_rhythm_mode"],
         "emit_stems": list(resolved["emit_stems"]) if resolved.get("emit_stems") else None,
         "fold_other_into_guitar": bool(resolved.get("fold_other_into_guitar", True)),
         "fold_other_mode": engine_fields["fold_other_mode"],
@@ -3751,6 +3786,12 @@ def _save_all_tracks(selected_stem_paths: dict[str, Path], export_root: Path, ba
 
 
 def _save_current_mix(ready: str, export_root: Path, base_name: str, fmt: str) -> None:
+    if fmt == "wav" and st.session_state.get("isolate_wav_48_24"):
+        dest_dir = export_song_dir(export_root, str(base_name))
+        dest_file = write_wav_48_24(Path(ready), dest_dir / f"{base_name}_current_mix.wav")
+        st.session_state["isolate_last_export_path"] = str(dest_file.parent)
+        st.success(f"Download finished. Saved to {dest_file}")
+        return
     dest_file = export_mix_to_folder(
         Path(ready),
         export_song_dir(export_root, str(base_name)),
@@ -3841,6 +3882,33 @@ def _render_downloads_panel(
 
         st.divider()
         fmt = _download_format_widget()
+        if fmt == "wav":
+            st.checkbox(
+                "48 kHz / 24-bit WAV",
+                key="isolate_wav_48_24",
+                help="This saved file only. Listening speed and key stay as they are.",
+            )
+        if st.button("Chord chart", key="isolate_chord_chart"):
+            from ui.library_song import chord_chart_text
+
+            analysis_path = run_dir / "analysis.json"
+            chords: list = []
+            if analysis_path.is_file():
+                try:
+                    payload = json.loads(analysis_path.read_text(encoding="utf-8"))
+                    raw = payload.get("chords") if isinstance(payload, dict) else None
+                    if isinstance(raw, list):
+                        chords = raw
+                except json.JSONDecodeError:
+                    chords = []
+            if not chords:
+                st.caption("No chords in this run.")
+            else:
+                dest_dir = export_song_dir(export_root, str(base_name))
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                chart = dest_dir / f"{base_name}_chord_chart.txt"
+                chart.write_text(chord_chart_text(chords), encoding="utf-8")
+                st.success(f"Chord chart saved to {chart}")
         st.caption(
             "Save current mix includes mute, solo, levels, pan, master, and Speed & Key. "
             "Save all tracks stays original speed/key."
@@ -3912,9 +3980,29 @@ def _resolve_audio_for_job(choice: dict) -> tuple[Path | None, str | None]:
     pending = st.session_state.get("isolate_pending_audio_path")
     carry_over_path = st.session_state.get("carry_over_audio_path")
 
+    if youtube_url and is_direct_media_url(youtube_url):
+        already = (
+            pending
+            and Path(pending).exists()
+            and st.session_state.get("isolate_pending_fp") == f"direct:{youtube_url}"
+        )
+        if already:
+            return Path(pending), None
+        out = run_output_dir()
+        try:
+            path = download_direct_media(youtube_url, out)
+        except Exception as exc:
+            return None, f"Could not save that link: {exc}"
+        st.session_state["isolate_pending_audio_path"] = str(path)
+        st.session_state["isolate_pending_fp"] = f"direct:{youtube_url}"
+        st.session_state["isolate_upload_fp"] = f"direct:{youtube_url}"
+        if not str(choice.get("output_name") or "").strip():
+            choice["output_name"] = path.stem
+        return path, None
+
     if youtube_url:
         if not is_youtube_url(youtube_url):
-            return None, "Only YouTube URLs are allowed."
+            return None, "Paste a YouTube link or a direct audio or video file link."
         already = (
             pending
             and Path(pending).exists()
@@ -4169,6 +4257,8 @@ def _enqueue_confirmed_job(choice: dict, audio_path: Path) -> None:
         metronome_accent=metro.accent,
         metronome_rate=metro.rate,
         metronome_sound=metro.sound,
+        lead_rhythm=bool(choice.get("lead_rhythm")),
+        lead_rhythm_mode=str(choice.get("lead_rhythm_mode") or "confident"),
     )
     st.session_state["isolate_last_custom_stems"] = list(choice.get("custom_stems") or [])
     st.session_state["isolate_results_source_fp"] = source_fp
@@ -4631,8 +4721,169 @@ def _close_mix_tab(rows: list[dict], tab_id: str) -> None:
     _rerun_scroll_top()
 
 
+def _stage_batch_upload(uploaded: object) -> tuple[Path | None, str | None]:
+    """Stage one batch file without replacing the single-file pending slot."""
+    name = str(getattr(uploaded, "name", None) or "file")
+    try:
+        path = save_upload(uploaded)
+    except Exception:
+        return None, f"Could not read {name}."
+    if path.suffix.lower() not in _VIDEO_UPLOAD_SUFFIXES:
+        return path, None
+    wav = path.with_name(f"{path.stem}.extracted.wav")
+    try:
+        audio = normalize_audio(path, wav)
+    except Exception as exc:
+        wav.unlink(missing_ok=True)
+        logger.warning("Could not read audio from uploaded video: %s", exc)
+        return None, "Could not read audio from this video."
+    return audio, None
+
+
+def _spec_for_batch_file(choice: dict, audio_path: Path) -> IsolateJobSpec:
+    """One full-file job using the form's track, speed, and device choices."""
+    browser_id = st.session_state.get("isolate_user_id")
+    origin_tab = str(st.session_state.get(SHELL_TAB_KEY) or "")
+    if not is_new_draft_tab(origin_tab):
+        origin_tab = ""
+    metro = metronome_render_from_session(st.session_state)
+    return IsolateJobSpec(
+        id=uuid.uuid4().hex,
+        audio_path=str(audio_path),
+        output_dir=str(run_output_dir()),
+        title=audio_path.stem,
+        model=choice["model"],
+        quality=choice["quality"],
+        device=choice["device"],
+        two_stems=choice.get("two_stems"),
+        guitar_checkpoint=choice.get("guitar_checkpoint"),
+        two_pass=bool(choice.get("two_pass")),
+        guitar_refine=bool(choice.get("guitar_refine")),
+        low_end_restore_db=float(choice.get("low_end_restore_db") or 0.0),
+        sub_bass_debleed=bool(choice.get("sub_bass_debleed")),
+        demucs_segment=choice.get("demucs_segment", 8),
+        demucs_jobs=int(choice.get("demucs_jobs") or 1),
+        demucs_shifts=choice.get("demucs_shifts"),
+        demucs_overlap=choice.get("demucs_overlap"),
+        adaptive_fold_gain=bool(choice.get("adaptive_fold_gain")),
+        bleed_gate=bool(choice.get("bleed_gate")),
+        bass_bleed_mitigation=bool(choice.get("bass_bleed_mitigation")),
+        guitar_ensemble=bool(choice.get("guitar_ensemble")),
+        emit_stems=list(choice["emit_stems"]) if choice.get("emit_stems") else None,
+        fold_other_into_guitar=bool(choice.get("fold_other_into_guitar", True)),
+        fold_other_mode=str(choice.get("fold_other_mode") or "best_effort"),
+        custom_stems=list(choice.get("custom_stems") or []),
+        track_options=list(choice.get("track_options") or []),
+        source_kind=infer_source_kind(source_fingerprint=None, youtube_url=""),
+        owner=browser_id if isinstance(browser_id, str) else None,
+        origin_tab=origin_tab or None,
+        metronome_accent=metro.accent,
+        metronome_rate=metro.rate,
+        metronome_sound=metro.sound,
+        lead_rhythm=bool(choice.get("lead_rhythm")),
+        lead_rhythm_mode=str(choice.get("lead_rhythm_mode") or "confident"),
+    )
+
+
+def _enqueue_upload_batch(choice: dict, uploads: list) -> None:
+    """Queue several local files. The serial worker runs the oldest first."""
+    section_selected = (
+        choice.get("max_duration_sec") is not None
+        or bool(choice.get("region_label"))
+        or float(choice.get("start_sec") or 0.0) > 0.5
+    )
+    youtube_url = (choice.get("youtube_url") or "").strip()
+    if section_selected or youtube_url:
+        blocked = enqueue_local_batch(
+            [],
+            section_selected=section_selected,
+            youtube_url=youtube_url,
+            make_spec=lambda path: _spec_for_batch_file(choice, path),
+        )
+        st.error(blocked.blocked or "Could not queue these files.")
+        return
+    if not is_pro_mode(st.session_state) and not st.session_state.get(
+        "isolate_lite_run_on_manual"
+    ):
+        lite_auto = lite_auto_choice(get_desktop_probe())
+        choice = dict(choice)
+        choice["device"] = str(lite_auto["device"])
+        if choice["device"] == "cpu":
+            choice["quality"] = "fast"
+        st.session_state["isolate_device"] = choice["device"]
+        st.session_state["isolate_quality"] = choice["quality"]
+    if job_requires_roformer_backend(choice["model"]) and not is_roformer_backend_available():
+        st.error(f"RoFormer backend is not installed. {ROFORMER_INSTALL_HINT}")
+        return
+    try:
+        ensure_cuda_available(choice["device"], get_desktop_probe())
+    except RuntimeError:
+        st.error(CUDA_UNAVAILABLE_MESSAGE)
+        return
+    probe = get_desktop_probe()
+    cap_sec = roformer_max_audio_sec(probe)
+    staged: list[Path] = []
+    notes: list[str] = []
+    for item in uploads:
+        path, err = _stage_batch_upload(item)
+        if err or path is None:
+            notes.append(err or f"Could not read {getattr(item, 'name', 'file')}.")
+            continue
+        if not is_pro_mode(st.session_state):
+            duration = _cached_probe_duration_sec(path)
+            effective = effective_clip_seconds(
+                file_duration_sec=duration,
+                start_sec=0.0,
+                max_duration_sec=None,
+            )
+            block = lite_roformer_enqueue_block_reason(
+                choice["model"],
+                effective_sec=effective,
+                cap_sec=cap_sec,
+                duration_known=effective is not None,
+                roformer_available=is_roformer_backend_available(),
+            )
+            if block:
+                notes.append(f"{path.stem}: {block}")
+                continue
+        staged.append(path)
+    result = enqueue_local_batch(
+        staged,
+        section_selected=False,
+        youtube_url="",
+        make_spec=lambda path: _spec_for_batch_file(choice, path),
+    )
+    notes.extend(result.failed)
+    if result.omitted == 1:
+        notes.append("1 file was left out.")
+    elif result.omitted > 1:
+        notes.append(f"{result.omitted} files were left out.")
+    if notes:
+        st.warning(" ".join(notes))
+    if not result.job_ids:
+        if not notes:
+            st.error("Could not queue these files.")
+        return
+    st.session_state["isolate_last_custom_stems"] = list(choice.get("custom_stems") or [])
+    reset_new_tab_source(st.session_state)
+    count = len(result.job_ids)
+    st.session_state["isolate_flash"] = (
+        "Separating **1** song…" if count == 1 else f"Queued **{count}** songs. One runs at a time."
+    )
+    st.session_state["_isolate_pending_queue"] = True
+    st.session_state[ISOLATE_QUEUE_PANEL_OPEN_KEY] = True
+    _rerun_scroll_top()
+
+
 def _try_enqueue_choice(choice: dict) -> None:
     """Queue the current Home form. Same checks as Separate tracks."""
+    uploads = choice.get("uploaded")
+    if isinstance(uploads, list) and len(uploads) > 1:
+        if choice.get("error"):
+            st.error(choice["error"])
+            return
+        _enqueue_upload_batch(choice, uploads)
+        return
     if choice.get("error"):
         st.error(choice["error"])
         return
@@ -4654,8 +4905,11 @@ def _try_enqueue_choice(choice: dict) -> None:
 
 def _has_source_for_job(choice: dict) -> bool:
     uploaded = choice.get("uploaded")
+    has_upload = (
+        isinstance(uploaded, list) and len(uploaded) > 0
+    ) or (uploaded is not None and not isinstance(uploaded, list))
     return bool(
-        uploaded
+        has_upload
         or choice.get("youtube_url")
         or (
             st.session_state.get("carry_over_audio_path")
@@ -4810,7 +5064,133 @@ def _render_reseparate_panel(stem_paths: dict[str, Path], run_dir: Path) -> None
                 _enqueue_reseparate_job(stem_id, stem_paths[stem_id], run_dir, parent_config)
 
 
+def sidebar_chord_visible(shell: str, run_dir: str | None, analysis: dict | None) -> bool:
+    """True only while a mix-shell run already has chords."""
+    if str(shell or "") != "mix":
+        return False
+    if not str(run_dir or "").strip():
+        return False
+    if not isinstance(analysis, dict):
+        return False
+    chords = analysis.get("chords")
+    return isinstance(chords, list) and len(chords) > 0
+
+
+_SIDEBAR_CHORD_HTML = """
+<style>
+  body:has(.att-sidebar-chord) [data-testid="stSidebarUserContent"] {
+    display: flex;
+    flex-direction: column;
+    min-height: calc(100vh - 2rem);
+  }
+  body:has(.att-sidebar-chord) [data-testid="stElementContainer"]:has(.att-sidebar-chord) {
+    margin-top: auto !important;
+    padding-top: 8px;
+    width: 100%;
+  }
+  .att-sidebar-chord {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    max-width: 216px;
+    margin-top: 8px;
+    padding: 12px;
+    border-top: 1px solid #A8B8CC;
+    background: #192542;
+    color: #F4F7FB;
+    text-align: center;
+  }
+  .att-sidebar-chord-eyebrow {
+    color: #B7C3D4;
+    font-size: 0.75rem;
+    line-height: 1.2;
+  }
+  .att-sidebar-chord-symbol {
+    margin-top: 4px;
+    color: #F6AD49;
+    font-weight: 750;
+    font-size: 1.8rem;
+    line-height: 1;
+  }
+  .att-sidebar-chord-diagram {
+    width: 168px;
+  }
+  .att-sidebar-chord-diagram .chord-diagram {
+    width: 168px;
+    height: auto;
+    display: block;
+    margin: 0 auto;
+  }
+  .att-sidebar-chord .chord-string,
+  .att-sidebar-chord .chord-fret {
+    stroke: #B7C3D4;
+    stroke-width: 1;
+    opacity: 0.55;
+  }
+  .att-sidebar-chord .chord-fret { opacity: 0.28; }
+  .att-sidebar-chord .chord-nut { fill: #F4F7FB; opacity: 0.75; }
+  .att-sidebar-chord .chord-dot { fill: #F6AD49; }
+  .att-sidebar-chord .chord-open { fill: none; stroke: #F4F7FB; stroke-width: 1.2; }
+  .att-sidebar-chord .chord-mute,
+  .att-sidebar-chord .chord-fret-label {
+    fill: #F4F7FB;
+    font-size: 10px;
+    font-weight: 700;
+  }
+</style>
+<div class="att-sidebar-chord">
+  <div class="att-sidebar-chord-eyebrow">Chord</div>
+  <div class="att-sidebar-chord-symbol" aria-live="polite"></div>
+  <div class="att-sidebar-chord-diagram"></div>
+</div>
+"""
+
+
+def _sidebar_chord_seed(analysis: dict) -> str:
+    """First real chord name, escaped, so the card is not blank before playback."""
+    chords = analysis.get("chords")
+    if not isinstance(chords, list):
+        return ""
+    for chord in chords:
+        if not isinstance(chord, dict):
+            continue
+        symbol = str(chord.get("symbol") or "").strip()
+        if symbol and symbol.upper() != "N":
+            return html.escape(symbol)
+    return ""
+
+
+def _render_sidebar_chord() -> None:
+    """Current-chord card. Playback updates it by postMessage, not a rerun."""
+    shell = str(st.session_state.get(SHELL_VIEW_KEY) or "")
+    viewing = st.session_state.get("isolate_viewing_run_dir")
+    listen = st.session_state.get(LISTEN_PICKER_KEY)
+    tab = st.session_state.get(SHELL_TAB_KEY)
+    run = mixer_focus_run_dir(
+        shell_view=shell,
+        viewing_run_dir=viewing if isinstance(viewing, str) else None,
+        listen_picker=listen if isinstance(listen, str) else None,
+        shell_tab=tab if isinstance(tab, str) else None,
+    )
+    analysis = load_analysis_for_run(run) if run else None
+    if not isinstance(analysis, dict) or not sidebar_chord_visible(shell, run, analysis):
+        return
+    card = _SIDEBAR_CHORD_HTML.replace(
+        '<div class="att-sidebar-chord-symbol" aria-live="polite"></div>',
+        '<div class="att-sidebar-chord-symbol" aria-live="polite">'
+        + _sidebar_chord_seed(analysis)
+        + "</div>",
+        1,
+    )
+    with st.sidebar:
+        st.html(card, unsafe_allow_javascript=True)
+
+
 def _render_mixer_workspace(browser_id: str | None) -> None:
+    _render_sidebar_chord()
     owner = browser_id if isinstance(browser_id, str) else None
     rows = _library_rows_available(owner)
     if not _session_has_mixer_wavs():
@@ -4851,6 +5231,22 @@ def _render_mixer_workspace(browser_id: str | None) -> None:
     )
 
     bass_bleed = _load_bass_bleed_diagnostics(artifacts_map)
+    extra_uploads = st.file_uploader(
+        "Add extra tracks",
+        type=["mp3", "wav", "flac", "m4a"],
+        accept_multiple_files=True,
+        key="isolate_extra_tracks",
+        help="Local files kept with this song. They are not separated.",
+    )
+    if extra_uploads:
+        from ui.library_song import stage_extra_tracks
+
+        saved = stage_extra_tracks(
+            run_dir,
+            [(str(item.name), item.getvalue()) for item in extra_uploads],
+        )
+        if saved:
+            st.caption("Extra tracks: " + ", ".join(Path(path).name for path in saved))
 
     if pro:
         _render_mixer_region_caption(base_name)
@@ -4880,6 +5276,11 @@ def _render_mixer_workspace(browser_id: str | None) -> None:
         download_urls=mixer_download_urls,
         tab_pdf_url=tab_pdf_url,
     )
+
+    with st.expander("Song studio", expanded=False):
+        from ui.studio_panel import render_song_studio
+
+        render_song_studio(run_dir)
 
     if pro and bass_bleed.get("flagged"):
         st.warning(

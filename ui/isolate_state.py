@@ -2432,6 +2432,7 @@ PERSISTED_SETTING_KEYS: tuple[str, ...] = (
     "isolate_low_end_restore_db",
     "isolate_guitar_ensemble",
     "isolate_htdemucs_ft",
+    "isolate_lead_rhythm",
     "isolate_options_expanded",
     "isolate_vocals_instrumental_only",
     "isolate_guitar_track",
@@ -2580,9 +2581,13 @@ def resolve_pro_engine_job_fields(
         "sub_bass_debleed": False,
         "low_end_restore_db": 0.0,
         "guitar_ensemble": False,
+        "lead_rhythm": False,
+        "lead_rhythm_mode": "confident",
     }
     if not is_pro:
         return out
+    if resolved_model == "htdemucs_6s" and bool(session.get("isolate_lead_rhythm")):
+        out["lead_rhythm"] = True
     if resolved_model == "htdemucs" and bool(session.get("isolate_htdemucs_ft")):
         out["model"] = "htdemucs_ft"
     out["demucs_shifts"] = parse_demucs_shifts(session.get("isolate_demucs_shifts"))
@@ -2659,6 +2664,8 @@ def isolate_ui_state_payload(session: MutableMapping[str, Any]) -> dict[str, Any
         "viewing_run_dir": str(viewing) if viewing else None,
         "run_dir": str(run_dir) if run_dir else None,
         "export_dir": str(export_dir) if export_dir else None,
+        "library_folder": str(session["library_folder"]) if session.get("library_folder") else None,
+        "sync_folder": str(session["sync_folder"]) if session.get("sync_folder") else None,
         "open_mix_tabs": open_tabs,
         "mode": resolve_ui_mode(session.get(UI_MODE_KEY)),
         "settings": persisted_settings_payload(session),
@@ -2691,6 +2698,10 @@ def apply_stored_isolate_ui_state(
         session["isolate_run_dir"] = str(stored["run_dir"])
     if not session.get(ISOLATE_EXPORT_DIR_KEY) and stored.get("export_dir"):
         session[ISOLATE_EXPORT_DIR_KEY] = str(stored["export_dir"])
+    if not session.get("library_folder") and stored.get("library_folder"):
+        session["library_folder"] = str(stored["library_folder"])
+    if not session.get("sync_folder") and stored.get("sync_folder"):
+        session["sync_folder"] = str(stored["sync_folder"])
     if OPEN_MIX_TABS_KEY not in session and stored.get("open_mix_tabs") is not None:
         session[OPEN_MIX_TABS_KEY] = normalize_open_mix_tabs(
             stored.get("open_mix_tabs"), require_dir=False

@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { chartTimeSeconds, type AnalysisData, type TabData } from "../mixer/analysis";
+import { PracticeSheet } from "./PracticeSheet";
 import {
   DB_DEFAULT,
   DB_MAX,
@@ -57,8 +59,17 @@ function rangeFillPct(value: number, min: number, max: number): string {
   return `${pct}%`;
 }
 
-export function StemMixer({ stems }: { stems: StemInfo[] }) {
+export function StemMixer({
+  stems,
+  analysis = null,
+  tab = null,
+}: {
+  stems: StemInfo[];
+  analysis?: AnalysisData | null;
+  tab?: TabData | null;
+}) {
   const engineRef = useRef(new StemMixerEngine());
+  const recorderRef = useRef<MediaRecorder | null>(null);
   const [status, setStatus] = useState("Ready");
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -82,6 +93,11 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
     initialPractice.semitones
   );
   const [practiceStatus, setPracticeStatus] = useState<string | null>(null);
+  const [mixOpen, setMixOpen] = useState(false);
+  const [speedOpen, setSpeedOpen] = useState(false);
+  const [sheetOpen, setSheetOpen] = useState(true);
+  const mixBtnRef = useRef<HTMLButtonElement>(null);
+  const speedBtnRef = useRef<HTMLButtonElement>(null);
 
   const stemIds = useMemo(() => stems.map((s) => s.id), [stems]);
   const stemKey = useMemo(
@@ -136,7 +152,7 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
         engine.applyGains(effectiveGains(stems.map((s) => s.id), next));
       });
     engine.setTimeCallback((t, dur, isPlaying) => {
-      setCurrentTime(t);
+      setCurrentTime(chartTimeSeconds(t, engine.chartLatencyMs()));
       setDuration(dur);
       setPlaying(isPlaying || engine.isKeepPlaying());
       setSeek(dur > 0 ? Math.round((t / dur) * 1000) : 0);
@@ -188,6 +204,34 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
       setPlaying(true);
       setStatus((prev) => (prev === SLEEP_RESUME_HINT ? "Playing" : prev));
     });
+  };
+
+  const recordTake = async () => {
+    const current = recorderRef.current;
+    if (current && current.state === "recording") {
+      current.stop();
+      return;
+    }
+    if (!window.confirm("Start the microphone and record this take?")) return;
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const recorder = new MediaRecorder(stream);
+    const chunks: BlobPart[] = [];
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) chunks.push(event.data);
+    };
+    recorder.onstop = () => {
+      stream.getTracks().forEach((track) => track.stop());
+      const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "practice-take.webm";
+      link.click();
+      URL.revokeObjectURL(url);
+      recorderRef.current = null;
+    };
+    recorderRef.current = recorder;
+    recorder.start();
   };
 
   const toggleMute = (id: string) => {
@@ -269,6 +313,44 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
     });
   };
 
+  useEffect(() => {
+    const inside = (panelId: string, button: HTMLButtonElement | null, target: Node | null) => {
+      if (!target) return false;
+      const panel = document.getElementById(panelId);
+      return Boolean((panel && panel.contains(target)) || (button && button.contains(target)));
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const target = event.target;
+      if (target instanceof Element && target.closest("input, textarea, select")) return;
+      if (!mixOpen && !speedOpen) return;
+      event.preventDefault();
+      const focusMix = mixOpen;
+      setMixOpen(false);
+      setSpeedOpen(false);
+      (focusMix ? mixBtnRef : speedBtnRef).current?.focus();
+    };
+    const onPointer = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (mixOpen && !inside("mix-menu", mixBtnRef.current, target)) setMixOpen(false);
+      if (speedOpen && !inside("practice-speed-popover", speedBtnRef.current, target)) {
+        setSpeedOpen(false);
+      }
+    };
+    const onBlur = () => {
+      setMixOpen(false);
+      setSpeedOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("pointerdown", onPointer, true);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("pointerdown", onPointer, true);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, [mixOpen, speedOpen]);
+
   const downloadMix = async () => {
     setMixError(null);
     setMixBusy(true);
@@ -302,11 +384,14 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
         <div className="mixer-transport-controls">
           <button
             type="button"
-            className="primary"
+            className="primary live-play"
             onClick={togglePlayback}
             aria-pressed={playing}
           >
             {playing ? "Pause" : "Play"}
+          </button>
+          <button type="button" className="ghost" onClick={() => void recordTake()}>
+            Record
           </button>
           <button
             type="button"
@@ -342,123 +427,34 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
             }}
           />
         </label>
-        <label className="master-vol">
-          <span className="master-vol-label">Master</span>
-          <span className="visually-hidden">Master volume in decibels</span>
-          <input
-            type="range"
-            className="vol-slider slider-master"
-            min={DB_MIN}
-            max={DB_MAX}
-            step={0.5}
-            value={masterDb}
-            style={{
-              ["--range-fill" as string]: rangeFillPct(masterDb, DB_MIN, DB_MAX),
-            }}
-            onChange={(e) =>
-              apply({ ...state, masterVolumeDb: Number(e.target.value) })
-            }
-          />
-          <span className="stem-db" aria-hidden="true">
-            {masterDb.toFixed(1)}
-          </span>
-        </label>
-        <div
-          className="mixer-practice"
-          role="group"
-          aria-label="Speed and Key"
-          onDoubleClick={(e) => {
-            if ((e.target as HTMLElement).closest("button, input")) return;
-            resetPractice();
-          }}
+        <button
+          type="button"
+          className="ghost"
+          aria-expanded={sheetOpen}
+          aria-controls="practice-panel"
+          onClick={() => setSheetOpen((open) => !open)}
+        >Practice</button>
+        <button
+          type="button"
+          className="ghost"
+          ref={mixBtnRef}
+          aria-expanded={mixOpen}
+          aria-controls="mix-menu"
+          onClick={() => setMixOpen((open) => !open)}
+        >Mix</button>
+        <button
+          type="button"
+          className="ghost"
+          ref={speedBtnRef}
+          aria-expanded={speedOpen}
+          aria-controls="practice-speed-popover"
+          onClick={() => setSpeedOpen((open) => !open)}
         >
-          <div className="practice-heading">Speed & Key</div>
-          <div className="practice-row">
-            <span className="practice-label">
-              {formatPracticeSpeedLabel(practiceRate)}
-            </span>
-            <button
-              type="button"
-              className="ghost practice-nudge"
-              aria-label="Slower"
-              onClick={() => applyPracticeRate(practiceRate - PRACTICE_RATE_STEP)}
-            >
-              −
-            </button>
-            <input
-              type="range"
-              className="slider-speed"
-              min={PRACTICE_RATE_MIN}
-              max={PRACTICE_RATE_MAX}
-              step={PRACTICE_RATE_STEP}
-              value={practiceRate}
-              style={{
-                ["--range-fill" as string]: rangeFillPct(
-                  practiceRate,
-                  PRACTICE_RATE_MIN,
-                  PRACTICE_RATE_MAX
-                ),
-              }}
-              onChange={(e) => applyPracticeRate(Number(e.target.value))}
-            />
-            <button
-              type="button"
-              className="ghost practice-nudge"
-              aria-label="Faster"
-              onClick={() => applyPracticeRate(practiceRate + PRACTICE_RATE_STEP)}
-            >
-              +
-            </button>
-          </div>
-          <div className="practice-row">
-            <span className="practice-label">
-              {formatPracticeKeyLabel(practiceSemitones)}
-            </span>
-            <button
-              type="button"
-              className="ghost practice-nudge"
-              aria-label="Lower key"
-              onClick={() => applyPracticeKey(practiceSemitones - 1)}
-            >
-              −
-            </button>
-            <input
-              type="range"
-              className="slider-key"
-              min={PRACTICE_KEY_MIN}
-              max={PRACTICE_KEY_MAX}
-              step={1}
-              value={practiceSemitones}
-              style={{
-                ["--range-fill" as string]: rangeFillPct(
-                  practiceSemitones,
-                  PRACTICE_KEY_MIN,
-                  PRACTICE_KEY_MAX
-                ),
-              }}
-              onChange={(e) => applyPracticeKey(Number(e.target.value))}
-            />
-            <button
-              type="button"
-              className="ghost practice-nudge"
-              aria-label="Raise key"
-              onClick={() => applyPracticeKey(practiceSemitones + 1)}
-            >
-              +
-            </button>
-          </div>
-          <button type="button" className="ghost practice-reset" onClick={resetPractice}>
-            Reset
-          </button>
-          {practiceStatus && (
-            <p className="practice-status" aria-live="polite">
-              {practiceStatus}
-            </p>
-          )}
-        </div>
+          Speed &amp; Key
+        </button>
       </div>
 
-      <div className="mixer-master">
+      <div id="mix-menu" className="mixer-master" hidden={!mixOpen}>
         <div className="mixer-presets">
           {presetButtons.map((item) => {
             const disabled =
@@ -515,8 +511,119 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
           {mixBusy ? "Building mix…" : "Download current mix"}
         </button>
       </div>
+      <div
+        id="practice-speed-popover"
+        className="mixer-practice"
+        hidden={!speedOpen}
+        role="group"
+        aria-label="Speed and Key"
+        onDoubleClick={(e) => {
+          if ((e.target as HTMLElement).closest("button, input")) return;
+          resetPractice();
+        }}
+      >
+        <div className="practice-heading">Speed &amp; Key</div>
+        <div className="practice-row">
+          <span className="practice-label">{formatPracticeSpeedLabel(practiceRate)}</span>
+          <button
+            type="button"
+            className="ghost practice-nudge"
+            aria-label="Slower"
+            onClick={() => applyPracticeRate(practiceRate - PRACTICE_RATE_STEP)}
+          >
+            −
+          </button>
+          <input
+            type="range"
+            className="slider-speed"
+            min={PRACTICE_RATE_MIN}
+            max={PRACTICE_RATE_MAX}
+            step={PRACTICE_RATE_STEP}
+            value={practiceRate}
+            style={{
+              ["--range-fill" as string]: rangeFillPct(
+                practiceRate,
+                PRACTICE_RATE_MIN,
+                PRACTICE_RATE_MAX
+              ),
+            }}
+            onChange={(e) => applyPracticeRate(Number(e.target.value))}
+          />
+          <button
+            type="button"
+            className="ghost practice-nudge"
+            aria-label="Faster"
+            onClick={() => applyPracticeRate(practiceRate + PRACTICE_RATE_STEP)}
+          >
+            +
+          </button>
+        </div>
+        <div className="practice-row">
+          <span className="practice-label">{formatPracticeKeyLabel(practiceSemitones)}</span>
+          <button
+            type="button"
+            className="ghost practice-nudge"
+            aria-label="Lower key"
+            onClick={() => applyPracticeKey(practiceSemitones - 1)}
+          >
+            −
+          </button>
+          <input
+            type="range"
+            className="slider-key"
+            min={PRACTICE_KEY_MIN}
+            max={PRACTICE_KEY_MAX}
+            step={1}
+            value={practiceSemitones}
+            style={{
+              ["--range-fill" as string]: rangeFillPct(
+                practiceSemitones,
+                PRACTICE_KEY_MIN,
+                PRACTICE_KEY_MAX
+              ),
+            }}
+            onChange={(e) => applyPracticeKey(Number(e.target.value))}
+          />
+          <button
+            type="button"
+            className="ghost practice-nudge"
+            aria-label="Raise key"
+            onClick={() => applyPracticeKey(practiceSemitones + 1)}
+          >
+            +
+          </button>
+        </div>
+        <button type="button" className="ghost practice-reset" onClick={resetPractice}>
+          Reset
+        </button>
+        {practiceStatus && (
+          <p className="practice-status" aria-live="polite">
+            {practiceStatus}
+          </p>
+        )}
+      </div>
       {mixError && <p className="error">{mixError}</p>}
 
+      <div className="mixer-stage">
+        <label className="master-vol">
+          <span className="master-vol-label">Master</span>
+          <span className="visually-hidden">Master volume in decibels</span>
+          <input
+            type="range"
+            className="vol-slider slider-master"
+            min={DB_MIN}
+            max={DB_MAX}
+            step={0.5}
+            value={masterDb}
+            style={{
+              ["--range-fill" as string]: rangeFillPct(masterDb, DB_MIN, DB_MAX),
+            }}
+            onChange={(e) => apply({ ...state, masterVolumeDb: Number(e.target.value) })}
+          />
+          <span className="stem-db" aria-hidden="true">
+            {masterDb.toFixed(1)}
+          </span>
+        </label>
       <div className="mixer-stems">
         {stems.map((stem) => {
           const db = state.volumesDb[stem.id] ?? DB_DEFAULT;
@@ -630,6 +737,18 @@ export function StemMixer({ stems }: { stems: StemInfo[] }) {
       {anyPanned && (
         <p className="hint">Download current mix includes your pan.</p>
       )}
+      </div>
+      <PracticeSheet
+        id="practice-panel"
+        hidden={!sheetOpen}
+        analysis={analysis}
+        tab={tab}
+        currentTime={currentTime}
+        playing={playing}
+        onSeek={(time) => {
+          void engineRef.current.seek(time);
+        }}
+      />
     </div>
   );
 }

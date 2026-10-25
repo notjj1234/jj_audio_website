@@ -70,6 +70,8 @@ def stem_mixer(
     count_in_bars: int = 0,
     initial_rate: float = 1.0,
     initial_semitones: int = 0,
+    stem_trims: dict[str, Any] | None = None,
+    seek_sec: float | None = None,
     key: str | None = None,
 ) -> dict[str, Any] | None:
     """
@@ -128,6 +130,8 @@ def stem_mixer(
         countInBars=max(0, min(2, int(count_in_bars or 0))),
         initialRate=float(initial_rate or 1.0),
         initialSemitones=int(initial_semitones or 0),
+        stemTrims=stem_trims or {},
+        seekSec=None if seek_sec is None else float(seek_sec),
         key=key,
         default=None,
     )

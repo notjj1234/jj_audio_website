@@ -7,7 +7,24 @@ type Row = {
   subtitle: string;
   age: string;
   action: "practice" | "analyse" | string;
+  state?: "ready" | "analysing" | "waiting" | "failed" | "idle" | string;
 };
+
+function isLocked(row: Row): boolean {
+  return row.state === "analysing" || row.state === "waiting";
+}
+
+function progressBar(row: Row): HTMLElement {
+  const bar = el("span", row.state === "analysing" ? "bar is-active" : "bar is-queued");
+  bar.setAttribute("role", "progressbar");
+  bar.setAttribute(
+    "aria-label",
+    row.state === "analysing" ? "Getting key and chords" : "Waiting for key and chords",
+  );
+  bar.setAttribute("aria-busy", "true");
+  bar.append(el("span", "fill"));
+  return bar;
+}
 
 type Card = {
   id: string;
@@ -31,9 +48,12 @@ type Props = {
   recents?: Row[];
   rows?: Row[];
   setlists?: Setlist[];
+  trashed?: Row[];
   loading?: boolean;
   flash?: Flash;
   activeSetlist?: string;
+  locale?: string;
+  strings?: Record<string, string>;
 };
 
 type MenuState = {
@@ -57,10 +77,73 @@ const ICONS = {
 
 let query = "";
 let sortOldest = false;
+let libraryFilter = "all";
 let activeSetlistId = "";
 let activeSetlistReady = false;
 let menu: MenuState | null = null;
 let restoreFocus = "";
+let picked = new Set<string>();
+const FILES_SCROLL_KEY = "att-home-files-scroll";
+const MAIN_SCROLL_KEY = "att-home-main-scroll";
+const SELECT_KEY = "att-home-select-mode";
+
+function stored(key: string): string {
+  try {
+    return sessionStorage.getItem(key) || "";
+  } catch {
+    return "";
+  }
+}
+
+function store(key: string, value: string): void {
+  try {
+    sessionStorage.setItem(key, value);
+  } catch {
+    /* private mode */
+  }
+}
+
+let selectMode = stored(SELECT_KEY) === "1";
+
+function mainScroller(): HTMLElement | null {
+  try {
+    const doc = window.parent.document;
+    return (
+      doc.querySelector<HTMLElement>('[data-testid="stMain"]') ||
+      doc.querySelector<HTMLElement>("section.main")
+    );
+  } catch {
+    return null;
+  }
+}
+
+function rememberScroll(): void {
+  const files = document.querySelector<HTMLElement>(".files-scroll");
+  if (files) store(FILES_SCROLL_KEY, String(files.scrollTop));
+  const main = mainScroller();
+  if (main) store(MAIN_SCROLL_KEY, String(main.scrollTop));
+}
+
+function restoreScroll(): void {
+  const filesTop = Number(stored(FILES_SCROLL_KEY) || "0");
+  const mainTop = Number(stored(MAIN_SCROLL_KEY) || "0");
+  const apply = (): void => {
+    const files = document.querySelector<HTMLElement>(".files-scroll");
+    if (files && Number.isFinite(filesTop) && filesTop > 0) files.scrollTop = filesTop;
+    const main = mainScroller();
+    if (main && Number.isFinite(mainTop) && mainTop > 0) main.scrollTop = mainTop;
+  };
+  requestAnimationFrame(apply);
+  window.setTimeout(apply, 50);
+}
+
+function canSelect(row: Row): boolean {
+  return row.state !== "analysing";
+}
+
+function label(props: Props, key: string, fallback: string): string {
+  return props.strings?.[key] || fallback;
+}
 
 function svg(name: keyof typeof ICONS, size: number): string {
   return (
@@ -79,6 +162,7 @@ function el<K extends keyof HTMLElementTagNameMap>(
 }
 
 function send(nonce: string, type: string, id: string): void {
+  if (type === "delete_song" || type === "delete_songs") rememberScroll();
   Streamlit.setComponentValue({ nonce, type, id });
 }
 
@@ -144,6 +228,7 @@ function openMenu(state: MenuState): void {
 }
 
 function paint(props: Props): void {
+  rememberScroll();
   lastProps = props;
   const nonce = props.nonce || "";
   const setlists = props.setlists || [];
@@ -196,12 +281,21 @@ function paint(props: Props): void {
       const meta = el("span", "meta");
       meta.textContent = row.age || "";
       button.append(art, title, meta);
-      button.addEventListener("click", () => send(nonce, "open_recent", row.token));
+      if (isLocked(row)) {
+        button.disabled = true;
+        button.classList.add("is-locked");
+        meta.textContent = row.subtitle || "Getting key and chords…";
+        button.append(progressBar(row));
+      }
+      button.addEventListener("click", () => {
+        if (!isLocked(row)) send(nonce, "open_recent", row.token);
+      });
       scroller.append(button);
     });
   });
 
   const head = el("div", "files-head");
+  const top = el("div", "files-row");
   const filesHeading = el("h2");
   filesHeading.textContent = "Files";
   const toolbar = el("div", "toolbar");
@@ -242,15 +336,36 @@ function paint(props: Props): void {
     if (name === null) return;
     send(nonce, "new_setlist", name);
   });
+  const selected = setlists.find((item) => item.id === activeSetlistId);
+  const rename = el("button", "pill");
+  const removeList = el("button", "pill");
+  if (selected) {
+    rename.type = "button";
+    rename.dataset.focusid = "setlist-rename";
+    rename.textContent = "Rename";
+    rename.addEventListener("click", () => {
+      const name = window.prompt("Setlist name", selected.name);
+      if (name === null) return;
+      send(nonce, "rename_setlist", `${selected.id}|${name}`);
+    });
+    removeList.type = "button";
+    removeList.dataset.focusid = "setlist-delete";
+    removeList.textContent = "Delete setlist";
+    removeList.addEventListener("click", () => {
+      if (!window.confirm("Delete this setlist? Songs stay in the library.")) return;
+      activeSetlistId = "";
+      send(nonce, "delete_setlist", selected.id);
+    });
+  }
   const search = el("label", "search");
   search.appendChild(document.createRange().createContextualFragment(svg("search", 16)));
   const input = el("input");
   input.id = "home-search";
   input.type = "search";
-  input.placeholder = "Search";
+  input.placeholder = label(props, "search", "Search");
   input.value = query;
   input.dataset.focusid = "search";
-  input.setAttribute("aria-label", "Search");
+  input.setAttribute("aria-label", label(props, "search", "Search"));
   input.addEventListener("input", () => {
     query = input.value;
     paint(lastProps);
@@ -267,8 +382,45 @@ function paint(props: Props): void {
     const box = sort.getBoundingClientRect();
     openMenu({ kind: "sort", token: "", focusId: "sort", x: box.left, y: box.bottom + 4 });
   });
-  toolbar.append(...pills, create, search, sort);
-  head.append(filesHeading, toolbar);
+  toolbar.append(...pills, create);
+  if (selected) toolbar.append(rename, removeList);
+  const filters = el("div", "filters");
+  filters.setAttribute("role", "group");
+  filters.setAttribute("aria-label", "Library filters");
+  for (const item of [
+    ["all", "all", "All"],
+    ["practice", "practice", "Ready to practice"],
+    ["analyse", "analyse", "Not analysed"],
+    ["deleted", "deleted", "Deleted"],
+  ] as const) {
+    const chip = el("button", "pill");
+    chip.type = "button";
+    chip.dataset.focusid = `filter-${item[0]}`;
+    chip.textContent = label(props, item[1], item[2]);
+    chip.setAttribute("aria-pressed", libraryFilter === item[0] ? "true" : "false");
+    chip.addEventListener("click", () => {
+      libraryFilter = item[0];
+      paint(lastProps);
+    });
+    filters.append(chip);
+  }
+  const selectToggle = el("button", "pill");
+  selectToggle.type = "button";
+  selectToggle.dataset.focusid = "select-mode";
+  selectToggle.textContent = "Select";
+  selectToggle.setAttribute("aria-pressed", selectMode ? "true" : "false");
+  selectToggle.setAttribute("aria-label", "Select mixes");
+  selectToggle.addEventListener("click", () => {
+    selectMode = !selectMode;
+    if (!selectMode) picked.clear();
+    store(SELECT_KEY, selectMode ? "1" : "0");
+    paint(lastProps);
+  });
+  filters.append(selectToggle);
+  const tools = el("div", "files-tools");
+  tools.append(search, sort);
+  top.append(filesHeading, toolbar, tools);
+  head.append(top, filters);
   home.append(head);
 
   if (props.flash && props.flash.message) {
@@ -286,12 +438,15 @@ function paint(props: Props): void {
       files.append(bone);
     }
   } else {
-    const source = props.rows || [];
+    const source = libraryFilter === "deleted" ? props.trashed || [] : props.rows || [];
     const needle = query.trim().toLowerCase();
     const active = setlists.find((item) => item.id === activeSetlistId);
-    const allowed = active ? new Set(active.tokens || []) : null;
+    const allowed = active && libraryFilter !== "deleted" ? new Set(active.tokens || []) : null;
     let shown = source.filter((row) => {
       if (allowed && !allowed.has(row.token)) return false;
+      if (libraryFilter === "practice" || libraryFilter === "analyse") {
+        if (row.action !== libraryFilter) return false;
+      }
       if (!needle) return true;
       return `${row.title} ${row.subtitle}`.toLowerCase().includes(needle);
     });
@@ -309,11 +464,59 @@ function paint(props: Props): void {
       empty.textContent = "No songs match that search.";
       files.append(empty);
     } else {
+      const picking = selectMode && libraryFilter !== "deleted";
+      const pickable = picking ? shown.filter((row) => canSelect(row)) : [];
+      const chosen = pickable.filter((row) => picked.has(row.token));
+      if (chosen.length > 0) {
+        const bar = el("div", "select-bar");
+        bar.setAttribute("role", "region");
+        bar.setAttribute("aria-label", "Selected mixes");
+        const count = el("span");
+        count.textContent = chosen.length === 1 ? "1 selected" : `${chosen.length} selected`;
+        const remove = el("button", "pill");
+        remove.type = "button";
+        remove.dataset.focusid = "delete-selected";
+        remove.textContent = "Delete selected";
+        remove.addEventListener("click", () => {
+          const ids = chosen.map((row) => row.token);
+          const noun = ids.length === 1 ? "mix" : "mixes";
+          if (
+            !window.confirm(
+              `Delete ${ids.length} ${noun}? You can recover them from Deleted.`,
+            )
+          ) {
+            return;
+          }
+          ids.forEach((token) => picked.delete(token));
+          send(nonce, "delete_songs", ids.join(","));
+        });
+        bar.append(count, remove);
+        files.append(bar);
+      }
       const table = el("table");
       const thead = el("thead");
       const header = el("tr");
+      if (picking) {
+        const checkHead = el("th", "col-check");
+        const allBox = el("input");
+        allBox.type = "checkbox";
+        allBox.dataset.focusid = "select-all";
+        allBox.setAttribute("aria-label", "Select all");
+        allBox.checked = pickable.length > 0 && chosen.length === pickable.length;
+        allBox.indeterminate = chosen.length > 0 && chosen.length < pickable.length;
+        allBox.disabled = pickable.length === 0;
+        allBox.addEventListener("change", () => {
+          pickable.forEach((row) => {
+            if (allBox.checked) picked.add(row.token);
+            else picked.delete(row.token);
+          });
+          paint(lastProps);
+        });
+        checkHead.append(allBox);
+        header.append(checkHead);
+      }
       const titleHead = el("th");
-      titleHead.textContent = "Title";
+      titleHead.textContent = label(props, "title", "Title");
       const createdHead = el("th", "col-created");
       createdHead.textContent = "Created";
       const actionHead = el("th", "col-action");
@@ -324,6 +527,23 @@ function paint(props: Props): void {
       shown.forEach((row) => {
         const tr = el("tr");
         tr.dataset.row = row.token;
+        if (picking) {
+          const checkCell = el("td", "col-check");
+          if (canSelect(row)) {
+            const box = el("input");
+            box.type = "checkbox";
+            box.dataset.focusid = `check-${row.token}`;
+            box.setAttribute("aria-label", `Select ${row.title}`);
+            box.checked = picked.has(row.token);
+            box.addEventListener("change", () => {
+              if (box.checked) picked.add(row.token);
+              else picked.delete(row.token);
+              paint(lastProps);
+            });
+            checkCell.append(box);
+          }
+          tr.append(checkCell);
+        }
         const titleCell = el("td");
         const opener = el("button", "row-open");
         opener.type = "button";
@@ -333,7 +553,15 @@ function paint(props: Props): void {
         const sub = el("span", "sub");
         sub.textContent = row.subtitle || "";
         opener.append(name, sub);
-        opener.addEventListener("click", () => send(nonce, "open_row", row.token));
+        if (isLocked(row)) {
+          opener.disabled = true;
+          opener.classList.add("is-locked");
+          opener.setAttribute("aria-disabled", "true");
+          opener.append(progressBar(row));
+        }
+        opener.addEventListener("click", () => {
+          if (!isLocked(row)) send(nonce, "open_row", row.token);
+        });
         titleCell.append(opener);
         const created = el("td", "col-created");
         created.textContent = row.age || "";
@@ -364,13 +592,16 @@ function paint(props: Props): void {
   }
   home.append(files);
   root.append(home);
+  restoreScroll();
 
   if (menu) {
     const popup = el("div", "menu");
     popup.setAttribute("role", "menu");
     popup.style.left = `${menu.x}px`;
     popup.style.top = `${menu.y}px`;
-    const items: { label: string; type: string; id: string }[] =
+    const menuRow = (props.rows || []).find((row) => row.token === menu?.token);
+    const lockedMenu = menu.kind === "row" && menuRow !== undefined && isLocked(menuRow);
+    const allItems: { label: string; type: string; id: string }[] =
       menu.kind === "sort"
         ? [
             { label: "Newest", type: "sort-newest", id: "newest" },
@@ -396,7 +627,38 @@ function paint(props: Props): void {
                   id: `${item.id}|${menu?.token || ""}`,
                 }))
               : [{ label: "Add to setlist", type: "add_to_setlist", id: `|${menu.token}` }]),
+            ...(activeSetlistId
+              ? [
+                  {
+                    label: "Remove from setlist",
+                    type: "remove_from_setlist",
+                    id: `${activeSetlistId}|${menu.token}`,
+                  },
+                ]
+              : []),
+            ...(libraryFilter === "deleted"
+              ? [
+                  {
+                    label: label(props, "recover", "Recover"),
+                    type: "recover_song",
+                    id: menu.token,
+                  },
+                ]
+              : [
+                  {
+                    label: label(props, "delete", "Delete song"),
+                    type: "delete_song",
+                    id: menu.token,
+                  },
+                ]),
           ];
+    const items = allItems.filter((item) => {
+      if (item.type === "open_row" || item.type === "analyse" || item.type === "practice") {
+        return !lockedMenu;
+      }
+      if (item.type === "delete_song") return menuRow?.state !== "analysing";
+      return true;
+    });
     items.forEach((item) => {
       const button = el("button");
       button.type = "button";
@@ -410,6 +672,9 @@ function paint(props: Props): void {
         }
         const type = item.type;
         const id = item.id;
+        if (type === "delete_song" && !window.confirm("Delete this song from the library? You can recover it from Deleted.")) {
+          return;
+        }
         menu = null;
         send(nonce, type, id);
       });

@@ -3,6 +3,7 @@
 // @soundtouchjs/audio-worklet@2.1.1 — MPL-2.0 (not GPL Rubber Band).
 import type { SoundTouchNode } from "@soundtouchjs/audio-worklet";
 import soundTouchProcessorUrl from "@soundtouchjs/audio-worklet/processor?url";
+import { outputLatencyMs } from "./analysis";
 import { PAN_DEFAULT, createStemPanner, panToUnit } from "./pan";
 import {
   PRACTICE_KEY_DEFAULT,
@@ -173,7 +174,7 @@ export async function ensureAudioContext(
       return new AudioContext();
     }
   }
-  if (existing.state === "closed") {
+  if ((existing.state as string) === "closed") {
     return new AudioContext();
   }
   return existing;
@@ -270,6 +271,8 @@ export class StemMixerEngine {
 
   setSoftPauseCallback(cb: () => void): void {
     this.onSoftPause = cb;
+    void this.onSoftPause;
+    void this.softPauseFromInterrupt;
   }
 
   setMediaInfo(title: string, artworkUrl = ""): void {
@@ -308,6 +311,10 @@ export class StemMixerEngine {
 
   isPlaying(): boolean {
     return this.playing;
+  }
+
+  chartLatencyMs(userOffsetMs = 0): number {
+    return outputLatencyMs(this.ctx, userOffsetMs);
   }
 
   currentTime(): number {

@@ -5,6 +5,7 @@ from __future__ import annotations
 import streamlit as st
 
 from ui.common import DATA_DIR, clear_all_local_runs, legal_docs_dir
+from ui.studio_panel import render_library_tools
 from ui.isolate_state import (
     THEME_MODE_KEY,
     save_theme_state,
@@ -69,6 +70,8 @@ def main() -> None:
         else:
             st.success(f"Cleared {deleted} local run folder(s).")
 
+    st.divider()
+    render_library_tools()
     st.divider()
     st.subheader("Legal")
     st.caption("Demo draft · not legal advice")

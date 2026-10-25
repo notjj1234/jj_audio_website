@@ -1,0 +1,102 @@
+{
+  "run": "data/ui_runs/46b84e7b-dbb5-4c25-817a-53c4cd85b02d",
+  "key": "Dm",
+  "inputs": {
+    "full mix (what ran)": {
+      "segs": 149,
+      "diatonic": 0.5681226873743378,
+      "quality": {
+        "N": 1,
+        "maj": 17,
+        "min": 22,
+        "7": 25,
+        "m7": 34,
+        "maj7": 25,
+        "dim": 2,
+        "mMaj7": 9,
+        "sus2": 10,
+        "sus4": 1,
+        "5": 1,
+        "dim7": 2
+      }
+    },
+    "guitar stem": {
+      "segs": 150,
+      "diatonic": 0.5716542966817609,
+      "quality": {
+        "m7": 35,
+        "maj": 17,
+        "min": 22,
+        "7": 26,
+        "maj7": 25,
+        "dim": 2,
+        "mMaj7": 9,
+        "sus2": 10,
+        "sus4": 1,
+        "5": 1,
+        "dim7": 2
+      }
+    },
+    "piano stem": {
+      "segs": 31,
+      "diatonic": 0.03940520446096647,
+      "quality": {
+        "N": 15,
+        "7": 6,
+        "min": 3,
+        "maj7": 2,
+        "m7": 1,
+        "maj": 1,
+        "mMaj7": 2,
+        "sus2": 1
+      }
+    },
+    "bass stem": {
+      "segs": 35,
+      "diatonic": 0.05892193308550195,
+      "quality": {
+        "N": 16,
+        "maj7": 7,
+        "mMaj7": 6,
+        "m7": 5,
+        "7": 1
+      }
+    },
+    "guitar+piano+bass": {
+      "segs": 151,
+      "diatonic": 0.5649627605123388,
+      "quality": {
+        "N": 2,
+        "maj": 17,
+        "min": 22,
+        "7": 26,
+        "m7": 34,
+        "maj7": 25,
+        "dim": 2,
+        "mMaj7": 9,
+        "sus2": 10,
+        "sus4": 1,
+        "5": 1,
+        "dim7": 2
+      }
+    },
+    "no vocals (+drums)": {
+      "segs": 151,
+      "diatonic": 0.5649627605123388,
+      "quality": {
+        "N": 2,
+        "maj": 17,
+        "min": 22,
+        "7": 26,
+        "m7": 34,
+        "maj7": 25,
+        "dim": 2,
+        "mMaj7": 9,
+        "sus2": 10,
+        "sus4": 1,
+        "5": 1,
+        "dim7": 2
+      }
+    }
+  }
+}

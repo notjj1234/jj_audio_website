@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import streamlit as st
 
@@ -18,6 +20,7 @@ from ui.common import (
 )
 from ui.isolate_state import (
     ISOLATE_UI_STATE_FILENAME,
+    SHELL_VIEW_KEY,
     UI_MODE_KEY,
     UI_MODES,
     load_ui_mode,
@@ -750,6 +753,62 @@ st.html(
   });
 })();
 </script>
+<script>
+(function () {
+  function svgOk(diagram) {
+    var trimmed = String(diagram || "").trim();
+    var open = "<" + "svg";
+    var close = "<" + "/svg" + ">";
+    if (trimmed.slice(0, open.length) !== open || trimmed.slice(-close.length) !== close) return false;
+    var lower = trimmed.toLowerCase();
+    if (lower.indexOf("script") !== -1) return false;
+    if (lower.indexOf("foreignobject") !== -1) return false;
+    if (/\son[a-z]+\s*=/.test(lower)) return false;
+    return true;
+  }
+  function paintChord(data) {
+    if (!data || typeof data !== "object" || data.source !== "att-sidebar-chord") return;
+    if (typeof data.symbol !== "string" || data.symbol.length < 1 || data.symbol.length > 40) return;
+    if (data.symbol === "—") return;
+    var root = document.querySelector(".att-sidebar-chord");
+    if (!root) return;
+    var symbolEl = root.querySelector(".att-sidebar-chord-symbol");
+    var diagramEl = root.querySelector(".att-sidebar-chord-diagram");
+    if (symbolEl && symbolEl.textContent !== data.symbol) symbolEl.textContent = data.symbol;
+    if (
+      diagramEl &&
+      typeof data.diagram === "string" &&
+      svgOk(data.diagram) &&
+      diagramEl.getAttribute("data-diagram") !== data.diagram
+    ) {
+      diagramEl.setAttribute("data-diagram", data.diagram);
+      diagramEl.innerHTML = data.diagram;
+    }
+  }
+  if (!window.__attSidebarChord) {
+    window.__attSidebarChord = function (event) {
+      if (!event || event.source === window) return;
+      paintChord(event.data);
+    };
+    window.addEventListener("message", window.__attSidebarChord);
+    window.setInterval(function () {
+      if (!document.querySelector(".att-sidebar-chord")) return;
+      var raw = null;
+      try {
+        raw = localStorage.getItem("att-sidebar-chord");
+      } catch (err) {
+        return;
+      }
+      if (!raw) return;
+      try {
+        paintChord(JSON.parse(raw));
+      } catch (err) {
+        /* ignore a bad stored chord */
+      }
+    }, 200);
+  }
+})();
+</script>
 """,
     unsafe_allow_javascript=True,
 )
@@ -973,6 +1032,70 @@ st.sidebar.radio(
 )
 st.sidebar.caption(_DEMO_BLURB)
 
+
+def _streamlit_page_name() -> str:
+    try:
+        url = str(st.context.url or "")
+    except Exception:
+        return ""
+    path = urlparse(url).path.rstrip("/")
+    if not path:
+        return ""
+    return path.rsplit("/", 1)[-1]
+
+
+def _publish_analysis_foreground() -> None:
+    """Tell the background worker which song is open in the mixer."""
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    active = None
+    if _streamlit_page_name() == "isolate":
+        shell = st.session_state.get(SHELL_VIEW_KEY)
+        viewing = st.session_state.get("isolate_viewing_run_dir")
+        if shell == "mix" and isinstance(viewing, str) and viewing.strip():
+            active = viewing
+    try:
+        from ui.isolate_jobs import write_analysis_foreground
+
+        write_analysis_foreground(active)
+    except Exception:
+        logger.debug("Could not record the open mix for background analysis", exc_info=True)
+
+
+@st.fragment(run_every=2.0)
+def _analysis_status_fragment() -> None:
+    """Live key-and-chord progress. A Home refresh is the only full rerun."""
+    from ui.isolate_jobs import read_background_analysis_status
+    from ui.pages.home import (
+        analysis_status_markup,
+        analysis_status_notice,
+        analysis_status_should_refresh_page,
+        analysis_status_token,
+    )
+
+    status = read_background_analysis_status()
+    notice = analysis_status_notice(status)
+    if notice:
+        st.html(analysis_status_markup(notice))
+    token = analysis_status_token(status)
+    previous = st.session_state.get("_analysis_status_token")
+    st.session_state["_analysis_status_token"] = token
+    if analysis_status_should_refresh_page(_streamlit_page_name(), token, previous if isinstance(previous, str) else None):
+        st.rerun()
+
+
+def _mount_analysis_status() -> None:
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    import multiprocessing
+
+    if multiprocessing.parent_process() is not None:
+        return
+    _analysis_status_fragment()
+
+
+_mount_analysis_status()
+
 _pages = Path(__file__).parent / "pages"
 _nav = [
     st.Page(str(_pages / "home.py"), title="Home", default=True),
@@ -983,6 +1106,19 @@ _nav = [
     st.Page(str(_pages / "tab_pdf.py"), title="Tab PDF (demo)"),
     st.Page(str(_pages / "settings.py"), title="Settings"),
 ]
+
+def _start_background_analysis() -> None:
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    try:
+        from ui.isolate_jobs import start_background_analysis
+
+        start_background_analysis()
+    except Exception:
+        logger.debug("Background analysis did not start", exc_info=True)
+
+
+_start_background_analysis()
 pg = st.navigation(_nav)
 _mode_switching = bool(st.session_state.pop("_ui_mode_switching", False))
 _mode_switch_slot = st.empty()
@@ -991,6 +1127,7 @@ if _mode_switching:
 try:
     pg.run()
 finally:
+    _publish_analysis_foreground()
     if _nav_requested:
         _nav_overlay_slot.empty()
     if _mode_switching:

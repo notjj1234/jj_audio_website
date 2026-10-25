@@ -1,0 +1,29 @@
+{
+  "50f1b1f5-2f38-41ea-8f2a-f31e63fddd29": {
+    "segments": 69,
+    "segs_per_bar": 0.809,
+    "maj7": 0.174,
+    "sus4": 0.029,
+    "nondiat": 0.783,
+    "under": 0.232,
+    "key": "D#m"
+  },
+  "9a18a73f-193c-4058-a96c-dfb490e565cc": {
+    "segments": 232,
+    "segs_per_bar": 1.64,
+    "maj7": 0.543,
+    "sus4": 0.0,
+    "nondiat": 0.22,
+    "under": 0.073,
+    "key": "D#"
+  },
+  "ad6e7c9f-df76-411e-a700-4bd2b3d65d30": {
+    "segments": 193,
+    "segs_per_bar": 1.729,
+    "maj7": 0.435,
+    "sus4": 0.0,
+    "nondiat": 0.383,
+    "under": 0.073,
+    "key": "Am"
+  }
+}

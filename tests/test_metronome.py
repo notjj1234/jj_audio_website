@@ -19,6 +19,7 @@ from audio_to_tab.metronome import (
     click_grid_for_playback,
     coerce_metronome_render_options,
     detect_beats_per_measure,
+    estimate_meter,
     gate_unreliable_intro_beats,
     generate_metronome_stem,
     integrate_tempo_curve,
@@ -354,6 +355,28 @@ def test_detect_beats_per_measure_reads_accent_pattern():
     # Too few beats to see a measure → default.
     short = np.arange(4, dtype=np.float64) * 0.5
     assert detect_beats_per_measure(short, mono3, sr, 120.0) == 4
+
+
+def test_three_four_waltz_detected():
+    path = Path(__file__).resolve().parents[1] / "eval" / "fixtures" / "waltz_34_click_bass.wav"
+    audio, sr = sf.read(str(path), always_2d=True)
+    mono = audio.mean(axis=1)
+    times = np.arange(0.0, len(mono) / sr - 0.25, 0.5)
+    estimate = estimate_meter(times, mono, int(sr), 120.0)
+    assert estimate.beats_per_measure == 3
+    assert detect_beats_per_measure(times, mono, int(sr), 120.0) == 3
+
+
+def test_four_four_not_regressed():
+    times, mono, sr = _accented_beats(4, beats=32)
+    assert estimate_meter(times, mono, sr, 120.0).beats_per_measure == 4
+
+
+def test_weak_contrast_keeps_4_but_low_confidence():
+    times, mono, sr = _accented_beats(1, beats=32)
+    estimate = estimate_meter(times, mono, sr, 120.0)
+    assert estimate.beats_per_measure == 4
+    assert estimate.confidence < 1.08
 
 
 def test_generate_metronome_detects_three_four_and_honors_override(tmp_path: Path):

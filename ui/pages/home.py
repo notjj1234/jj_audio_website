@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 import time
 from pathlib import Path
@@ -10,7 +11,23 @@ from pathlib import Path
 import streamlit as st
 
 from ui.common import DATA_DIR, edition_product_name, list_recent_runs
-from ui.setlists import add_song, create_setlist, load_setlists, save_setlists
+from ui.library_song import (
+    TRASH_DIR_NAME,
+    delete_library_song,
+    list_trashed_songs,
+    locale_text,
+    recover_library_song,
+    trashed_row,
+)
+from ui.setlists import (
+    add_song,
+    create_setlist,
+    delete_setlist,
+    load_setlists,
+    remove_song,
+    rename_setlist,
+    save_setlists,
+)
 from ui.design_tokens import ui_v2_enabled
 from ui.isolate_jobs import list_jobs, merge_library_runs
 from ui.isolate_state import (
@@ -79,20 +96,58 @@ def relative_age(created_at: object, *, now: float | None = None) -> str:
     return "1 year ago" if years <= 1 else f"{years} years ago"
 
 
+def library_row_is_present(row: dict) -> bool:
+    """True when the mix folder and a wav are still in the library.
+
+    delete_library_song moves the folder into library_trash and leaves the
+    isolate_jobs status in place. That status still names .wav paths, so a
+    suffix check put the mix straight back on Home.
+    """
+    raw = str(row.get("run_dir") or "")
+    if not raw:
+        return False
+    run_dir = Path(raw)
+    if not run_dir.is_dir():
+        return False
+    trash = (DATA_DIR / TRASH_DIR_NAME).resolve()
+    try:
+        run_dir.resolve().relative_to(trash)
+    except (OSError, ValueError):
+        pass
+    else:
+        return False
+    arts = row.get("artifacts") if isinstance(row.get("artifacts"), dict) else {}
+    for path in arts.values():
+        wav = Path(str(path))
+        if wav.suffix.lower() == ".wav" and wav.is_file():
+            return True
+    try:
+        return any(
+            path.is_file() and path.suffix.lower() == ".wav" for path in run_dir.iterdir()
+        )
+    except OSError:
+        return False
+
+
 def library_rows(owner: str | None, *, limit: int = 40) -> list[dict]:
     """Isolate runs that still have a wav, newest first. Same owner rule as Isolate."""
     owned = list_recent_runs("isolate", limit=limit, owner=owner)
     everyone = list_recent_runs("isolate", limit=limit)
     recent = recent_runs_with_owner_fallback(owned, everyone)
     merged = merge_library_runs(recent, list_jobs(limit=limit))
-    usable: list[dict] = []
-    for row in merged:
-        arts = row.get("artifacts") or {}
-        if not isinstance(arts, dict):
-            continue
-        if any(str(path).lower().endswith(".wav") for path in arts.values()):
-            usable.append(row)
-    return usable[:limit]
+    return [row for row in merged if library_row_is_present(row)][:limit]
+
+
+def _share_token(run_dir: str) -> str:
+    if not run_dir:
+        return ""
+    path = Path(run_dir) / "share.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, UnicodeError):
+        return ""
+    token = str(data.get("token") or "") if isinstance(data, dict) else ""
+    return "" if "/" in token or "\\" in token else token
 
 
 def run_label(row: dict) -> str:
@@ -169,6 +224,160 @@ def analysis_line(summary: dict | None) -> str:
     return f"{bpm_text} · {key_text} · {section_text}"
 
 
+def row_analysis_state(summary: dict | None, run_dir: str, status: dict | None) -> str:
+    """``ready``, ``analysing``, ``waiting`` (locked), or ``failed`` / ``idle`` (open)."""
+    if summary:
+        return "ready"
+    data = status if isinstance(status, dict) else {}
+    state = str(data.get("state") or "")
+    skipped = {str(item) for item in (data.get("skipped") or []) if item}
+    if run_dir and run_dir in skipped:
+        return "failed"
+    if state == "analysing" and run_dir and run_dir == str(data.get("run_dir") or ""):
+        return "analysing"
+    if state in {"analysing", "waiting"}:
+        return "waiting"
+    return "idle"
+
+
+def row_analysis_subtitle(summary: dict | None, run_dir: str, status: dict | None) -> str:
+    """Home row line, including the background key-and-chord pass."""
+    state = row_analysis_state(summary, run_dir, status)
+    if state == "ready":
+        return analysis_line(summary)
+    if state == "analysing":
+        return "Getting key and chords…"
+    if state == "waiting":
+        return "Waiting for key and chords"
+    if state == "failed":
+        return "Could not get key and chords. Use the row menu to retry."
+    return analysis_line(None)
+
+
+def analysis_status_notice(status: dict | None) -> str:
+    """One sentence for the on-screen progress line, or empty when nothing is queued."""
+    if not isinstance(status, dict):
+        return ""
+    state = str(status.get("state") or "")
+    if state not in {"analysing", "waiting"}:
+        return ""
+    try:
+        remaining = int(status.get("remaining") or 0)
+    except (TypeError, ValueError):
+        remaining = 0
+    if remaining <= 0:
+        return ""
+    title = " ".join(str(status.get("title") or "").split()) or "a saved mix"
+    if state == "waiting":
+        tail = f" {remaining} still waiting." if remaining else ""
+        return f"Key and chords will continue after the current separation.{tail}"
+    extra = remaining - 1
+    tail = f" {extra} more still waiting." if extra > 0 else ""
+    return f"Getting key and chords for {title}.{tail}"
+
+
+def analysis_status_markup(notice: str) -> str:
+    """Visible progress bar. The sentence is escaped plain text."""
+    import html as html_lib
+
+    safe = html_lib.escape(notice)
+    return f"""
+<style>
+  .att-analysis-status {{
+    box-sizing: border-box;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    width: 100%;
+    margin: 0 0 12px 0;
+    padding: 10px 12px;
+    border: 1px solid #F6AD49;
+    border-radius: 10px;
+    background: #192542;
+    color: #F4F7FB;
+    font-size: 0.95rem;
+    line-height: 1.4;
+  }}
+  .att-analysis-dot {{
+    width: 10px;
+    height: 10px;
+    margin-top: 0.35rem;
+    border-radius: 99px;
+    background: #F6AD49;
+    flex: none;
+    animation: att-analysis-pulse 1.2s ease-in-out infinite;
+  }}
+  @keyframes att-analysis-pulse {{
+    0%, 100% {{ opacity: 1; }}
+    50% {{ opacity: 0.35; }}
+  }}
+  @media (prefers-reduced-motion: reduce) {{
+    .att-analysis-dot {{ animation: none; }}
+  }}
+</style>
+<div class="att-analysis-status" role="status" aria-live="polite">
+  <span class="att-analysis-dot" aria-hidden="true"></span>
+  <span>{safe}</span>
+</div>
+"""
+
+
+def analysis_status_token(status: dict | None) -> str:
+    if not isinstance(status, dict):
+        return "idle"
+    return "|".join(
+        str(status.get(key) or "")
+        for key in ("state", "run_dir", "remaining", "finished_run")
+    )
+
+
+def analysis_status_should_refresh_page(page: str, token: str, previous: str | None) -> bool:
+    """Home reruns when progress changes. The mixer page must stay put."""
+    if page not in {"", "home"}:
+        return False
+    idle = token in {"", "idle", "|||"}
+    if previous is None:
+        return not idle
+    return token != previous
+
+
+def next_auto_analysis(
+    rows: list[dict],
+    *,
+    busy: bool,
+    skipped: set[str],
+    active_run: str | None = None,
+) -> str | None:
+    """One finished run that still has no analysis summary, or None.
+
+    ``active_run`` is the song open in the mixer. Other unfinished songs go
+    first. It is chosen only when it is the last unfinished song.
+    """
+    if busy:
+        return None
+    pending: list[str] = []
+    for row in rows:
+        run_dir = str(row.get("run_dir") or "")
+        if not run_dir or run_dir in skipped:
+            continue
+        if analysis_summary(row):
+            continue
+        pending.append(run_dir)
+    if not pending:
+        return None
+    current = str(active_run or "")
+    if current and current in pending and len(pending) > 1:
+        pending = [item for item in pending if item != current]
+    return pending[0]
+
+
+def auto_analysis_should_skip(ok: bool, message: str) -> bool:
+    """A no-stem or failed analysis stays skipped. A busy worker does not."""
+    if ok:
+        return False
+    return "separation" not in str(message).casefold()
+
+
 def open_saved_run(run_dir: str) -> None:
     """Open one local separation in the Isolate mixer."""
     st.session_state.pop(ISOLATE_SKIP_REHYDRATE_KEY, None)
@@ -223,6 +432,9 @@ def build_home_props(
     flash: tuple[str, bool] | None = None,
     loading: bool = False,
     setlists: list[dict] | None = None,
+    locale: str = "en",
+    trashed: list[dict] | None = None,
+    analysis_status: dict | None = None,
 ) -> dict:
     """Browser payload. Paths stay in ``_TOKEN_MAP`` and never in the dict."""
     _TOKEN_MAP.clear()
@@ -240,8 +452,10 @@ def build_home_props(
         public_rows.append(
             {
                 "token": token,
+                "share": _share_token(run_dir),
                 "title": run_label(row),
-                "subtitle": analysis_line(summary),
+                "subtitle": row_analysis_subtitle(summary, run_dir, analysis_status),
+                "state": row_analysis_state(summary, run_dir, analysis_status),
                 "age": relative_age(row.get("created_at")),
                 "action": "practice" if summary else "analyse",
             }
@@ -257,6 +471,27 @@ def build_home_props(
             continue
         tokens = [tokens_by_path[str(song)] for song in songs if str(song) in tokens_by_path]
         public_setlists.append({"id": ident, "name": name, "tokens": tokens})
+    public_trashed: list[dict[str, str]] = []
+    for row in trashed or []:
+        run_dir = str(row.get("run_dir") or "")
+        token = ""
+        if run_dir:
+            token = hashlib.sha256(f"{issued}\n{run_dir}".encode()).hexdigest()[:16]
+            _TOKEN_MAP[token] = run_dir
+        public_trashed.append(
+            {
+                "token": token,
+                "title": str(row.get("title") or "Song"),
+                "subtitle": "",
+                "age": "",
+                "action": "recover",
+            }
+        )
+    chosen = locale if locale in {"en", "ko"} else "en"
+    strings = {
+        key: locale_text(chosen, key)
+        for key in ("search", "title", "all", "practice", "analyse", "deleted", "delete", "recover")
+    }
     flash_payload = None
     if isinstance(flash, tuple) and len(flash) == 2:
         flash_payload = {"message": str(flash[0]), "error": bool(flash[1])}
@@ -266,9 +501,12 @@ def build_home_props(
         "cards": [dict(card) for card in _HOME_CARDS],
         "recents": public_rows[:6],
         "rows": public_rows,
+        "trashed": public_trashed,
         "setlists": public_setlists,
         "loading": bool(loading),
         "flash": flash_payload,
+        "locale": chosen,
+        "strings": strings,
     }
 
 
@@ -286,6 +524,58 @@ def active_setlist_id(setlists: list[dict]) -> str:
     if any(str(item.get("id") or "") == active for item in setlists):
         return active
     return ""
+
+
+def song_deletion_blocked(run_dir: str, status: dict | None) -> bool:
+    """The mix currently being analysed cannot be moved while that child is running."""
+    data = status if isinstance(status, dict) else {}
+    return str(data.get("state") or "") == "analysing" and str(data.get("run_dir") or "") == str(
+        run_dir
+    )
+
+
+def apply_library_deletes(
+    token_map: dict[str, str],
+    ident: str,
+    *,
+    data_dir: Path,
+    status: dict | None,
+) -> tuple[int, int]:
+    """Trash each resolved token. Unknown tokens are ignored. Returns (moved, failed)."""
+    moved = 0
+    failed = 0
+    seen: set[str] = set()
+    for raw in str(ident or "").split(","):
+        token = raw.strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        run_dir = token_map.get(token)
+        if not run_dir:
+            continue
+        if song_deletion_blocked(run_dir, status):
+            failed += 1
+            continue
+        if delete_library_song(Path(run_dir), data_dir) is None:
+            failed += 1
+        else:
+            moved += 1
+    return moved, failed
+
+
+def library_delete_message(moved: int, failed: int) -> tuple[str, bool] | None:
+    """Flash text, and whether it is an error. None when nothing was attempted."""
+    if moved and failed:
+        return (f"Deleted {moved}. {failed} could not be deleted.", True)
+    if moved == 1:
+        return ("Deleted 1 mix. You can recover it from Deleted.", False)
+    if moved:
+        return (f"Deleted {moved} mixes. You can recover them from Deleted.", False)
+    if failed == 1:
+        return ("Could not delete 1 mix.", True)
+    if failed:
+        return (f"Could not delete {failed} mixes.", True)
+    return None
 
 
 def _handle_home_event(event: dict, tokens: dict[str, str]) -> None:
@@ -309,6 +599,57 @@ def _handle_home_event(event: dict, tokens: dict[str, str]) -> None:
         if add_song(lists, setlist_id, run_dir):
             save_setlists(_setlists_path(), lists)
         _remember_setlist(setlist_id)
+        st.rerun()
+        return
+    if kind == "remove_from_setlist":
+        setlist_id, sep, token = ident.partition("|")
+        run_dir = tokens.get(token) if sep else ""
+        if setlist_id and run_dir:
+            lists = load_setlists(_setlists_path())
+            if remove_song(lists, setlist_id, run_dir):
+                save_setlists(_setlists_path(), lists)
+            _remember_setlist(setlist_id)
+        st.rerun()
+        return
+    if kind == "rename_setlist":
+        setlist_id, sep, name = ident.partition("|")
+        if sep and setlist_id:
+            lists = load_setlists(_setlists_path())
+            if rename_setlist(lists, setlist_id, name):
+                save_setlists(_setlists_path(), lists)
+            _remember_setlist(setlist_id)
+        st.rerun()
+        return
+    if kind == "set_locale":
+        st.session_state["home_v2_locale"] = "ko" if ident == "ko" else "en"
+        st.rerun()
+        return
+    if kind in {"delete_song", "delete_songs"}:
+        from ui.isolate_jobs import read_background_analysis_status
+
+        moved, failed = apply_library_deletes(
+            tokens,
+            ident,
+            data_dir=DATA_DIR,
+            status=read_background_analysis_status(),
+        )
+        message = library_delete_message(moved, failed)
+        if message is not None:
+            _flash(message[0], error=message[1])
+        st.rerun()
+        return
+    if kind == "recover_song":
+        run_dir = tokens.get(ident)
+        if run_dir:
+            recover_library_song(Path(run_dir), DATA_DIR)
+        st.rerun()
+        return
+    if kind == "delete_setlist":
+        lists = load_setlists(_setlists_path())
+        if delete_setlist(lists, ident):
+            save_setlists(_setlists_path(), lists)
+        if str(st.session_state.get("home_v2_setlist") or "") == ident:
+            _remember_setlist("")
         st.rerun()
         return
     if kind == "select_setlist":
@@ -341,6 +682,8 @@ def _main_v2() -> None:
     stored_tokens = dict(st.session_state.get("home_v2_tokens") or {})
     owner = load_persist_isolate_user_id(st.session_state, DATA_DIR / ISOLATE_USER_ID_FILENAME)
     rows = library_rows(owner if isinstance(owner, str) else None)
+    # Automatic analysis lives in the background worker. This pending path is
+    # only the explicit Analyse click, which still shows Home's loading state.
     pending = st.session_state.get("home_v2_pending")
     show_loading = bool(pending) and not st.session_state.get("home_v2_pending_shown")
     flash = None
@@ -348,12 +691,17 @@ def _main_v2() -> None:
         raw_flash = st.session_state.pop("home_flash", None)
         if isinstance(raw_flash, tuple) and len(raw_flash) == 2:
             flash = (str(raw_flash[0]), bool(raw_flash[1]))
+    from ui.isolate_jobs import read_background_analysis_status
+
     props = build_home_props(
         rows,
         product=edition_product_name(),
         flash=flash,
         loading=show_loading,
         setlists=load_setlists(_setlists_path()),
+        locale=str(st.session_state.get("home_v2_locale") or "en"),
+        trashed=[trashed_row(path) for path in list_trashed_songs(DATA_DIR)],
+        analysis_status=read_background_analysis_status(),
     )
     props["activeSetlist"] = active_setlist_id(props["setlists"])
     st.session_state["home_v2_nonce"] = props["nonce"]
@@ -377,11 +725,12 @@ def _main_v2() -> None:
     if isinstance(event, dict) and event.get("nonce") == stored_nonce:
         _handle_home_event(event, stored_tokens)
     if pending and st.session_state.get("home_v2_pending_shown"):
+        run_dir = str(pending)
         st.session_state.pop("home_v2_pending", None)
         st.session_state.pop("home_v2_pending_shown", None)
         from ui.isolate_jobs import analyse_existing_run
 
-        ok, message = analyse_existing_run(str(pending))
+        ok, message = analyse_existing_run(run_dir)
         _flash(
             message,
             error=not ok or str(message).startswith("Analysis ready with warnings"),

@@ -45,16 +45,30 @@ import {
   snapPanToCenter,
 } from "./pan";
 import {
+  advanceChordIndex,
   capoDiagramSymbol,
+  chartTimeSeconds,
   chordAt,
   chordShape,
+  displaySymbol,
+  outputLatencyMs,
+  scrollLeftToCenter,
+  CAPO_PRESETS,
+  chordDifficulty,
+  formatBassTab,
+  listenCents,
   replaceChordSymbol,
+  replaceLyricLine,
+  replaceMeasureText,
+  replaceSectionLabel,
+  spellChordSymbol,
   clampLoop,
   formatChordSymbol,
   lyricLineAt,
   measureAt,
   sectionAt,
   type AnalysisData,
+  type ChordLevel,
   type Section,
   type TabData,
 } from "./analysis";
@@ -63,6 +77,12 @@ let practiceSheetOpen: boolean | null = null;
 const chordSymbolEdits = new Map<number, string>();
 let chordEditKey = "";
 let capoFret = 0;
+let chordLevel: ChordLevel = "chart";
+let chordFollowIndex = 0;
+let chordActiveChip: HTMLElement | null = null;
+let chordUserScrollAt = 0;
+let chordProgrammaticScroll = false;
+let lastSidebarChord = "";
 
 function adoptAnalysis(next: AnalysisData | null): AnalysisData | null {
   const key = (next?.chords ?? []).map((chord) => String(chord.start)).join(",");
@@ -70,6 +90,8 @@ function adoptAnalysis(next: AnalysisData | null): AnalysisData | null {
     chordEditKey = key;
     chordSymbolEdits.clear();
     capoFret = 0;
+    chordFollowIndex = 0;
+    chordActiveChip = null;
   }
   if (next?.chords) {
     for (const [index, symbol] of chordSymbolEdits) {
@@ -78,6 +100,33 @@ function adoptAnalysis(next: AnalysisData | null): AnalysisData | null {
     }
   }
   return next;
+}
+
+const MIXER_MENUS: ReadonlyArray<readonly [string, string]> = [
+  ["practice-speed-popover", "btn-speed-key"],
+  ["mix-menu", "btn-mix"],
+];
+
+function dismissMixerMenus(target: Node | null): void {
+  for (const [panelId, buttonId] of MIXER_MENUS) {
+    const panel = document.getElementById(panelId);
+    const button = document.getElementById(buttonId);
+    if (!panel || !button || panel.hidden) continue;
+    if (target && (panel.contains(target) || button.contains(target))) continue;
+    panel.hidden = true;
+    button.setAttribute("aria-expanded", "false");
+  }
+  syncMixerMenuBackdrop();
+}
+
+function syncMixerMenuBackdrop(): void {
+  const backdrop = document.getElementById("mixer-menu-backdrop");
+  if (!backdrop) return;
+  const open = MIXER_MENUS.some(([panelId]) => {
+    const panel = document.getElementById(panelId);
+    return Boolean(panel && !panel.hidden);
+  });
+  backdrop.hidden = !open;
 }
 
 function onSpeedPopoverEscape(event: KeyboardEvent): void {
@@ -90,15 +139,16 @@ function onSpeedPopoverEscape(event: KeyboardEvent): void {
   const mixOpen = Boolean(mix && mixButton && !mix.hidden);
   if (!speedOpen && !mixOpen) return;
   event.preventDefault();
-  if (speedOpen && popover && button) {
-    popover.hidden = true;
-    button.setAttribute("aria-expanded", "false");
-  }
-  if (mixOpen && mix && mixButton) {
-    mix.hidden = true;
-    mixButton.setAttribute("aria-expanded", "false");
-  }
+  dismissMixerMenus(null);
   (mixOpen ? mixButton : button)?.focus();
+}
+
+function onMixerMenuPointerDown(event: PointerEvent): void {
+  dismissMixerMenus(event.target as Node | null);
+}
+
+function onMixerMenuWindowBlur(): void {
+  dismissMixerMenus(null);
 }
 
 const DB_MIN = -25;
@@ -216,11 +266,15 @@ class StemMixerEngine {
   private sources = new Map<string, AudioBufferSourceNode>();
   private masterGain: GainNode | null = null;
   private limiter: DynamicsCompressorNode | null = null;
+  private lowShelf: BiquadFilterNode | null = null;
+  private highShelf: BiquadFilterNode | null = null;
+  private stemTrims: Record<string, { start: number; end: number }> = {};
   /** One shared SoundTouch on the master bus — stems stay phase-aligned, lower CPU. */
   private soundTouch: SoundTouchNode | null = null;
   private soundTouchFailed = false;
   private practiceRate = PRACTICE_RATE_DEFAULT;
   private practiceSemitones = PRACTICE_KEY_DEFAULT;
+  private listenCents = 0;
   private streamDest: MediaStreamAudioDestinationNode | null = null;
   private outputEl: HTMLAudioElement | null = null;
   private stemIds: string[] = [];
@@ -297,6 +351,10 @@ class StemMixerEngine {
 
   isKeepPlaying(): boolean {
     return this.keepPlaying;
+  }
+
+  chartLatencyMs(userOffsetMs = 0): number {
+    return outputLatencyMs(this.ctx, userOffsetMs);
   }
 
   currentTime(): number {
@@ -474,6 +532,30 @@ class StemMixerEngine {
     return { rate: this.practiceRate, semitones: this.practiceSemitones };
   }
 
+  /** Listen-only pitch. Export still uses the Key slider. */
+  setListenHertz(hz: number | null): void {
+    this.listenCents = hz == null ? 0 : listenCents(hz);
+    this.applyPracticeToGraph();
+  }
+
+  /** Listen-only shelves. They do not change the saved mix. */
+  setShelves(lowDb: number, highDb: number): void {
+    if (this.lowShelf) this.lowShelf.gain.value = lowDb;
+    if (this.highShelf) this.highShelf.gain.value = highDb;
+  }
+
+  setStemTrims(trims: Record<string, { start?: number; end?: number }> | null | undefined): void {
+    this.stemTrims = {};
+    if (!trims) return;
+    for (const [id, value] of Object.entries(trims)) {
+      const start = Number(value?.start);
+      const end = Number(value?.end);
+      if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+        this.stemTrims[id] = { start, end };
+      }
+    }
+  }
+
   isPracticeAvailable(): boolean {
     return this.soundTouch !== null && !this.soundTouchFailed;
   }
@@ -494,6 +576,8 @@ class StemMixerEngine {
       this.teardownSoundTouch();
       this.masterGain = null;
       this.limiter = null;
+      this.lowShelf = null;
+      this.highShelf = null;
     }
     this.ensureMasterBus();
     this.bindContextState();
@@ -532,6 +616,14 @@ class StemMixerEngine {
     this.masterGain = this.ctx.createGain();
     this.masterGain.gain.value = 1;
     this.limiter = this.ctx.createDynamicsCompressor();
+    this.lowShelf = this.ctx.createBiquadFilter();
+    this.lowShelf.type = "lowshelf";
+    this.lowShelf.frequency.value = 200;
+    this.lowShelf.gain.value = 0;
+    this.highShelf = this.ctx.createBiquadFilter();
+    this.highShelf.type = "highshelf";
+    this.highShelf.frequency.value = 4000;
+    this.highShelf.gain.value = 0;
     // Soft ceiling near −1 dBFS true-peak proxy (matches mixer.py TRUE_PEAK_CEILING).
     this.limiter.threshold.value = -1;
     this.limiter.knee.value = 0;
@@ -539,12 +631,14 @@ class StemMixerEngine {
     this.limiter.attack.value = 0.003;
     this.limiter.release.value = 0.1;
     this.masterGain.connect(this.limiter);
+    this.limiter.connect(this.lowShelf);
+    this.lowShelf.connect(this.highShelf);
     if (typeof this.ctx.createMediaStreamDestination === "function") {
       this.streamDest = this.ctx.createMediaStreamDestination();
-      this.limiter.connect(this.streamDest);
+      this.highShelf.connect(this.streamDest);
       this.ensureOutputElement();
     } else {
-      this.limiter.connect(this.ctx.destination);
+      this.highShelf.connect(this.ctx.destination);
     }
   }
 
@@ -599,7 +693,7 @@ class StemMixerEngine {
     if (this.soundTouch) {
       this.soundTouch.playbackRate.value = rate;
       this.soundTouch.pitch.value = 1;
-      this.soundTouch.pitchSemitones.value = semis;
+      this.soundTouch.pitchSemitones.value = semis + this.listenCents / 100;
     }
     for (const src of this.sources.values()) {
       try {
@@ -768,6 +862,8 @@ class StemMixerEngine {
     this.soundTouchFailed = false;
     this.masterGain = null;
     this.limiter = null;
+    this.lowShelf = null;
+    this.highShelf = null;
     this.streamDest = null;
     const old = this.ctx;
     this.ctx = null;
@@ -1033,7 +1129,21 @@ class StemMixerEngine {
         src.loopEnd = this.loopEnd!;
       }
       src.connect(gain);
-      src.start(startAt, offset);
+      const trim = this.stemTrims[id];
+      if (trim) {
+        const playOffset = Math.max(offset, trim.start);
+        if (playOffset >= trim.end || playOffset >= buf.duration) {
+          try {
+            src.disconnect();
+          } catch {
+            /* */
+          }
+          continue;
+        }
+        src.start(startAt, playOffset, trim.end - playOffset);
+      } else {
+        src.start(startAt, offset);
+      }
       src.onended = () => {
         /* individual stem end — transport ends when timeline hits duration */
       };
@@ -2278,6 +2388,7 @@ function paintPan(el: HTMLInputElement, pan: number): void {
 function applyStateGains(): void {
   engine.applyGains(effectiveGains(stemInfos.map((s) => s.id), state));
   engine.applyPans(state.pan);
+  paintStemMeters(engine.currentTime(), engine.getDuration(), engine.isPlaying());
 }
 
 function formatTime(sec: number): string {
@@ -2534,6 +2645,50 @@ function activeSectionAt(t: number): Section | null {
   return sectionAt(analysisData?.sections, t);
 }
 
+function sidebarChordPayload(t: number): { symbol: string; diagram: string } {
+  const chords = analysisData?.chords;
+  let chord = chordAt(chords, t);
+  if (!chord && chords && chords.length > 0) {
+    let best: (typeof chords)[number] | null = null;
+    for (const item of chords) {
+      const start = Number(item.start);
+      if (Number.isFinite(start) && start <= t && (best === null || start >= Number(best.start))) {
+        best = item;
+      }
+    }
+    chord = best ?? chords[0];
+  }
+  if (!chord) return { symbol: "—", diagram: "" };
+  const symbol = formatChordSymbol(chord.symbol);
+  const raw = chordDiagramSvg(capoDiagramSymbol(chord.symbol, capoFret)).trim();
+  const diagram = raw.startsWith("<svg") && raw.endsWith("</svg>") ? raw : "";
+  return { symbol, diagram };
+}
+
+function postSidebarChord(t: number): void {
+  const payload = sidebarChordPayload(t);
+  if (!payload.symbol || payload.symbol === "—") return;
+  const key = `${payload.symbol}\n${payload.diagram}`;
+  if (key === lastSidebarChord) return;
+  lastSidebarChord = key;
+  const message = {
+    source: "att-sidebar-chord",
+    symbol: payload.symbol,
+    diagram: payload.diagram,
+  };
+  try {
+    localStorage.setItem("att-sidebar-chord", JSON.stringify(message));
+  } catch {
+    /* Private mode still gets the postMessage below. */
+  }
+  const target = window.top ?? window.parent;
+  try {
+    target.postMessage(message, "*");
+  } catch {
+    /* The top frame is gone. */
+  }
+}
+
 function seekPractice(t: number): void {
   const target = Math.max(0, Number(t) || 0);
   void engine.seek(target).then(() => {
@@ -2617,9 +2772,20 @@ function chordDiagramSvg(symbol: string): string {
   return parts.join("");
 }
 
+let spelling: "sharp" | "flat" = "sharp";
+let listenA432 = false;
+
 function renderPracticePanel(): void {
   const body = document.getElementById("practice-body");
   if (!body) return;
+  const active = document.activeElement;
+  if (
+    active instanceof HTMLElement &&
+    body.contains(active) &&
+    (active.tagName === "INPUT" || active.tagName === "TEXTAREA")
+  ) {
+    return;
+  }
   const tabs = availablePracticeTabs();
   const buttons = document.querySelectorAll<HTMLButtonElement>(
     "[data-practice-tab]"
@@ -2654,7 +2820,8 @@ function renderPracticePanel(): void {
         .map(
           (chord, index) =>
             `<div class="chord-chip" data-chord-index="${index}">` +
-            `<input class="chord-chip-symbol" data-chord-index="${index}" value="${escapeHtml(formatChordSymbol(chord.symbol))}" aria-label="Chord symbol" />` +
+            `<input class="chord-chip-symbol" data-chord-index="${index}" value="${escapeHtml(spellChordSymbol(displaySymbol(chord, chordLevel), spelling))}" aria-label="Chord symbol" />` +
+            `<span class="chord-difficulty">${escapeHtml(chordDifficulty(chord.symbol))}</span>` +
             `<button type="button" class="chord-chip-time" data-seek="${chord.start}">${readableTime(chord.start)}</button>` +
             `</div>`
         )
@@ -2669,7 +2836,23 @@ function renderPracticePanel(): void {
         '<select id="chord-capo" aria-label="Capo fret">' +
         '<option value="0">No capo</option>' +
         Array.from({ length: 11 }, (_, index) => `<option value="${index + 1}">Capo ${index + 1}</option>`).join("") +
-        "</select></label></div>" +
+        "</select></label>" +
+        `<div class="capo-presets" role="group" aria-label="Capo presets">` +
+        CAPO_PRESETS.map(
+          (preset) =>
+            `<button type="button" class="ghost practice-small" data-capo-preset="${preset.fret}">${preset.label}</button>`
+        ).join("") +
+        `</div>` +
+        `<button type="button" class="ghost practice-small" id="btn-spelling" aria-pressed="${spelling === "flat" ? "true" : "false"}">` +
+        `${spelling === "flat" ? "Flats" : "Sharps"}</button>` +
+        `<label class="capo-label"><span class="visually-hidden">Chord detail</span>` +
+        `<select id="chord-level" aria-label="Chord detail">` +
+        `<option value="simple"${chordLevel === "simple" ? " selected" : ""}>Simple</option>` +
+        `<option value="medium"${chordLevel === "medium" ? " selected" : ""}>Medium</option>` +
+        `<option value="chart"${chordLevel === "chart" ? " selected" : ""}>Chart</option>` +
+        `</select></label>` +
+        `<button type="button" class="ghost practice-small" id="chord-follow">Follow</button>` +
+        "</div>" +
         "</div>" +
         `<div class="chord-strip" id="chord-strip">${chips}</div>` +
         (draftChords
@@ -2684,8 +2867,8 @@ function renderPracticePanel(): void {
               `<div class="section-row" data-section-index="${index}">` +
               `<button type="button" class="section-seek" data-seek="${section.start}">` +
               `<span class="section-time">${readableTime(section.start)}</span>` +
-              `<span class="section-label">${escapeHtml(section.label)}</span>` +
               `</button>` +
+              `<input class="section-label" data-section-index="${index}" value="${escapeHtml(section.label)}" aria-label="Section name" />` +
               `<button type="button" class="ghost practice-small section-loop" data-loop-index="${index}">Loop</button>` +
               `</div>`
           )
@@ -2710,15 +2893,32 @@ function renderPracticePanel(): void {
                   )
                   .join(separator)
               : escapeHtml(line.text);
-            return `<button type="button" class="lyric-line" data-line-index="${index}" data-seek="${line.start}">${words}</button>`;
+            return `<div class="lyric-line-row"><button type="button" class="lyric-line" data-line-index="${index}" data-seek="${line.start}">${words}</button>` +
+              `<input class="lyric-edit" data-lyric-index="${index}" value="${escapeHtml(line.text)}" aria-label="Lyric line" /></div>`;
           })
           .join("")}</div>`
       : '<p class="practice-empty">No lyrics found (instrumental, or the lyrics model is unavailable).</p>';
   } else {
+    const bassPitches = (tabData as { bassPitches?: number[] } | null)?.bassPitches;
+    const bass = Array.isArray(bassPitches) && bassPitches.length ? formatBassTab(bassPitches) : "";
     body.innerHTML = measures.length
       ? `<div class="tab-measure-wrap"><div class="tab-measure-label" id="tab-measure-label">Measure</div>` +
         `<pre class="tab-measure" id="tab-measure-now"></pre>` +
-        `<div class="tab-measure-label">Next</div><pre class="tab-measure tab-measure-next" id="tab-measure-next"></pre></div>` +
+        measures
+          .map(
+            (measure, index) =>
+              `<label class="tab-edit-label">Edit ${index + 1}` +
+              `<input class="tab-edit" data-measure-index="${index}" value="${escapeHtml(measure.text)}" aria-label="Tab measure ${index + 1}" />` +
+              `</label>`
+          )
+          .join("") +
+        `<div class="tab-measure-label">Next</div><pre class="tab-measure tab-measure-next" id="tab-measure-next"></pre>` +
+        (bass
+          ? `<div class="tab-measure-label">Bass</div><pre class="tab-measure">${escapeHtml(bass)}</pre>`
+          : Array.isArray(bassPitches)
+            ? `<p class="practice-empty">No bass tab in this run.</p>`
+            : "") +
+        `</div>` +
         (tabData && (tabData as { pdfUrl?: string }).pdfUrl
           ? `<a class="tab-pdf-link" href="${escapeHtml(
               (tabData as { pdfUrl?: string }).pdfUrl!
@@ -2747,11 +2947,14 @@ function renderPracticePanel(): void {
         return;
       }
       chord.symbol = next;
+      chord.simple = "";
+      chord.medium = "";
       chordSymbolEdits.set(index, next);
       input.value = next;
       const diagramEl = document.getElementById("chord-now-diagram");
       if (diagramEl) delete diagramEl.dataset.symbol;
       updatePracticePanelAt(engine.currentTime(), true);
+      postSidebarChord(engine.currentTime());
     };
   });
   const capoSelect = document.getElementById("chord-capo") as HTMLSelectElement | null;
@@ -2762,8 +2965,86 @@ function renderPracticePanel(): void {
       const diagramEl = document.getElementById("chord-now-diagram");
       if (diagramEl) delete diagramEl.dataset.symbol;
       updatePracticePanelAt(engine.currentTime(), true);
+      postSidebarChord(engine.currentTime());
     };
   }
+  body.querySelectorAll<HTMLButtonElement>("[data-capo-preset]").forEach((button) => {
+    button.onclick = () => {
+      capoFret = Math.max(0, Math.min(11, Number(button.dataset.capoPreset) || 0));
+      if (capoSelect) capoSelect.value = String(capoFret);
+      const diagramEl = document.getElementById("chord-now-diagram");
+      if (diagramEl) delete diagramEl.dataset.symbol;
+      updatePracticePanelAt(engine.currentTime(), true);
+      postSidebarChord(engine.currentTime());
+    };
+  });
+  const levelSelect = document.getElementById("chord-level") as HTMLSelectElement | null;
+  if (levelSelect) {
+    levelSelect.value = chordLevel;
+    levelSelect.onchange = () => {
+      const next = levelSelect.value;
+      chordLevel = next === "simple" || next === "medium" ? next : "chart";
+      chordActiveChip = null;
+      renderPracticePanel();
+      updatePracticePanelAt(engine.currentTime(), true);
+    };
+  }
+  const followButton = document.getElementById("chord-follow");
+  if (followButton) {
+    followButton.onclick = () => {
+      chordUserScrollAt = 0;
+      highlightActiveChord(engine.currentTime(), true);
+    };
+  }
+  const chordStrip = document.getElementById("chord-strip");
+  if (chordStrip) {
+    chordStrip.addEventListener("scroll", () => {
+      if (chordProgrammaticScroll) return;
+      chordUserScrollAt = performance.now();
+    });
+  }
+  const spellingButton = document.getElementById("btn-spelling");
+  if (spellingButton) {
+    spellingButton.onclick = () => {
+      spelling = spelling === "flat" ? "sharp" : "flat";
+      renderPracticePanel();
+    };
+  }
+  body.querySelectorAll<HTMLInputElement>("input.section-label").forEach((input) => {
+    input.onkeydown = (event) => event.stopPropagation();
+    input.onchange = () => {
+      const index = Number(input.dataset.sectionIndex);
+      const section = analysisData?.sections?.[index];
+      if (!section) return;
+      section.label = replaceSectionLabel(section.label, input.value);
+      input.value = section.label;
+    };
+  });
+  body.querySelectorAll<HTMLInputElement>("input.lyric-edit").forEach((input) => {
+    input.onkeydown = (event) => event.stopPropagation();
+    input.onchange = () => {
+      const index = Number(input.dataset.lyricIndex);
+      const line = analysisData?.lyrics?.[index];
+      if (!line) return;
+      line.text = replaceLyricLine(line.text, input.value);
+      input.value = line.text;
+    };
+  });
+  body.querySelectorAll<HTMLInputElement>("input.tab-edit").forEach((input) => {
+    input.onkeydown = (event) => event.stopPropagation();
+    input.onchange = () => {
+      const index = Number(input.dataset.measureIndex);
+      const measure = tabData?.measures?.[index];
+      if (!measure) return;
+      const next = replaceMeasureText(measure.text, input.value);
+      if (!next) {
+        input.value = measure.text;
+        return;
+      }
+      measure.text = next;
+      input.value = next;
+    };
+  });
   body.querySelectorAll<HTMLElement>("[data-word-start]").forEach((el) => {
     el.onclick = (event) => {
       // The line button also seeks. A word click is more precise.
@@ -2859,7 +3140,31 @@ function syncCountInControl(): void {
   if (select) select.value = String(countInBars);
 }
 
+function highlightActiveChord(audioTime: number, forceFollow = false): void {
+  if (practicePanelTab !== "chords") return;
+  const chords = analysisData?.chords ?? [];
+  if (chords.length === 0) return;
+  const chartTime = chartTimeSeconds(audioTime, engine.chartLatencyMs());
+  const next = advanceChordIndex(chords, chordFollowIndex, chartTime);
+  const strip = document.getElementById("chord-strip");
+  const chip = strip?.querySelector<HTMLElement>(`[data-chord-index="${next}"]`) ?? null;
+  if (chip !== chordActiveChip) {
+    chordActiveChip?.classList.remove("active");
+    chip?.classList.add("active");
+    chordActiveChip = chip;
+  }
+  chordFollowIndex = next;
+  if (!strip || !chip) return;
+  if (!forceFollow && performance.now() - chordUserScrollAt < 3000) return;
+  const left = scrollLeftToCenter(strip, chip);
+  if (Math.abs(strip.scrollLeft - left) <= 1) return;
+  chordProgrammaticScroll = true;
+  strip.scrollLeft = left;
+  chordProgrammaticScroll = false;
+}
+
 function updatePracticePanelAt(t: number, force = false): void {
+  highlightActiveChord(t);
   const now = performance.now();
   if (!force && now - lastPanelUpdateMs < 96) return;
   lastPanelUpdateMs = now;
@@ -2881,14 +3186,14 @@ function updatePracticePanelAt(t: number, force = false): void {
   }
 
   if (practicePanelTab === "chords") {
-    const chord = chordAt(analysisData?.chords, t);
-    const symbol = chord ? formatChordSymbol(chord.symbol) : "—";
+    const chord = chordAt(analysisData?.chords, chartTimeSeconds(t, engine.chartLatencyMs()));
+    const symbol = chord ? formatChordSymbol(displaySymbol(chord, chordLevel)) : "—";
     const symbolEl = document.getElementById("chord-now-symbol");
     const diagramEl = document.getElementById("chord-now-diagram");
     const sectionEl = document.getElementById("chord-now-section");
     if (symbolEl) symbolEl.textContent = symbol;
     if (diagramEl && chord) {
-      const shapeSymbol = capoDiagramSymbol(chord.symbol, capoFret);
+      const shapeSymbol = capoDiagramSymbol(displaySymbol(chord, chordLevel), capoFret);
       const drawn = `${shapeSymbol}|${capoFret}`;
       if (diagramEl.dataset.symbol !== drawn) {
         diagramEl.dataset.symbol = drawn;
@@ -2901,14 +3206,6 @@ function updatePracticePanelAt(t: number, force = false): void {
     if (sectionEl) {
       sectionEl.textContent = activeSectionAt(t)?.label ?? "—";
     }
-    document.querySelectorAll<HTMLElement>(".chord-chip").forEach((chip) => {
-      const chordIndex = Number(chip.dataset.chordIndex);
-      const event = analysisData?.chords?.[chordIndex];
-      chip.classList.toggle(
-        "active",
-        !!event && t >= event.start && t < event.end
-      );
-    });
   } else if (practicePanelTab === "sections") {
     const current = activeSectionAt(t);
     const currentIndex = current
@@ -3034,7 +3331,11 @@ function applyPracticeArgs(args: {
   const toggle = document.getElementById("loop-toggle") as HTMLInputElement | null;
   if (toggle) toggle.checked = Boolean(engine.getLoopRegion());
   showLoopStatus();
-  if (dataChanged) renderPracticePanel();
+  if (dataChanged) {
+    lastSidebarChord = "";
+    renderPracticePanel();
+  }
+  postSidebarChord(engine.currentTime());
   if (tabData && (tabData as { pdfUrl?: string }).pdfUrl) {
     // The PDF link is rendered by renderPracticePanel; no extra wiring needed.
   }
@@ -3075,6 +3376,7 @@ function renderUI(theme?: Theme): void {
 
   root.innerHTML = `
     <div class="mixer" data-ui="v2" tabindex="-1" style="--text:${textColor};--bg:${bg};--secondary:${secondary};--primary:${primary};--waveform-fill:${primary}">
+      <button type="button" id="mixer-menu-backdrop" aria-label="Close menu" hidden></button>
       <header class="mixer-header">
         <div class="track-title" id="track-title"></div>
         <p class="mixer-status" id="status" aria-live="polite">Ready</p>
@@ -3084,7 +3386,7 @@ function renderUI(theme?: Theme): void {
       </header>
       <div class="mixer-transport">
         <div class="mixer-transport-controls">
-          <button type="button" class="primary" id="btn-playpause" aria-pressed="false">Play</button>
+          <button type="button" class="primary live-play" id="btn-playpause" aria-pressed="false">Play</button>
           <button type="button" class="ghost" id="btn-stop">Stop</button>
           <button type="button" class="ghost" id="btn-restart">Restart</button>
           <span class="mixer-time" id="time" aria-label="Playback time">
@@ -3097,44 +3399,51 @@ function renderUI(theme?: Theme): void {
           <span class="visually-hidden">Seek</span>
           <input type="range" id="seek" class="slider-seek" min="0" max="1000" value="0" step="1" disabled />
         </label>
-        <button type="button" class="ghost" id="btn-practice-sheet" aria-expanded="true" aria-controls="practice-panel">Practice</button>
-        <button type="button" class="ghost" id="btn-mix" aria-expanded="false" aria-controls="mix-menu">Mix</button>
-        <button type="button" class="ghost" id="btn-speed-key" aria-expanded="false" aria-controls="practice-speed-popover">Speed &amp; Key</button>
-      </div>
-      <div class="mixer-master">
-        <div id="mix-menu" hidden>
-          <div class="mixer-presets" role="group" aria-label="Mix presets">
-            <button type="button" class="preset-chip" data-preset="all">All</button>
-            <button type="button" class="preset-chip" data-preset="karaoke">Karaoke</button>
-            <button type="button" class="preset-chip" data-preset="acapella">Acapella</button>
-            <button type="button" class="preset-chip" data-preset="drumsBass">Drums + Bass</button>
+        <div class="mixer-menu-anchor">
+          <button type="button" class="ghost" id="btn-practice-sheet" aria-expanded="true" aria-controls="practice-panel">Practice</button>
+          <button type="button" class="ghost" id="btn-mix" aria-expanded="false" aria-controls="mix-menu">Mix</button>
+          <button type="button" class="ghost" id="btn-speed-key" aria-expanded="false" aria-controls="practice-speed-popover">Speed &amp; Key</button>
+          <div id="mix-menu" hidden>
+            <div class="mixer-presets" role="group" aria-label="Mix presets">
+              <button type="button" class="preset-chip" data-preset="all">All</button>
+              <button type="button" class="preset-chip" data-preset="karaoke">Karaoke</button>
+              <button type="button" class="preset-chip" data-preset="acapella">Acapella</button>
+              <button type="button" class="preset-chip" data-preset="drumsBass">Drums + Bass</button>
+            </div>
+            <button type="button" class="ghost" id="btn-muteall">Mute all</button>
+            <button type="button" class="ghost" id="btn-reset">Reset mix</button>
+            <button type="button" class="ghost" id="btn-clearsolo" hidden>Clear solo</button>
+            <button type="button" class="ghost" id="btn-show-video" hidden>Show video</button>
           </div>
-          <button type="button" class="ghost" id="btn-muteall">Mute all</button>
-          <button type="button" class="ghost" id="btn-reset">Reset mix</button>
-          <button type="button" class="ghost" id="btn-clearsolo" hidden>Clear solo</button>
-          <button type="button" class="ghost" id="btn-show-video" hidden>Show video</button>
+          <div class="mixer-practice" id="practice-speed-popover" role="group" aria-label="Speed and Key" hidden>
+            <div class="practice-heading">Speed &amp; Key</div>
+            <div class="practice-row">
+              <span class="practice-label" id="practice-speed-label">Speed 1.00×</span>
+              <button type="button" class="ghost practice-nudge" id="btn-speed-down" aria-label="Slower">−</button>
+              <input type="range" id="practice-speed" class="slider-speed" min="0.5" max="1.5" step="0.05" value="1" />
+              <button type="button" class="ghost practice-nudge" id="btn-speed-up" aria-label="Faster">+</button>
+            </div>
+            <div class="practice-row">
+              <span class="practice-label" id="practice-key-label">Key 0</span>
+              <button type="button" class="ghost practice-nudge" id="btn-key-down" aria-label="Lower key">−</button>
+              <input type="range" id="practice-key" class="slider-key" min="-6" max="6" step="1" value="0" />
+              <button type="button" class="ghost practice-nudge" id="btn-key-up" aria-label="Raise key">+</button>
+            </div>
+            <button type="button" class="ghost practice-reset" id="btn-practice-reset">Reset</button>
+            <button type="button" class="ghost" id="btn-listen-432" aria-pressed="false">Listen at 432 Hz</button>
+            <label class="practice-label">Low shelf
+              <input type="range" id="tone-low" min="-12" max="12" step="1" value="0" />
+            </label>
+            <label class="practice-label">High shelf
+              <input type="range" id="tone-high" min="-12" max="12" step="1" value="0" />
+            </label>
+            <p class="practice-export-note">
+              Save current mix includes Speed, Key, pan, mute/solo, and master.
+              Save all tracks stays original speed/key.
+            </p>
+            <p class="practice-status" id="practice-status" hidden></p>
+          </div>
         </div>
-      </div>
-      <div class="mixer-practice" id="practice-speed-popover" role="group" aria-label="Speed and Key" hidden>
-        <div class="practice-heading">Speed &amp; Key</div>
-        <div class="practice-row">
-          <span class="practice-label" id="practice-speed-label">Speed 1.00×</span>
-          <button type="button" class="ghost practice-nudge" id="btn-speed-down" aria-label="Slower">−</button>
-          <input type="range" id="practice-speed" class="slider-speed" min="0.5" max="1.5" step="0.05" value="1" />
-          <button type="button" class="ghost practice-nudge" id="btn-speed-up" aria-label="Faster">+</button>
-        </div>
-        <div class="practice-row">
-          <span class="practice-label" id="practice-key-label">Key 0</span>
-          <button type="button" class="ghost practice-nudge" id="btn-key-down" aria-label="Lower key">−</button>
-          <input type="range" id="practice-key" class="slider-key" min="-6" max="6" step="1" value="0" />
-          <button type="button" class="ghost practice-nudge" id="btn-key-up" aria-label="Raise key">+</button>
-        </div>
-        <button type="button" class="ghost practice-reset" id="btn-practice-reset">Reset</button>
-        <p class="practice-export-note">
-          Save current mix includes Speed, Key, pan, mute/solo, and master.
-          Save all tracks stays original speed/key.
-        </p>
-        <p class="practice-status" id="practice-status" hidden></p>
       </div>
       <div class="count-in-status" id="count-in-status" aria-live="polite" hidden></div>
       <div class="mixer-stage">
@@ -3229,6 +3538,8 @@ function renderUI(theme?: Theme): void {
           ? `<div class="stem-preview">${wave}${download}</div>`
           : "";
       // Metronome: keep a short title tooltip only — no body hint clutter.
+      const meterGain = effectiveGains(stemInfos.map((s) => s.id), state)[stem.id] ?? 0;
+      const meterShown = stemMeterLevel(stem.peaks, meterGain, null);
       const nameTitle =
         stem.hint && !liveMetro ? ` title="${escapeHtml(stem.hint)}"` : "";
       const hint =
@@ -3247,6 +3558,7 @@ function renderUI(theme?: Theme): void {
             <strong class="stem-name"${nameTitle}>${escapeHtml(
               inGroup ? stem.shortLabel || stem.label : stem.label
             )}</strong>
+            <span class="stem-meter" style="--level:${meterShown}" role="meter" aria-label="${escapeHtml(stem.label)} level" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(meterShown * 100)}"></span>
             ${hint}
           </div>
           <label class="stem-vol">
@@ -3273,6 +3585,7 @@ function renderUI(theme?: Theme): void {
         : groupHtml(item, index, (stem) => rowHtml(stem, true))
     )
     .join("");
+  paintStemMeters(engine.currentTime(), engine.getDuration(), engine.isPlaying());
   bindGroupToggles(stemsEl);
   updateGroupSummaries();
 
@@ -3533,6 +3846,8 @@ function renderUI(theme?: Theme): void {
       syncRangeFill(seekEl);
     }
     updatePlayheads(t, dur);
+    paintStemMeters(t, dur, playing);
+    postSidebarChord(t);
     updatePracticePanelAt(t);
     if (!hideYoutubeVideo && (ytPlayer || localVideoEl)) {
       syncPictureToStems(playing);
@@ -3675,22 +3990,46 @@ function bindPracticeControls(): void {
       afterSpeedChange();
     });
   };
-  const speedKeyBtn = document.getElementById("btn-speed-key");
-  const speedPopover = document.getElementById("practice-speed-popover");
-  if (speedKeyBtn && speedPopover) {
-    speedKeyBtn.onclick = () => {
-      const opening = speedPopover.hidden;
-      speedPopover.hidden = !opening;
-      speedKeyBtn.setAttribute("aria-expanded", opening ? "true" : "false");
+  const listen432 = document.getElementById("btn-listen-432");
+  if (listen432) {
+    listen432.setAttribute("aria-pressed", listenA432 ? "true" : "false");
+    listen432.onclick = () => {
+      listenA432 = !listenA432;
+      engine.setListenHertz(listenA432 ? 432 : null);
+      listen432.setAttribute("aria-pressed", listenA432 ? "true" : "false");
     };
   }
+  const toneLow = document.getElementById("tone-low") as HTMLInputElement | null;
+  const toneHigh = document.getElementById("tone-high") as HTMLInputElement | null;
+  const applyTone = () => {
+    engine.setShelves(Number(toneLow?.value ?? 0), Number(toneHigh?.value ?? 0));
+  };
+  if (toneLow) toneLow.oninput = applyTone;
+  if (toneHigh) toneHigh.oninput = applyTone;
+  const speedKeyBtn = document.getElementById("btn-speed-key");
+  const speedPopover = document.getElementById("practice-speed-popover");
   const mixBtn = document.getElementById("btn-mix");
   const mixMenu = document.getElementById("mix-menu");
-  if (mixBtn && mixMenu) {
+  if (speedKeyBtn && speedPopover && mixBtn && mixMenu) {
+    speedKeyBtn.onclick = () => {
+      const opening = speedPopover.hidden;
+      if (opening) {
+        mixMenu.hidden = true;
+        mixBtn.setAttribute("aria-expanded", "false");
+      }
+      speedPopover.hidden = !opening;
+      speedKeyBtn.setAttribute("aria-expanded", opening ? "true" : "false");
+      syncMixerMenuBackdrop();
+    };
     mixBtn.onclick = () => {
       const opening = mixMenu.hidden;
+      if (opening) {
+        speedPopover.hidden = true;
+        speedKeyBtn.setAttribute("aria-expanded", "false");
+      }
       mixMenu.hidden = !opening;
       mixBtn.setAttribute("aria-expanded", opening ? "true" : "false");
+      syncMixerMenuBackdrop();
     };
   }
   const sheetBtn = document.getElementById("btn-practice-sheet");
@@ -3710,6 +4049,10 @@ function bindPracticeControls(): void {
   }
   document.removeEventListener("keydown", onSpeedPopoverEscape);
   document.addEventListener("keydown", onSpeedPopoverEscape);
+  document.removeEventListener("pointerdown", onMixerMenuPointerDown, true);
+  document.addEventListener("pointerdown", onMixerMenuPointerDown, true);
+  window.removeEventListener("blur", onMixerMenuWindowBlur);
+  window.addEventListener("blur", onMixerMenuWindowBlur);
   const practiceGroup = document.querySelector(".mixer-practice");
   practiceGroup?.addEventListener("dblclick", (ev) => {
     if ((ev.target as HTMLElement).closest("button, input")) return;
@@ -3929,7 +4272,51 @@ function peakPercentile(peaks: number[], p: number): number {
   return sorted[idx];
 }
 
-/** Display normalize: 98th percentile so one crash doesn't bury the groove. */
+function stemMeterLevel(
+  peaks: number[] | undefined,
+  gain: number,
+  sampleIndex: number | null
+): number {
+  if (!peaks || peaks.length === 0) return 0;
+  if (!Number.isFinite(gain) || gain <= 0) return 0;
+  let amplitude = 0;
+  if (sampleIndex === null) {
+    for (const value of peaks) amplitude = Math.max(amplitude, Math.abs(Number(value) || 0));
+  } else {
+    amplitude = Math.abs(Number(peaks[sampleIndex]) || 0);
+  }
+  return Math.max(0, Math.min(1, amplitude * gain));
+}
+
+function meterSampleIndex(
+  peaksLength: number,
+  t: number,
+  dur: number,
+  playing: boolean
+): number | null {
+  if (!playing || !(dur > 0) || !(peaksLength > 0)) return null;
+  return Math.min(peaksLength - 1, Math.max(0, Math.floor((t / dur) * peaksLength)));
+}
+
+function paintStemMeters(t: number, dur: number, playing: boolean): void {
+  const gains = effectiveGains(
+    stemInfos.map((s) => s.id),
+    state
+  );
+  document.querySelectorAll<HTMLElement>(".stem-row").forEach((row) => {
+    const id = row.dataset.id;
+    if (!id) return;
+    const meter = row.querySelector<HTMLElement>(".stem-meter");
+    if (!meter) return;
+    const stem = stemInfos.find((s) => s.id === id);
+    const peaks = stem?.peaks;
+    const index = meterSampleIndex(peaks?.length ?? 0, t, dur, playing);
+    const level = stemMeterLevel(peaks, gains[id] ?? 0, index);
+    meter.style.setProperty("--level", String(level));
+    meter.setAttribute("aria-valuenow", String(Math.round(level * 100)));
+  });
+}
+
 function waveformNorm(peaks: number[]): number {
   const absMax = Math.max(...peaks, 0.0001);
   const p98 = peakPercentile(peaks, 0.98);
@@ -4317,6 +4704,8 @@ async function onRender(event: Event): Promise<void> {
     countInBars?: number;
     initialRate?: number;
     initialSemitones?: number;
+    stemTrims?: Record<string, { start?: number; end?: number }> | null;
+    seekSec?: number | null;
   };
 
   const stems = args.stems ?? [];
@@ -4394,6 +4783,10 @@ async function onRender(event: Event): Promise<void> {
   hideYoutubeVideo = true;
   analysisData = adoptAnalysis(parseAnalysisArg(args.analysis));
   tabData = parseTabArg(args.tab);
+  engine.setStemTrims(args.stemTrims);
+  if (typeof args.seekSec === "number" && Number.isFinite(args.seekSec) && args.seekSec >= 0) {
+    void engine.seek(args.seekSec);
+  }
   renderUI(data.theme);
   applyYoutubeArgs(
     String(args.youtubeVideoId ?? ""),
